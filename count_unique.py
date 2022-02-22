@@ -313,7 +313,7 @@ def train_rnn_nocount_diffs(model, optimizer, n_epochs, device):
         print(f'Progress {pct_done}% trained: \t Loss: {loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}%')
 
 
-def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss='number'):
+def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss):
     print('Linear RNN on unique task...')
     rnn = model.to(device)
     rnn.train()
@@ -844,7 +844,7 @@ def main(config):
     if 'two' in model_version:
         train_two_step_model(model, opt, n_epochs, device, differential, use_loss, model_version)
     elif 'one' in model_version and (use_loss == 'number' or use_loss == 'map'):
-        train_rnn(model, opt, n_epochs, device, model_version)
+        train_rnn(model, opt, n_epochs, device, model_version, use_loss)
 
     # plt.plot(num_acc, label='number')
     # plt.plot(map_acc, label='')
