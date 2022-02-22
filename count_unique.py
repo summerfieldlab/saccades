@@ -324,7 +324,7 @@ def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss='numbe
     n_classes = 7
     # data, target, _, _ = get_data(seq_len, n_classes, device)
     data, target, map_, _, _  = get_data(seq_len, rnn.out_size, rnn.input_size, device)
-    if use_loss == 'map';
+    if use_loss == 'map':
         target = map_
     # verify_dataset(data, target, seq_len)
     numb_losses = np.zeros((n_epochs,))
@@ -843,7 +843,7 @@ def main(config):
     opt = torch.optim.SGD(model.parameters(), lr=lr, momentum=mom, weight_decay=wd)
     if 'two' in model_version:
         train_two_step_model(model, opt, n_epochs, device, differential, use_loss, model_version)
-    elif 'one' in model_version and use_loss == 'number':
+    elif 'one' in model_version and (use_loss == 'number' or use_loss == 'map'):
         train_rnn(model, opt, n_epochs, device, model_version)
 
     # plt.plot(num_acc, label='number')
