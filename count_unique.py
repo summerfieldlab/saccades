@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 from torch.nn.functional import one_hot
-torch.set_num_threads(1)
+torch.set_num_threads(5)
 import math
 import random
 import operator as op
@@ -313,7 +313,7 @@ def train_rnn_nocount_diffs(model, optimizer, n_epochs, device):
         print(f'Progress {pct_done}% trained: \t Loss: {loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}%')
 
 
-def train_rnn(model, optimizer, n_epochs, device, model_version):
+def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss='number'):
     print('Linear RNN on unique task...')
     rnn = model.to(device)
     rnn.train()
@@ -323,7 +323,9 @@ def train_rnn(model, optimizer, n_epochs, device, model_version):
     seq_len = 7
     n_classes = 7
     # data, target, _, _ = get_data(seq_len, n_classes, device)
-    data, target, _, _, _  = get_data(seq_len, rnn.out_size, rnn.input_size, device)
+    data, target, map_, _, _  = get_data(seq_len, rnn.out_size, rnn.input_size, device)
+    if use_loss == 'map';
+        target = map_
     # verify_dataset(data, target, seq_len)
     numb_losses = np.zeros((n_epochs,))
     numb_accs = np.zeros((n_epochs,))
@@ -831,7 +833,10 @@ def main(config):
         else:
             model = TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=True, act=rnn_act)
     elif 'one_step' in model_version:
-        model = RNN(map_size, hidden_size, numb_size, act=rnn_act)
+        if use_loss == 'number':
+            model = RNN(map_size, hidden_size, numb_size, act=rnn_act)
+        elif use_loss == 'map':
+            model = RNN(map_size, hidden_size, map_size, act=rnn_act)
     else:
         print('Model version not implemented.')
         exit()
