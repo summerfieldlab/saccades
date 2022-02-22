@@ -317,15 +317,21 @@ def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss):
     print('Linear RNN on unique task...')
     rnn = model.to(device)
     rnn.train()
-    criterion = nn.CrossEntropyLoss()
-    # criterion = nn.BCEWithLogitsLoss()
+
     batch_size = 64
     seq_len = 7
     n_classes = 7
+    filename = f'results/{model_version}results_mapsz{rnn.input_size}_loss-{use_loss}.npz'
     # data, target, _, _ = get_data(seq_len, n_classes, device)
     data, target, map_, _, _  = get_data(seq_len, rnn.out_size, rnn.input_size, device)
     if use_loss == 'map':
         target = map_
+        positive = (data.sum(axis=1) > 0).sum(axis=0)
+        negative = -positive + data.shape[0]
+        pos_weight = torch.true_divide(negative, positive)
+        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    else:
+        criterion = nn.CrossEntropyLoss()
     # verify_dataset(data, target, seq_len)
     numb_losses = np.zeros((n_epochs,))
     numb_accs = np.zeros((n_epochs,))
@@ -352,6 +358,7 @@ def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss):
             for i in range(seq_len):
                 output, hidden = rnn(inputs[:, i, :], hidden)
             loss = criterion(output, label)
+            label_local = label
             loss.backward()
             optimizer.step()
             hidden.detach_()
@@ -359,17 +366,24 @@ def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss):
             with torch.no_grad():
                 out_local = output
                 # Evaluate performance
-                pred = out_local.argmax(dim=1, keepdim=True)
-                correct += pred.eq(label.view_as(pred)).sum().item()
+                if use_loss == 'map':
+                    sigout = torch.sigmoid(out_local).round()
+                    correct += roc_auc_score(label_local.cpu().numpy().flatten(), sigout.cpu().flatten())
+                else:
+                    pred = out_local.argmax(dim=1, keepdim=True)
+                    correct += pred.eq(label_local.view_as(pred)).sum().item()
                 train_loss += loss.item()
         train_loss /= batch_idx + 1
         numb_losses[ep] = train_loss
-        acc = 100. * (correct / len(dataset))
+        if use_loss == 'map':
+            acc = 100. * (correct / (batch_idx + 1))
+        else:
+            acc = 100. * (correct / len(dataset))
         numb_accs[ep] = acc
         if not ep % 5:
             pct_done = round(100. * (ep / n_epochs))
             print(f'Epoch {ep}, Progress {pct_done}% trained: \t Loss: {train_loss:.6}, Accuracy: {acc:.6}% ({correct}/{len(dataset)})')
-    filename = f'results/{model_version}results_mapsz{rnn.input_size}_loss-number.npz'
+            np.savez(filename, numb_accs=numb_accs, numb_losses=numb_losses)
     np.savez(filename, numb_accs=numb_accs, numb_losses=numb_losses)
 
 def train_two_step_model(model, optimizer, n_epochs, device, differential,
@@ -551,7 +565,8 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential,
                      numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc)
 
     print(f'Final performance: \t Loss (Map/Numb): {map_train_loss:.6}/{train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}%')
-
+    np.savez(filename, numb_accs=numb_accs, map_accs=map_accs,
+             numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc)
 
     return numb_acc, map_acc
 
