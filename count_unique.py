@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 from torch.nn.functional import one_hot
 torch.set_num_threads(5)
+torch.autograd.set_detect_anomaly(True)
 import math
 import random
 import operator as op
@@ -169,7 +170,7 @@ class RNN(nn.Module):
     def forward(self, input, hidden):
         combined = torch.cat((input, hidden), 1)
         hidden = self.i2h(combined)
-        if self.act_fun:
+        if self.act_fun is not None:
             hidden = self.act_fun(hidden)
         output = self.i2o(combined)
         # output = self.softmax(output)
@@ -214,32 +215,128 @@ class linearRNN_hist(nn.Module):
     def initHidden(self, batch_size):
         return torch.zeros(batch_size, self.hidden_size)
 
-class tanhRNN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super(tanhRNN, self).__init__()
-        self.out_size = output_size
-        self.input_size = input_size
+class NumberAsMapSum(nn.Module):
+    def __init__(self, input_size, hidden_size):
+        super().__init__()
         self.hidden_size = hidden_size
-
-        self.i2h = nn.Linear(input_size + hidden_size, hidden_size)
-        self.i2o = nn.Linear(input_size + hidden_size, output_size)
-        # self.softmax = nn.LogSoftmax(dim=1)
+        self.input_size = input_size
+        self.rnn = RNN(input_size, hidden_size, input_size)
 
     def forward(self, input, hidden):
-        combined = torch.cat((input, hidden), 1)
-        hidden = torch.tanh(self.i2h(combined))
-        output = self.i2o(combined)
-        # output = self.softmax(output)
-        return output, hidden
+        map_, hidden = self.rnn(input, hidden)
+        number = torch.sum(torch.sigmoid(map_), axis=1)
+        # import pdb; pdb.set_trace()
+        number_oh = F.one_hot(number.long(), self.input_size)
 
-    def initHidden(self, batch_size):
-        return torch.zeros(batch_size, self.hidden_size)
+        return number, number_oh.float(), hidden, map_
 
+def train_sum_model(model, optimizer, n_epochs, device, model_version, use_loss):
+    print('Training number-as-sum model..')
+    model = model.to(device)
+    model.train()
+    if '-mse' in use_loss:
+        print('Using MSE loss for number objective.')
+        criterion = nn.MSELoss()
+    elif '-ce' in use_loss:
+        print('Using CE loss for number objective.')
+        criterion = nn.CrossEntropyLoss()
+    elif use_loss != 'map':
+        print('Please specify whether to use mse or ce loss for number objective.')
+        exit()
 
+    batch_size = 64
+    seq_len = 7
+    n_classes = 7
+    filename = f'results/number-as-sum_results_mapsz{model.input_size}_loss-{use_loss}.npz'
+    # data, target, _, _ = get_data(seq_len, n_classes, device)
+    data, target, map_, _, _ = get_data(seq_len, n_classes, model.input_size, device)
+    nex = data.shape[0]
+    positive = (data.sum(axis=1) > 0).sum(axis=0)
+    negative = -positive + nex
+    pos_weight = torch.true_divide(negative, positive)
+    # Remove infs
+    to_replace = torch.tensor(nex).float().to(device)
+    pos_weight = torch.where(torch.isinf(pos_weight), to_replace, pos_weight)
+    criterion_map = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
+    # To store learning curves
+    numb_losses = np.zeros((n_epochs,))
+    numb_accs = np.zeros((n_epochs,))
+    map_losses = np.zeros((n_epochs,))
+    map_accs = np.zeros((n_epochs, model.input_size))
+    map_auc = np.zeros((n_epochs,))
 
+    dataset = TensorDataset(data, target, map_)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    for ep in range(n_epochs):
+        m_correct = np.zeros(model.input_size,)
+        n_correct = 0
+        auc = 0
+        train_loss = 0
+        map_train_loss = 0
+        for batch_idx, (inputs, label, map_label) in enumerate(loader):
+            input_dim = inputs.shape[0]
+            hidden = model.rnn.initHidden(input_dim)
+            hidden = hidden.to(device)
+            model.zero_grad()
+            for i in range(seq_len):
+                number, number_oh, hidden, map_pred = model(inputs[:, i, :], hidden)
+            if '-ce' in use_loss:
+                number_loss = criterion(number_oh, label)
+            elif '-mse' in use_loss:
+                number_loss = criterion(number, label.float())
+            map_loss = criterion_map(map_pred, map_label)
+            if 'number' in use_loss:
+                loss = number_loss
+            if 'map' in use_loss:
+                loss = map_loss
+            if 'both' in use_loss:
+                loss = number_loss + map_loss
 
+            loss.backward()
+            optimizer.step()
+            hidden.detach_()
 
+            # Evaluate performance
+            with torch.no_grad():
+                train_loss += loss.item()
+                map_train_loss += map_loss.item()
+                numb_oh_local = number_oh
+                label_local = label
+                map_local = map_pred
+                map_label_local = map_label
+                sigout = torch.sigmoid(map_local).round()
+                m_correct += sum(sigout == map_label_local).cpu().numpy()
+                map_label_flat = map_label_local.cpu().numpy().flatten()
+                auc += roc_auc_score(map_label_flat, sigout.cpu().flatten())
+                pred = numb_oh_local.argmax(dim=1, keepdim=True)
+                n_correct += pred.eq(label_local.view_as(pred)).sum().item()
+
+        train_loss /= batch_idx + 1
+        map_train_loss /= batch_idx + 1
+
+        accs = 100. * (m_correct / len(dataset))
+        map_accs[ep, :] = accs
+        auc /= batch_idx+1
+
+        numb_acc = 100. * (n_correct / len(dataset))
+        numb_accs[ep] = numb_acc
+
+        pct_done = round(100. * (ep / n_epochs))
+        map_losses[ep] = map_train_loss
+        numb_losses[ep] = train_loss
+        map_acc = accs.mean()
+        map_auc[ep] = auc
+
+        if not ep % 10:
+            # print(f'Progress {pct_done}% trained: \t Loss (Map/Numb): {map_loss.item():.6}/{number_loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}% \t Number {numb_acc:.3}% \t Mean Map Acc {accs.mean():.3}%')
+            print(f'Epoch {ep}, Progress {pct_done}% trained: \t Loss (Map/Numb): {map_train_loss:.6}/{train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}% \t Map AUC: {auc:.3}')
+            np.savez(filename, numb_accs=numb_accs, map_accs=map_accs,
+                     numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc)
+
+    print(f'Final performance: \t Loss (Map/Numb): {map_train_loss:.6}/{train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}%')
+    np.savez(filename, numb_accs=numb_accs, map_accs=map_accs,
+             numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc)
 
 def train_rnn_nocount(model, optimizer, n_epochs, device):
     print('Linear RNN...')
@@ -274,6 +371,7 @@ def train_rnn_nocount(model, optimizer, n_epochs, device):
         accs = 100. * (correct / len(dataset))
         pct_done = round(100. * (ep / n_epochs))
         print(f'Progress {pct_done}% trained: \t Loss: {loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}%')
+
 
 def train_rnn_nocount_diffs(model, optimizer, n_epochs, device):
     print('Linear RNN...')
@@ -321,7 +419,8 @@ def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss):
     batch_size = 64
     seq_len = 7
     n_classes = 7
-    filename = f'results/{model_version}results_mapsz{rnn.input_size}_loss-{use_loss}.npz'
+    nonlinearity = 'tanh' if rnn.act_fun is not None else ''
+    filename = f'results/{model_version}_{nonlinearity}results_mapsz{rnn.input_size}_loss-{use_loss}.npz'
     # data, target, _, _ = get_data(seq_len, n_classes, device)
     data, target, map_, _, _  = get_data(seq_len, rnn.out_size, rnn.input_size, device)
     if use_loss == 'map':
@@ -329,6 +428,9 @@ def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss):
         positive = (data.sum(axis=1) > 0).sum(axis=0)
         negative = -positive + data.shape[0]
         pos_weight = torch.true_divide(negative, positive)
+        # Remove infs
+        to_replace = torch.tensor(nex).float().to(device)
+        pos_weight = torch.where(torch.isinf(pos_weight), to_replace, pos_weight)
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     else:
         criterion = nn.CrossEntropyLoss()
@@ -386,17 +488,19 @@ def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss):
             np.savez(filename, numb_accs=numb_accs, numb_losses=numb_losses)
     np.savez(filename, numb_accs=numb_accs, numb_losses=numb_losses)
 
-def train_two_step_model(model, optimizer, n_epochs, device, differential,
-                         use_loss, model_version, control=False):
-    print('Two step model...')
 
+def train_two_step_model(model, optimizer, n_epochs, device, differential, use_loss, model_version, control=False, preglimpsed=None):
+    print('Two step model...')
     rnn = model.rnn
     model.to(device)
 
     # Synthesize the data
     batch_size = 64
     seq_len = 7
-    data, num, map_, map_control, hist = get_data(seq_len, model.out_size, model.map_size, device)
+    data, num, map_, map_control, hist = get_data(seq_len, model.out_size,
+                                                  model.map_size, device,
+                                                  preglimpsed)
+    nex = data.shape[0]
     # with torch.no_grad():
     #     verify_dataset(data, num, seq_len)
 
@@ -406,6 +510,9 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential,
     positive = (data.sum(axis=1) > 0).sum(axis=0)
     negative = -positive + data.shape[0]
     pos_weight = torch.true_divide(negative, positive)
+    # Remove infs
+    to_replace = torch.tensor(nex).float().to(device)
+    pos_weight = torch.where(torch.isinf(pos_weight), to_replace, pos_weight)
     map_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     criterion = nn.CrossEntropyLoss()
     add_number_loss = False
@@ -494,7 +601,6 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential,
 
             else:
                 print('must specify which loss to optimize')
-
             # Gradient clipping
             nn.utils.clip_grad_norm_(model.parameters(), 1)
             # Take a gradient step
@@ -516,7 +622,8 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential,
                 else:
                     sigout = torch.sigmoid(map_local).round()
                     m_correct += sum(sigout == map_label_local).cpu().numpy()
-                    auc += roc_auc_score(map_label_local.cpu().numpy().flatten(), sigout.cpu().flatten())
+                    map_label_flat = map_label_local.cpu().numpy().flatten()
+                    auc += roc_auc_score(map_label_flat, sigout.cpu().flatten())
                 pred = numb_local.argmax(dim=1, keepdim=True)
                 n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
 
@@ -615,7 +722,7 @@ def verify_dataset(data=None, target=None, seq_len=None, map_size=900):
     plt.savefig('toy_dist.png')
     plt.close()
 
-def get_data(seq_len=7, n_classes=7, map_size=1056, device=None):
+def get_data(seq_len=7, n_classes=7, map_size=1056, device=None, preglimpsed=None):
     """Synthesize data for unique task.
 
     Args:
@@ -652,7 +759,31 @@ def get_data(seq_len=7, n_classes=7, map_size=1056, device=None):
     target_hist = torch.zeros((n_rows, map_size), dtype=torch.long, device=device)
     locations = np.arange(0, map_size)
 
-    min([ncr(map_size, n) for n in classes])
+    if preglimpsed is not None:
+        with torch.no_grad():
+            print(f'Loading presaved dataset {preglimpsed}...')
+            data = np.load(f'preglimpsed_location_sequences/all_data_{preglimpsed}.npy')
+            nex, sq, fl = data.shape
+            datars = data.reshape(nex, sq, int(np.sqrt(fl)), int(np.sqrt(fl)))
+            data = datars[:, :, 1:-1, 1:-1]
+            new_fl = data.shape[-1]**2
+            data = data.reshape(nex, sq, -1)
+            print(data.shape)
+            target = np.load(f'preglimpsed_location_sequences/all_target_{preglimpsed}.npy')
+            target = torch.from_numpy(target).long()
+            target = target.to(device)
+            target_map = (data.sum(axis=1) > 0) * 1
+            target_map = torch.from_numpy(target_map).float()
+            target_map = target_map.to(device)
+            data = torch.from_numpy(data)
+            data = data.to(device)
+
+
+
+
+        return data, target, target_map, target_control, target_hist
+
+    # min([ncr(map_size, n) for n in classes])
 
     i = 0
     for n_unique in classes:
@@ -769,13 +900,12 @@ def test_transfer(model):
     acc = 100. * (correct / len(dataset))
     print(f'Transfer performance: \t Loss: {test_loss:.6}, Accuracy: {acc:.6}% ({correct}/{len(dataset)})')
 
-
-
 def main(config):
     map_size = config.map_size
     model_version = config.model_version
     use_loss = config.use_loss
     rnn_act = config.rnn_act
+    preglimpsed = config.preglimpsed
     lr = 0.01
     mom = 0.9
     wd = 0.0
@@ -852,14 +982,19 @@ def main(config):
             model = RNN(map_size, hidden_size, numb_size, act=rnn_act)
         elif use_loss == 'map':
             model = RNN(map_size, hidden_size, map_size, act=rnn_act)
+    elif model_version == 'number_as_sum':
+        model = NumberAsMapSum(map_size, hidden_size)
     else:
         print('Model version not implemented.')
         exit()
     opt = torch.optim.SGD(model.parameters(), lr=lr, momentum=mom, weight_decay=wd)
     if 'two' in model_version:
-        train_two_step_model(model, opt, n_epochs, device, differential, use_loss, model_version)
+        train_two_step_model(model, opt, n_epochs, device, differential,
+                             use_loss, model_version, preglimpsed=preglimpsed)
     elif 'one' in model_version and (use_loss == 'number' or use_loss == 'map'):
         train_rnn(model, opt, n_epochs, device, model_version, use_loss)
+    elif model_version == 'number_as_sum':
+        train_sum_model(model, opt, n_epochs, device, model_version, use_loss)
 
     # plt.plot(num_acc, label='number')
     # plt.plot(map_acc, label='')
@@ -882,6 +1017,7 @@ def get_config():
     parser.add_argument('--map_size', type=int, default=15)
     parser.add_argument('--rnn_act', type=str, default=None)
     parser.add_argument('--no_cuda', action='store_true', default=False)
+    parser.add_argument('--preglimpsed', type=str, default=None)
     config = parser.parse_args()
     print(config)
     return config
