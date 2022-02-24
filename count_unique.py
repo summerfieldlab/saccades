@@ -226,23 +226,17 @@ class NumberAsMapSum(nn.Module):
         map_, hidden = self.rnn(input, hidden)
         number = torch.sum(torch.sigmoid(map_), axis=1)
         # import pdb; pdb.set_trace()
-        number_oh = F.one_hot(number.long(), self.input_size)
+        # number_oh = F.one_hot(torch.relu(number).long(), self.input_size)
 
-        return number, number_oh.float(), hidden, map_
+        return number, hidden, map_
 
 def train_sum_model(model, optimizer, n_epochs, device, model_version, use_loss):
     print('Training number-as-sum model..')
     model = model.to(device)
     model.train()
-    if '-mse' in use_loss:
-        print('Using MSE loss for number objective.')
-        criterion = nn.MSELoss()
-    elif '-ce' in use_loss:
-        print('Using CE loss for number objective.')
-        criterion = nn.CrossEntropyLoss()
-    elif use_loss != 'map':
-        print('Please specify whether to use mse or ce loss for number objective.')
-        exit()
+
+    print('Using MSE loss for number objective.')
+    criterion = nn.MSELoss()
 
     batch_size = 64
     seq_len = 7
@@ -280,11 +274,8 @@ def train_sum_model(model, optimizer, n_epochs, device, model_version, use_loss)
             hidden = hidden.to(device)
             model.zero_grad()
             for i in range(seq_len):
-                number, number_oh, hidden, map_pred = model(inputs[:, i, :], hidden)
-            if '-ce' in use_loss:
-                number_loss = criterion(number_oh, label)
-            elif '-mse' in use_loss:
-                number_loss = criterion(number, label.float())
+                number, hidden, map_pred = model(inputs[:, i, :], hidden)
+            number_loss = criterion(number, label.float())
             map_loss = criterion_map(map_pred, map_label)
             if 'number' in use_loss:
                 loss = number_loss
@@ -301,7 +292,7 @@ def train_sum_model(model, optimizer, n_epochs, device, model_version, use_loss)
             with torch.no_grad():
                 train_loss += loss.item()
                 map_train_loss += map_loss.item()
-                numb_oh_local = number_oh
+                numb_local = number.round()
                 label_local = label
                 map_local = map_pred
                 map_label_local = map_label
@@ -309,8 +300,7 @@ def train_sum_model(model, optimizer, n_epochs, device, model_version, use_loss)
                 m_correct += sum(sigout == map_label_local).cpu().numpy()
                 map_label_flat = map_label_local.cpu().numpy().flatten()
                 auc += roc_auc_score(map_label_flat, sigout.cpu().flatten())
-                pred = numb_oh_local.argmax(dim=1, keepdim=True)
-                n_correct += pred.eq(label_local.view_as(pred)).sum().item()
+                n_correct += numb_local.eq(label_local.view_as(numb_local)).sum().item()
 
         train_loss /= batch_idx + 1
         map_train_loss /= batch_idx + 1
