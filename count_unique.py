@@ -229,7 +229,6 @@ class NumberAsMapSum(nn.Module):
     def forward(self, input, hidden):
         map_, hidden = self.rnn(input, hidden)
         number = torch.sum(torch.sigmoid(map_), axis=1)
-        # import pdb; pdb.set_trace()
         # number_oh = F.one_hot(torch.relu(number).long(), self.input_size)
 
         return number, hidden, map_
@@ -415,7 +414,9 @@ def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss, pregl
     seq_len = 7
     n_classes = 7
     nonlinearity = 'tanh_' if rnn.act_fun is not None else ''
-    filename = f'results/{model_version}_{nonlinearity}results_mapsz{rnn.input_size}_loss-{use_loss}.npz'
+    filename = f'results/{model_version}_{nonlinearity}results_mapsz{rnn.input_size}_loss-{use_loss}'
+    if preglimpsed is not None:
+        filename += '_' + preglimpsed
     print(f'Results will be saved in {filename}')
     # data, target, _, _ = get_data(seq_len, n_classes, device)
     data, target, map_, _, _  = get_data(seq_len, rnn.out_size, rnn.input_size, device, preglimpsed)
@@ -495,6 +496,7 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
     # Synthesize the data
     batch_size = 64
     seq_len = 11
+    width = int(np.sqrt(model.map_size))
     data, num, map_, map_control, hist = get_data(seq_len, model.out_size,
                                                   model.map_size, device,
                                                   preglimpsed)
@@ -526,14 +528,15 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
 
     # Where to save the results
     if control:
-        filename = f'reults/two_step_results_{control}'
+        filename = f'two_step_results_{control}'
     else:
         if use_loss == 'map_then_both':
-            filename = f'results/{model_version}_results_mapsz{model.map_size}_loss-{use_loss}-hardthresh'
+            filename = f'{model_version}_results_mapsz{model.map_size}_loss-{use_loss}-hardthresh'
         else:
-            filename = f'results/{model_version}_results_mapsz{model.map_size}_loss-{use_loss}'
+            filename = f'{model_version}_results_mapsz{model.map_size}_loss-{use_loss}'
     if preglimpsed is not None:
         filename += '_' + preglimpsed
+
 
     if control == 'non_spatial':
         dataset = TensorDataset(data, map_control, num)
@@ -549,6 +552,7 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
         auc =  0
         train_loss = 0
         map_train_loss = 0
+        number_train_loss = 0
         # shuffle the sequence order on each epoch
         # for i, row in enumerate(data):
         #     data[i, :, :] = row[torch.randperm(seq_len), :]
@@ -612,6 +616,7 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
             # Evaluate performance
             with torch.no_grad():
                 train_loss += loss.item()
+                number_train_loss += number_loss.item()
                 map_train_loss += map_loss.item()
                 numb_local = number
                 map_local = map
@@ -629,30 +634,10 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
                 pred = numb_local.argmax(dim=1, keepdim=True)
                 n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
 
-        # Make figure
-        # fig, axs = plt.subplots(2, 2, sharex=True, figsize=(10, 10))
-        # im = axs[0, 0].imshow(this_input[0, :].detach().cpu().view(30, 30), vmin=0, vmax=1, cmap='bwr')
-        # axs[0, 0].set_title('Example Input')
-        # plt.colorbar(im, ax=axs[0,0], orientation='horizontal')
-        #
-        # im1 = axs[1, 0].imshow(map_local[0, :].detach().cpu().view(30, 30))
-        # axs[1, 0].set_title('Predicted Map')
-        # plt.colorbar(im1, ax=axs[1,0], orientation='horizontal')
-        # # fig.colorbar(im1, orientation='horizontal')
-        #
-        # im2 = axs[0, 1].imshow(torch.sigmoid(map_local[0, :]).detach().cpu().view(30, 30), vmin=0, vmax=1, cmap='bwr')
-        # axs[0, 1].set_title(f'Sigmoid(Predicted Map) (Predicted number: {pred[0]})')
-        # plt.colorbar(im2, ax=axs[0,1], orientation='horizontal')
-        #
-        # im3 = axs[1, 1].imshow(map_label_local[0, :].detach().cpu().view(30, 30), vmin=0, vmax=1, cmap='bwr')
-        # axs[1, 1].set_title(f'Actual Map (number={numb_label[0]})')
-        # plt.colorbar(im3, ax=axs[1,1], orientation='horizontal')
-        # # plt.show()
-        # plt.savefig(f'figures/predicted_maps/predicted_map_ep{ep}.png', bbox_inches='tight', dpi=200)
-        # plt.close()
-
+        # Evaluate performance
         train_loss /= batch_idx + 1
         map_train_loss /= batch_idx + 1
+        number_train_loss /= batch_idx + 1
 
         accs = 100. * (m_correct / len(dataset))
         map_accs[ep, :] = accs
@@ -667,14 +652,37 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
         map_acc = accs.mean()
         map_auc[ep] = auc
 
-        if not ep % 10:
+        if not ep % 5:
+            # Make figure
+            fig, axs = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(10, 10))
+            im = axs[0, 0].imshow(inputs[-1, :, :].sum(axis=0).detach().cpu().view(width, width), vmin=0, cmap='bwr')
+            axs[0, 0].set_title('Input Gaze (unsequenced)')
+            plt.colorbar(im, ax=axs[0,0], orientation='horizontal')
+
+            im1 = axs[1, 0].imshow(map_local[-1, :].detach().cpu().view(width, width))
+            axs[1, 0].set_title(f'Predicted Map (Predicted number: {pred[-1].item()})')
+            plt.colorbar(im1, ax=axs[1,0], orientation='horizontal')
+            # fig.colorbar(im1, orientation='horizontal')
+
+            im2 = axs[0, 1].imshow(torch.sigmoid(map_local[-1, :]).detach().cpu().view(width, width), vmin=0, vmax=1, cmap='bwr')
+            axs[0, 1].set_title(f'Sigmoid(Predicted Map) AUC={auc:.3}')
+            plt.colorbar(im2, ax=axs[0,1], orientation='horizontal')
+
+            im3 = axs[1, 1].imshow(map_label_local[-1, :].detach().cpu().view(width, width), vmin=0, vmax=1, cmap='bwr')
+            axs[1, 1].set_title(f'Actual Map (number={numb_label[-1].item()})')
+            plt.colorbar(im3, ax=axs[1,1], orientation='horizontal')
+            # plt.show()
+            plt.savefig(f'figures/predicted_maps/{filename}_ep{ep}.png', bbox_inches='tight', dpi=200)
+            plt.close()
+
+            # Print and save performance
             # print(f'Progress {pct_done}% trained: \t Loss (Map/Numb): {map_loss.item():.6}/{number_loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}% \t Number {numb_acc:.3}% \t Mean Map Acc {accs.mean():.3}%')
-            print(f'Epoch {ep}, Progress {pct_done}% trained: \t Loss (Map/Numb): {map_train_loss:.6}/{train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}% \t Map AUC: {auc:.3}')
-            np.savez(filename, numb_accs=numb_accs, map_accs=map_accs,
+            print(f'Epoch {ep}, Progress {pct_done}% trained: \t Loss (Map/Numb): {map_train_loss:.6}/{number_train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}% \t Map AUC: {auc:.3}')
+            np.savez('results/'+filename, numb_accs=numb_accs, map_accs=map_accs,
                      numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc)
 
-    print(f'Final performance: \t Loss (Map/Numb): {map_train_loss:.6}/{train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}%')
-    np.savez(filename, numb_accs=numb_accs, map_accs=map_accs,
+    print(f'Final performance: \t Loss (Map/Numb): {map_train_loss:.6}/{number_train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}%')
+    np.savez('results/'+filename, numb_accs=numb_accs, map_accs=map_accs,
              numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc)
 
     return numb_acc, map_acc
@@ -781,7 +789,6 @@ def get_data(seq_len=7, n_classes=7, map_size=1056, device=None, preglimpsed=Non
             target_map = target_map.to(device)
 
             # target_mapB = (data.sum(axis=1) > 0) * 1
-            # import pdb; pdb.set_trace()
             # target_mapB = torch.from_numpy(target_map).float()
             # target_mapB = target_map.to(device)
 
