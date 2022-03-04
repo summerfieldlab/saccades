@@ -7,14 +7,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import TensorDataset, DataLoader
 from torch.nn.functional import one_hot
-torch.set_num_threads(5)
+torch.set_num_threads(15)
 torch.autograd.set_detect_anomaly(True)
 import math
 import random
 import operator as op
 from functools import reduce
 from matplotlib import pyplot as plt
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import roc_auc_score, f1_score
 
 def ncr(n, r):
     r = min(r, n-r)
@@ -30,12 +30,12 @@ def random_combination(iterable, r):
     return tuple(pool[i] for i in indices)
 
 class TwoStepModel(nn.Module):
-    def __init__(self, hidden_size, map_size, output_size, act=None):
+    def __init__(self, hidden_size, map_size, output_size, act=None, eye_weight=False):
         super(TwoStepModel, self).__init__()
         self.hidden_size = hidden_size
         self.map_size = map_size
         self.out_size = output_size
-        self.rnn = RNN(map_size, hidden_size, map_size, act)
+        self.rnn = RNN(map_size, hidden_size, map_size, act, eye_weight)
         # self.rnn = tanhRNN(input_size, hidden_size, map_size)
         self.fc = nn.Linear(map_size, output_size, bias=True)
 
@@ -62,13 +62,13 @@ class TwoStepModel_hist(nn.Module):
         return outs, hidden, number
 
 class TwoStepModel_weightshare(nn.Module):
-    def __init__(self, hidden_size, map_size, output_size, init, act=None):
+    def __init__(self, hidden_size, map_size, output_size, init, act=None, eye_weight=False):
         super(TwoStepModel_weightshare, self).__init__()
         # self.saved_model = torch.load('models/two_step_model_with_maploss_bias.pt')
         self.hidden_size = hidden_size
         self.map_size = map_size
         self.out_size = output_size
-        self.rnn = RNN(map_size, hidden_size, map_size, act)
+        self.rnn = RNN(map_size, hidden_size, map_size, act, eye_weight)
         # self.rnn = tanhRNN(input_size, hidden_size, map_size)
 
         self.readout = Readout(map_size, output_size, init)
@@ -157,7 +157,7 @@ class Readout(nn.Module):
 
 
 class RNN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, act=None):
+    def __init__(self, input_size, hidden_size, output_size, act=None, eye_weight=False):
         super(RNN, self).__init__()
         self.input_size = input_size
         self.out_size = output_size
@@ -169,6 +169,10 @@ class RNN(nn.Module):
 
         self.i2h = nn.Linear(input_size + hidden_size, hidden_size)
         self.i2o = nn.Linear(input_size + hidden_size, output_size)
+        if eye_weight:
+            with torch.no_grad():
+                self.i2o.weight[:, :input_size] = (torch.eye(input_size) * 1.05) - 0.05
+                self.i2h.weight[:, input_size:] = (torch.eye(hidden_size) * 1.05) - 0.05
         # self.softmax = nn.LogSoftmax(dim=1)
 
     def forward(self, input, hidden):
@@ -304,6 +308,7 @@ def train_sum_model(model, optimizer, n_epochs, device, model_version, use_loss)
                 m_correct += sum(sigout == map_label_local).cpu().numpy()
                 map_label_flat = map_label_local.cpu().numpy().flatten()
                 auc += roc_auc_score(map_label_flat, sigout.cpu().flatten())
+                f1 += f1_score(map_label_flat, sigout.cpu().flatten())
                 n_correct += numb_local.eq(label_local.view_as(numb_local)).sum().item()
 
         train_loss /= batch_idx + 1
@@ -312,6 +317,7 @@ def train_sum_model(model, optimizer, n_epochs, device, model_version, use_loss)
         accs = 100. * (m_correct / len(dataset))
         map_accs[ep, :] = accs
         auc /= batch_idx+1
+        f1 /= batch_idx+1
 
         numb_acc = 100. * (n_correct / len(dataset))
         numb_accs[ep] = numb_acc
@@ -405,7 +411,7 @@ def train_rnn_nocount_diffs(model, optimizer, n_epochs, device):
         print(f'Progress {pct_done}% trained: \t Loss: {loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}%')
 
 
-def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss, preglimpsed):
+def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss, preglimpsed, eye_weight):
     print('Linear RNN on unique task...')
     rnn = model.to(device)
     rnn.train()
@@ -417,6 +423,8 @@ def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss, pregl
     filename = f'results/{model_version}_{nonlinearity}results_mapsz{rnn.input_size}_loss-{use_loss}'
     if preglimpsed is not None:
         filename += '_' + preglimpsed
+    if eye_weight:
+        filename += '_eye'
     print(f'Results will be saved in {filename}')
     # data, target, _, _ = get_data(seq_len, n_classes, device)
     data, target, map_, _, _  = get_data(seq_len, rnn.out_size, rnn.input_size, device, preglimpsed)
@@ -469,7 +477,8 @@ def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss, pregl
                 # Evaluate performance
                 if use_loss == 'map':
                     sigout = torch.sigmoid(out_local).round()
-                    correct += roc_auc_score(label_local.cpu().numpy().flatten(), sigout.cpu().flatten())
+                    # correct += roc_auc_score(label_local.cpu().numpy().flatten(), sigout.cpu().flatten())
+                    correct += f1_score(label_local.cpu().numpy().flatten(), sigout.cpu().flatten())
                 else:
                     pred = out_local.argmax(dim=1, keepdim=True)
                     correct += pred.eq(label_local.view_as(pred)).sum().item()
@@ -483,12 +492,12 @@ def train_rnn(model, optimizer, n_epochs, device, model_version, use_loss, pregl
         numb_accs[ep] = acc
         if not ep % 5:
             pct_done = round(100. * (ep / n_epochs))
-            print(f'Epoch {ep}, Progress {pct_done}% trained: \t Loss: {train_loss:.6}, Accuracy or AUC: {acc:.6}% ({correct}/{len(dataset)})')
+            print(f'Epoch {ep}, Progress {pct_done}% trained: \t Loss: {train_loss:.6}, Accuracy or F1: {acc:.6}% ({correct}/{len(dataset)})')
             np.savez(filename, numb_accs=numb_accs, numb_losses=numb_losses)
     np.savez(filename, numb_accs=numb_accs, numb_losses=numb_losses)
 
 
-def train_two_step_model(model, optimizer, n_epochs, device, differential, use_loss, model_version, control=False, preglimpsed=None):
+def train_two_step_model(model, optimizer, n_epochs, device, differential, use_loss, model_version, control=False, preglimpsed=None, eye_weight=False):
     print('Two step model...')
     rnn = model.rnn
     model.to(device)
@@ -525,17 +534,21 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
     map_losses = np.zeros((n_epochs,))
     map_accs = np.zeros((n_epochs, model.map_size))
     map_auc = np.zeros((n_epochs,))
+    map_f1 = np.zeros((n_epochs,))
 
     # Where to save the results
+    nonlinearity = 'tanh_' if rnn.act_fun is not None else ''
     if control:
         filename = f'two_step_results_{control}'
     else:
         if use_loss == 'map_then_both':
-            filename = f'{model_version}_results_mapsz{model.map_size}_loss-{use_loss}-hardthresh'
+            filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}-hardthresh'
         else:
-            filename = f'{model_version}_results_mapsz{model.map_size}_loss-{use_loss}'
+            filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}'
     if preglimpsed is not None:
         filename += '_' + preglimpsed
+    if eye_weight:
+        filename += '_eye'
 
 
     if control == 'non_spatial':
@@ -550,6 +563,7 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
         m_correct = np.zeros(model.map_size,)
         n_correct = 0
         auc =  0
+        f1 = 0
         train_loss = 0
         map_train_loss = 0
         number_train_loss = 0
@@ -588,7 +602,7 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
                 loss = map_loss + number_loss
                 loss.backward()
             elif use_loss == 'map_then_both' or use_loss == 'map_then_both-detached':
-                if ep > 0 and (map_auc[ep - 1] > 0.98 or ep > n_epochs / 2):
+                if ep > 0 and (map_auc[ep - 1] > 0.99 or ep > n_epochs / 2):
                     add_number_loss = True
                 if add_number_loss:
                     loss = map_loss + number_loss
@@ -631,6 +645,7 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
                     m_correct += sum(sigout == map_label_local).cpu().numpy()
                     map_label_flat = map_label_local.cpu().numpy().flatten()
                     auc += roc_auc_score(map_label_flat, sigout.cpu().flatten())
+                    f1 += f1_score(map_label_flat, sigout.cpu().flatten())
                 pred = numb_local.argmax(dim=1, keepdim=True)
                 n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
 
@@ -642,6 +657,7 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
         accs = 100. * (m_correct / len(dataset))
         map_accs[ep, :] = accs
         auc /= batch_idx+1
+        f1 /= batch_idx+1
 
         numb_acc = 100. * (n_correct / len(dataset))
         numb_accs[ep] = numb_acc
@@ -651,6 +667,7 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
         numb_losses[ep] = train_loss
         map_acc = accs.mean()
         map_auc[ep] = auc
+        map_f1[ep] = f1
 
         if not ep % 5:
             # Make figure
@@ -665,7 +682,7 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
             # fig.colorbar(im1, orientation='horizontal')
 
             im2 = axs[0, 1].imshow(torch.sigmoid(map_local[-1, :]).detach().cpu().view(width, width), vmin=0, vmax=1, cmap='bwr')
-            axs[0, 1].set_title(f'Sigmoid(Predicted Map) AUC={auc:.3}')
+            axs[0, 1].set_title(f'Sigmoid(Predicted Map) F1={f1:.3}')
             plt.colorbar(im2, ax=axs[0,1], orientation='horizontal')
 
             im3 = axs[1, 1].imshow(map_label_local[-1, :].detach().cpu().view(width, width), vmin=0, vmax=1, cmap='bwr')
@@ -677,13 +694,13 @@ def train_two_step_model(model, optimizer, n_epochs, device, differential, use_l
 
             # Print and save performance
             # print(f'Progress {pct_done}% trained: \t Loss (Map/Numb): {map_loss.item():.6}/{number_loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}% \t Number {numb_acc:.3}% \t Mean Map Acc {accs.mean():.3}%')
-            print(f'Epoch {ep}, Progress {pct_done}% trained: \t Loss (Map/Numb): {map_train_loss:.6}/{number_train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}% \t Map AUC: {auc:.3}')
+            print(f'Epoch {ep}, Progress {pct_done}% trained: \t Loss (Map/Numb): {map_train_loss:.6}/{number_train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}% \t Map AUC: {auc:.3} \t Map f1: {f1:.3}')
             np.savez('results/'+filename, numb_accs=numb_accs, map_accs=map_accs,
-                     numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc)
+                     numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc, map_f1=map_f1)
 
-    print(f'Final performance: \t Loss (Map/Numb): {map_train_loss:.6}/{number_train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}%')
+    print(f'Final performance: \t Loss (Map/Numb): {map_train_loss:.6}/{number_train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map AUC: {auc:.3}% \t Map f1: {f1:.3}')
     np.savez('results/'+filename, numb_accs=numb_accs, map_accs=map_accs,
-             numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc)
+             numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc, map_f1=map_f1)
 
     return numb_acc, map_acc
 
@@ -923,6 +940,7 @@ def main(config):
     use_loss = config.use_loss
     rnn_act = config.rnn_act
     preglimpsed = config.preglimpsed
+    eye_weight = config.eye_weight
     lr = 0.01
     mom = 0.9
     wd = 0.0
@@ -983,22 +1001,22 @@ def main(config):
     hidden_size = int(np.round(map_size + map_size*0.1))
     # hidden_size = map_size*2
     if model_version == 'two_step':
-        model = TwoStepModel(hidden_size, map_size, numb_size, act=rnn_act)
+        model = TwoStepModel(hidden_size, map_size, numb_size, act=rnn_act, eye_weight=eye_weight)
     elif model_version == 'two_step_ws':
         if 'detached' in use_loss:
-            model = TwoStepModel_weightshare_detached(hidden_size, map_size, numb_size, init=False, act=rnn_act)
+            model = TwoStepModel_weightshare_detached(hidden_size, map_size, numb_size, init=False, act=rnn_act, eye_weight=eye_weight)
         else:
-            model = TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=False, act=rnn_act)
+            model = TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=False, act=rnn_act, eye_weight=eye_weight)
     elif model_version == 'two_step_ws_init':
         if 'detached' in use_loss:
-            model = TwoStepModel_weightshare_detached(hidden_size, map_size, numb_size, init=True, act=rnn_act)
+            model = TwoStepModel_weightshare_detached(hidden_size, map_size, numb_size, init=True, act=rnn_act, eye_weight=eye_weight)
         else:
-            model = TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=True, act=rnn_act)
+            model = TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=True, act=rnn_act, eye_weight=eye_weight)
     elif 'one_step' in model_version:
         if use_loss == 'number':
-            model = RNN(map_size, hidden_size, numb_size, act=rnn_act)
+            model = RNN(map_size, hidden_size, numb_size, act=rnn_act, eye_weight=eye_weight)
         elif use_loss == 'map':
-            model = RNN(map_size, hidden_size, map_size, act=rnn_act)
+            model = RNN(map_size, hidden_size, map_size, act=rnn_act, eye_weight=eye_weight)
     elif model_version == 'number_as_sum':
         model = NumberAsMapSum(map_size, hidden_size)
     else:
@@ -1007,9 +1025,9 @@ def main(config):
     opt = torch.optim.SGD(model.parameters(), lr=lr, momentum=mom, weight_decay=wd)
     if 'two' in model_version:
         train_two_step_model(model, opt, n_epochs, device, differential,
-                             use_loss, model_version, preglimpsed=preglimpsed)
+                             use_loss, model_version, preglimpsed=preglimpsed, eye_weight=eye_weight)
     elif 'one' in model_version and (use_loss == 'number' or use_loss == 'map'):
-        train_rnn(model, opt, n_epochs, device, model_version, use_loss, preglimpsed)
+        train_rnn(model, opt, n_epochs, device, model_version, use_loss, preglimpsed, eye_weight)
     elif model_version == 'number_as_sum':
         train_sum_model(model, opt, n_epochs, device, model_version, use_loss)
 
@@ -1035,6 +1053,7 @@ def get_config():
     parser.add_argument('--rnn_act', type=str, default=None)
     parser.add_argument('--no_cuda', action='store_true', default=False)
     parser.add_argument('--preglimpsed', type=str, default=None)
+    parser.add_argument('--eye_weight', action='store_true', default=False)
     config = parser.parse_args()
     print(config)
     return config
