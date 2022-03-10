@@ -59,7 +59,8 @@ class ContentGated_cheat(nn.Module):
         self.map_size = map_size
         self.out_size = output_size
 
-        self.dorsal = TwoStepModel(hidden_size, map_size, total_number_size, act=act)
+        self.dorsal = TwoStepModel(map_size, hidden_size, map_size, total_number_size, act=act)
+
         self.softmax = nn.LogSoftmax(dim=1)
 
         size_prod = min_shape_size * total_number_size
@@ -95,37 +96,76 @@ class ContentGated_cheat(nn.Module):
 
         return min_shape, min_number, counts, maps, hidden
 
-class TwoStepModel(nn.Module):
-    def __init__(self, hidden_size, map_size, output_size, act=None, eye_weight=False):
-        super(TwoStepModel, self).__init__()
+class ThreeStepModel(nn.Module):
+    def __init__(self, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        act = kwargs['act'] if 'act' in kwargs.keys() else None
+        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
+        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
+        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
         self.hidden_size = hidden_size
         self.map_size = map_size
         self.out_size = output_size
-        self.rnn = RNN(map_size, hidden_size, map_size, act, eye_weight)
+        self.detached = detached
+        self.rnn = RNN(map_size, hidden_size, map_size, act, eye_weight, dropout)
         # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-        self.fc = nn.Linear(map_size, output_size, bias=True)
+        self.readout1 = nn.Linear(map_size, map_size, bias=True)
+        self.readout2 = nn.Linear(map_size, output_size, bias=True)
 
     def forward(self, x, hidden):
         map_, hidden = self.rnn(x, hidden)
-        number = self.fc(torch.sigmoid(map_))
+        if self.detached:
+            map_to_pass_on = torch.relu(map_.detach())
+        else:
+            map_to_pass_on = map_
+        # number = self.readout(torch.sigmoid(map_to_pass_on))
+        intermediate = torch.relu(self.readout1(map_to_pass_on))
+        number = self.readout2(intermediate)
         # number = torch.relu(self.fc(map))
         return number, map_, hidden
 
-class TwoStepModel_hist(nn.Module):
-    def __init__(self, input_size, hidden_size, map_size, output_size):
-        super(TwoStepModel_hist, self).__init__()
-        fc_size = 64
-        self.rnn = linearRNN_hist(input_size, hidden_size, map_size)
+
+class TwoStepModel(nn.Module):
+    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        act = kwargs['act'] if 'act' in kwargs.keys() else None
+        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
+        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
+        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
+        self.hidden_size = hidden_size
+        self.map_size = map_size
+        self.out_size = output_size
+        self.detached = detached
+        self.rnn = RNN(input_size, hidden_size, map_size, act, eye_weight, dropout)
         # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-        self.fc1 = nn.Linear(map_size, fc_size)
-        self.fc2 = nn.Linear(fc_size, output_size)
+        self.readout = nn.Linear(map_size, output_size, bias=True)
 
     def forward(self, x, hidden):
-        outs, hidden, hist = self.rnn(x, hidden)
-        fc_layer = torch.relu(self.fc1(hist))
-        number = self.fc2(fc_layer)
+        map_, hidden = self.rnn(x, hidden)
+        if self.detached:
+            map_to_pass_on = torch.tanh(torch.relu(map_.detach()))
+        else:
+            map_to_pass_on = map_
+        # number = self.readout(torch.sigmoid(map_to_pass_on))
+        number = self.readout(map_to_pass_on)
         # number = torch.relu(self.fc(map))
-        return outs, hidden, number
+        return number, map_, hidden
+
+# class TwoStepModel_hist(nn.Module):
+    # def __init__(self, input_size, hidden_size, map_size, output_size):
+    #     super(TwoStepModel_hist, self).__init__()
+    #     fc_size = 64
+    #     self.rnn = linearRNN_hist(input_size, hidden_size, map_size)
+    #     # self.rnn = tanhRNN(input_size, hidden_size, map_size)
+    #     self.fc1 = nn.Linear(map_size, fc_size)
+    #     self.fc2 = nn.Linear(fc_size, output_size)
+
+    # def forward(self, x, hidden):
+    #     outs, hidden, hist = self.rnn(x, hidden)
+    #     fc_layer = torch.relu(self.fc1(hist))
+    #     number = self.fc2(fc_layer)
+    #     # number = torch.relu(self.fc(map))
+    #     return outs, hidden, number
 
 class TwoStepModel_weightshare(nn.Module):
     def __init__(self, hidden_size, map_size, output_size, init, act=None, eye_weight=False):
@@ -156,7 +196,7 @@ class TwoStepModel_weightshare(nn.Module):
         # number = self.fc(torch.sigmoid(map_))
         number = self.readout(torch.sigmoid(map_))
         # number = torch.relu(self.fc(map))
-        return map_, hidden, number
+        return number, map_, hidden
 
 
 class TwoStepModel_weightshare_detached(TwoStepModel_weightshare):
@@ -167,7 +207,7 @@ class TwoStepModel_weightshare_detached(TwoStepModel_weightshare):
         map_detached = map_.detach()
         number = self.readout(torch.sigmoid(map_detached))
         # number = torch.relu(self.fc(map))
-        return map_, hidden, number
+        return number, map_, hidden
 
     def train_rnn(self):
         for param in self.readout.parameters():
@@ -223,17 +263,20 @@ class Readout(nn.Module):
 
 
 class RNN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, act=None, eye_weight=False):
+    def __init__(self, input_size, hidden_size, output_size, act=None, eye_weight=False, dropout=0):
         super(RNN, self).__init__()
         self.input_size = input_size
         self.out_size = output_size
         self.hidden_size = hidden_size
         if act == 'tanh':
             self.act_fun = torch.tanh
+        elif act == 'relu':
+            self.act_fun = torch.relu
         else:
             self.act_fun = None
 
         self.i2h = nn.Linear(input_size + hidden_size, hidden_size)
+        self.drop_layer = nn.Dropout(p=dropout)
         self.i2o = nn.Linear(input_size + hidden_size, output_size)
         if eye_weight:
             with torch.no_grad():
@@ -244,6 +287,7 @@ class RNN(nn.Module):
     def forward(self, input, hidden):
         combined = torch.cat((input, hidden), 1)
         hidden = self.i2h(combined)
+        hidden = self.drop_layer(hidden)
         if self.act_fun is not None:
             hidden = self.act_fun(hidden)
         output = self.i2o(combined)
@@ -309,7 +353,6 @@ def train_sum_model(model, optimizer, config):
     use_loss = config.use_loss
     model_version = config.model_version
     print('Training number-as-sum model..')
-    model = model.to(device)
     model.train()
 
     print('Using MSE loss for number objective.')
@@ -490,7 +533,7 @@ def train_rnn(model, optimizer, config):
     eye_weight = config.eye_weight
 
     print('One-step RNN on unique task...')
-    rnn = model.to(device)
+    rnn = model
     rnn.train()
 
     batch_size = 64
@@ -576,6 +619,11 @@ def train_rnn(model, optimizer, config):
     torch.save(model, f'models/{filename}.pt')
 
 def train_two_step_model(model, optimizer, config, scheduler=None):
+    if 'detached' in config.use_loss:
+        assert isinstance(optimizer, list)
+        opt_rnn, opt_readout = optimizer
+        scheduler_rnn, scheduler_readout = scheduler
+
     print('Two step model...')
     n_epochs = config.n_epochs
     device = config.device
@@ -586,92 +634,129 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
     preglimpsed = config.preglimpsed
     eye_weight = config.eye_weight
     rnn = model.rnn
-    model.to(device)
+    drop = config.dropout
+    clip_grad_norm = 1
 
-    # Synthesize the data
+    # Synthesize or load the data
+    def get_input(gaze, pix):
+        if config.train_on == 'pix':
+            data = pix
+        elif config.train_on == 'loc':
+            data = gaze
+        elif config.train_on == 'both':
+            data = torch.cat((gaze, pix), dim=2)
+        return data
     batch_size = 64
-    seq_len = 11
     width = int(np.sqrt(model.map_size))
-    data, num, map_, map_control, hist = get_data(seq_len, model.out_size,
-                                                  model.map_size, device,
-                                                  preglimpsed)
-    seq_len = data.shape[1]
-    nex = data.shape[0]
-    # with torch.no_grad():
-    #     verify_dataset(data, num, seq_len)
+    preglimpsed_train = preglimpsed + '_train' if preglimpsed is not None else None
+    gaze, pix, num, _, map_, _, _ = get_min_data(preglimpsed_train, device)
+    seq_len = gaze.shape[1]
+    data = get_input(gaze, pix)
 
     # Calculate the weight per location to trade off precision and recall
     # As map_size increases, negative examples far outweight positive ones
     # Hoping this may also help with numerical stability
     # positive = (data.sum(axis=1) > 0).sum(axis=0)
-    positive = map_.sum(axis=0).float()
-    negative = -positive + data.shape[0]
+    # nex = data.shape[0]
+    # positive = map_.sum(axis=0).float()
+    # negative = -positive + data.shape[0]
+    # pos_weight = torch.true_divide(negative, positive)
+    # # Remove infs
+    # to_replace = torch.tensor(nex).float().to(device)
+    positive = 4.5  # average num objects
+    negative = config.map_size - positive
     pos_weight = torch.true_divide(negative, positive)
-    # Remove infs
-    to_replace = torch.tensor(nex).float().to(device)
-    pos_weight = torch.where(torch.isinf(pos_weight), to_replace, pos_weight)
+    pos_weight = torch.ones_like(map_[0, :]) * pos_weight
+    # pos_weight = torch.where(torch.isinf(pos_weight), to_replace, pos_weight)
     map_criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     criterion = nn.CrossEntropyLoss()
-    add_number_loss = False
+    trainset = TensorDataset(data, map_, num)
+    preglimpsed_val = preglimpsed + '_valid' if preglimpsed is not None else None
+    gaze, pix, num, _, map_, _, _ = get_min_data(preglimpsed_val, device)
+    data = get_input(gaze, pix)
+    validset = TensorDataset(data, map_, num)
+    preglimpsed_test = preglimpsed + '_test0' if preglimpsed is not None else None
+    gaze, pix, num, _, map_, _, _ = get_min_data(preglimpsed_test, device)
+    data = get_input(gaze, pix)
+    testset = TensorDataset(data, map_, num)
+    train_loader = DataLoader(trainset, batch_size=batch_size, shuffle=True)
+    valid_loader = DataLoader(validset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(testset, batch_size=batch_size, shuffle=True)
+    # with torch.no_grad():
+    #     verify_dataset(data, num, seq_len)
 
     # To store learning curves
+    optimised_losses = np.zeros((n_epochs,))
     numb_losses = np.zeros((n_epochs,))
     numb_accs = np.zeros((n_epochs,))
     map_losses = np.zeros((n_epochs,))
-    map_accs = np.zeros((n_epochs, model.map_size))
     map_auc = np.zeros((n_epochs,))
     map_f1 = np.zeros((n_epochs,))
+    valid_optimised_losses = np.zeros((n_epochs,))
+    valid_numb_losses = np.zeros((n_epochs,))
+    valid_numb_accs = np.zeros((n_epochs,))
+    valid_map_losses = np.zeros((n_epochs,))
+    valid_map_auc = np.zeros((n_epochs,))
+    valid_map_f1 = np.zeros((n_epochs,))
+    test_optimised_losses = np.zeros((n_epochs,))
+    test_numb_losses = np.zeros((n_epochs,))
+    test_numb_accs = np.zeros((n_epochs,))
+    test_map_losses = np.zeros((n_epochs,))
+    test_map_auc = np.zeros((n_epochs,))
+    test_map_f1 = np.zeros((n_epochs,))
 
     # Where to save the results
-    nonlinearity = 'tanh_' if rnn.act_fun is not None else ''
+    nonlinearity = config.rnn_act + '_' if rnn.act_fun is not None else ''
     sched = '_sched' if config.use_schedule else ''
     if control:
         filename = f'two_step_results_{control}'
     else:
         if use_loss == 'map_then_both':
-            filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}-hardthresh{sched}'
+            filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}-hardthresh{sched}_dr{drop}_tanhrelu_rand_{config.train_on}'
         else:
-            filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}{sched}'
+            filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}{sched}_dr{drop}_tanhrelu_rand_{config.train_on}'
     if preglimpsed is not None:
         filename += '_' + preglimpsed
     if eye_weight:
         filename += '_eye'
 
+    # if control == 'non_spatial':
+    #     dataset = TensorDataset(data, map_control, num)
+    # elif control == 'hist':
+    #     dataset = TensorDataset(data, hist, num)
+    # else:
+    #     dataset = TensorDataset(data, map_, num)
 
-    if control == 'non_spatial':
-        dataset = TensorDataset(data, map_control, num)
-    elif control == 'hist':
-        dataset = TensorDataset(data, hist, num)
-    else:
-        dataset = TensorDataset(data, map_, num)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     print(f'**Training model with map size of {model.map_size}, hidden layer size {model.hidden_size}, use_loss={use_loss}')
-    for ep in range(n_epochs):
-        print(f'Epoch {ep}, Learning rate: {optimizer.param_groups[0]["lr"]}')
-        m_correct = np.zeros(model.map_size,)
+
+    def train(loader, ep, add_number_loss):
+        model.train()
         n_correct = 0
-        auc =  0
+        auc = 0
         f1 = 0
         train_loss = 0
         map_train_loss = 0
         number_train_loss = 0
-        # shuffle the sequence order on each epoch
-        # for i, row in enumerate(data):
-        #     data[i, :, :] = row[torch.randperm(seq_len), :]
-        # Select which map target to use
         for batch_idx, (inputs, map_label, numb_label) in enumerate(loader):
             model.zero_grad()
             input_dim = inputs.shape[0]
+
+            for i, row in enumerate(inputs):
+            # shuffle the sequence order
+                inputs[i, :, :] = row[torch.randperm(seq_len), :]
+
             hidden = rnn.initHidden(input_dim)
             hidden = hidden.to(device)
             prev_input = torch.zeros((inputs.shape[0], 1), dtype=torch.long)
+
+
             for i in range(seq_len):
                 if differential:
                     unonehot = inputs[:, i, :].nonzero(as_tuple=False)[:, 1].unsqueeze(1)
                     this_input = torch.true_divide(unonehot, 6) - prev_input
                 else:
                     this_input = inputs[:, i, :]
-                map, hidden, number = model(this_input, hidden)
+                number, map, hidden = model(this_input, hidden)
                 prev_input = this_input
 
             if control == 'hist':
@@ -682,37 +767,62 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             number_loss = criterion(number, numb_label)
             if use_loss == 'map':
                 loss = map_loss
-                loss.backward()
             elif use_loss == 'number':
                 loss = number_loss
-                loss.backward()
             elif use_loss == 'both':
                 loss = map_loss + number_loss
-                loss.backward()
-            elif use_loss == 'map_then_both' or use_loss == 'map_then_both-detached':
-                if ep > 0 and (map_auc[ep - 1] > 0.99 or ep > n_epochs / 2):
+            elif use_loss == 'map_then_both':
+                if ep > 0 and (map_f1[ep - 1] > 0.5 or ep > n_epochs / 2):
                     add_number_loss = True
                 if add_number_loss:
                     loss = map_loss + number_loss
                 else:
                     loss = map_loss
-                loss.backward()
-            elif use_loss == 'both-detached':
 
-                # model.train_readout()
-                # number_loss.backward(retain_graph=True)
+            if use_loss == 'map_then_both-detached':
+                if ep > 0 and (map_f1[ep - 1] > 0.5 or ep > n_epochs / 2):
+                    add_number_loss = True
                 # model.train_rnn()
-                # map_loss.backward()
-                loss = map_loss + number_loss
-                loss.backward()
-                # model.train()
+                map_loss.backward()
+                nn.utils.clip_grad_norm_(model.rnn.parameters(), clip_grad_norm)
+                opt_rnn.step()
+                if add_number_loss:
+                    # model.train_readout()
+                    number_loss.backward(retain_graph=True)
+                    nn.utils.clip_grad_norm_(model.readout.parameters(), clip_grad_norm)
+                    opt_readout.step()
+                    loss = map_loss + number_loss
+                else:
+                    loss = map_loss
 
+            elif use_loss == 'both-detached':
+                # model.train_readout()
+
+                map_loss.backward(retain_graph=True)
+                # model.train_rnn()
+                # Verify that gradients are localized
+                # for n, p in model.named_parameters():
+                #     print(f'{n}:')
+                #     if p.requires_grad and p.grad is not None:
+                #         print(f'{p.grad.abs().mean()}')
+                # import pdb; pdb.set_trace()
+                number_loss.backward()
+                # Gradient clipping
+                nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+                # Take a gradient step
+                opt_readout.step()
+                opt_rnn.step()
+                # loss = map_loss + number_loss
+                # model.train()
+                loss = map_loss + number_loss
             else:
-                print('must specify which loss to optimize')
-            # Gradient clipping
-            nn.utils.clip_grad_norm_(model.parameters(), 1)
-            # Take a gradient step
-            optimizer.step()
+                loss.backward()
+                # print('must specify which loss to optimize')
+                # Gradient clipping
+                nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+                # Take a gradient step
+                optimizer.step()
+
             hidden.detach_()
 
             # Evaluate performance
@@ -726,11 +836,9 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 if control == 'hist':
                     for j in range(len(map_local)):
                         pred = map_local[j].argmax(dim=1, keepdim=True)
-                        m_correct[j] += pred.eq(map_label[:, j].view_as(pred)).sum().item()
                     # m_correct += sum(torch.isclose(map_local, map_label)).cpu().numpy()
                 else:
                     sigout = torch.sigmoid(map_local).round()
-                    m_correct += sum(sigout == map_label_local).cpu().numpy()
                     map_label_flat = map_label_local.cpu().numpy().flatten()
                     auc += roc_auc_score(map_label_flat, sigout.cpu().flatten())
                     f1 += f1_score(map_label_flat, sigout.cpu().flatten())
@@ -738,63 +846,238 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
 
         if config.use_schedule:
-            scheduler.step()
-
+            if 'detached' in use_loss:
+                if add_number_loss or 'both' in use_loss:
+                    scheduler_readout.step()
+                scheduler_rnn.step()
+            else:
+                scheduler.step()
         # Evaluate performance
-        train_loss /= batch_idx + 1
-        map_train_loss /= batch_idx + 1
-        number_train_loss /= batch_idx + 1
+        train_loss /= len(loader)
+        map_train_loss /= len(loader)
+        number_train_loss /= len(loader)
+        auc /=len(loader)
+        f1 /= len(loader)
+        numb_acc = 100. * (n_correct / len(loader.dataset))
 
-        accs = 100. * (m_correct / len(dataset))
-        map_accs[ep, :] = accs
-        auc /= batch_idx+1
-        f1 /= batch_idx+1
+        if use_loss != 'number' and not ep % 10:
+            # Make figure
+            fig, axs = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(10, 10))
+            im = axs[0, 0].imshow(inputs[-1, :, :config.map_size].sum(axis=0).detach().cpu().view(width, width), vmin=0)
+            axs[0, 0].set_title('Input Gaze (unsequenced)')
+            plt.colorbar(im, ax=axs[0,0], orientation='horizontal')
 
-        numb_acc = 100. * (n_correct / len(dataset))
-        numb_accs[ep] = numb_acc
+            im1 = axs[1, 0].imshow(map_local[-1, :].detach().cpu().view(width, width))
+            axs[1, 0].set_title(f'Predicted Map (Predicted number: {pred[-1].item()}, Number acc: {numb_acc:.3})')
+            plt.colorbar(im1, ax=axs[1,0], orientation='horizontal')
+            # fig.colorbar(im1, orientation='horizontal')
 
-        pct_done = round(100. * (ep / n_epochs))
-        map_losses[ep] = map_train_loss
-        numb_losses[ep] = train_loss
-        map_acc = accs.mean()
-        map_auc[ep] = auc
-        map_f1[ep] = f1
+            # im2 = axs[0, 1].imshow(torch.sigmoid(map_local[-1, :]).detach().cpu().view(width, width), vmin=0, vmax=1, cmap='bwr')
+            # axs[0, 1].set_title(f'Sigmoid(Predicted Map) AUC={auc:.3} F1={f1:.3}')
+            # plt.colorbar(im2, ax=axs[0,1], orientation='horizontal')
 
-        if not ep % 5:
-            if use_loss != 'number':
+            im2 = axs[0, 1].imshow(torch.tanh(torch.relu(map_local[-1, :])).detach().cpu().view(width, width))
+            axs[0, 1].set_title(f'Tanh(Relu(Predicted Map)) AUC={auc:.3} F1={f1:.3}')
+            plt.colorbar(im2, ax=axs[0,1], orientation='horizontal')
+
+            im3 = axs[1, 1].imshow(map_label_local[-1, :].detach().cpu().view(width, width), vmin=0, vmax=1)
+            axs[1, 1].set_title(f'Actual Map (number={numb_label[-1].item()})')
+            plt.colorbar(im3, ax=axs[1,1], orientation='horizontal')
+            # plt.show()
+            plt.savefig(f'figures/predicted_maps/{filename}_ep{ep}.png', bbox_inches='tight', dpi=200)
+            plt.close()
+        return train_loss, number_train_loss, map_train_loss, numb_acc, auc, f1, add_number_loss
+
+    def test(loader, add_number_loss, **kwargs):
+        which_set = kwargs['which_set'] if 'which_set' in kwargs.keys() else 'test'
+        model.eval()
+        n_correct = 0
+        auc = 0
+        f1 = 0
+        train_loss = 0
+        map_train_loss = 0
+        number_train_loss = 0
+        with torch.no_grad():
+            for batch_idx, (inputs, map_label, numb_label) in enumerate(loader):
+                input_dim = inputs.shape[0]
+                hidden = rnn.initHidden(input_dim)
+                hidden = hidden.to(device)
+                prev_input = torch.zeros((inputs.shape[0], 1), dtype=torch.long)
+                for i in range(seq_len):
+                    if differential:
+                        unonehot = inputs[:, i, :].nonzero(as_tuple=False)[:, 1].unsqueeze(1)
+                        this_input = torch.true_divide(unonehot, 6) - prev_input
+                    else:
+                        this_input = inputs[:, i, :]
+                    number, map, hidden = model(this_input, hidden)
+                    prev_input = this_input
+
+                if control == 'hist':
+                    map_loss = [criterion(map[j], map_label[:, j]) for j in range(len(map))]
+                    map_loss = sum(map_loss)/len(map_loss)
+                else:
+                    map_loss = map_criterion(map, map_label)
+                number_loss = criterion(number, numb_label)
+                if use_loss == 'map':
+                    loss = map_loss
+                elif use_loss == 'number':
+                    loss = number_loss
+                elif use_loss == 'both':
+                    loss = map_loss + number_loss
+                elif use_loss == 'map_then_both' or use_loss == 'map_then_both-detached':
+                    if ep > 0 and (map_auc[ep - 1] > 0.99 or ep > n_epochs / 2):
+                        add_number_loss = True
+                    if add_number_loss:
+                        loss = map_loss + number_loss
+                    else:
+                        loss = map_loss
+                elif use_loss == 'both-detached':
+
+                    # model.train_readout()
+                    # number_loss.backward(retain_graph=True)
+                    # model.train_rnn()
+                    # map_loss.backward()
+                    loss = map_loss + number_loss
+                    # model.train()
+
+                else:
+                    print('must specify which loss to optimize')
+
+                # Evaluate performance
+                train_loss += loss.item()
+                number_train_loss += number_loss.item()
+                map_train_loss += map_loss.item()
+                numb_local = number
+                map_local = map
+                map_label_local = map_label
+                sigout = torch.sigmoid(map_local).round()
+                map_label_flat = map_label_local.cpu().numpy().flatten()
+                auc += roc_auc_score(map_label_flat, sigout.cpu().flatten())
+                f1 += f1_score(map_label_flat, sigout.cpu().flatten())
+                pred = numb_local.argmax(dim=1, keepdim=True)
+                n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
+            # Evaluate performance
+            train_loss /= len(loader)
+            map_train_loss /= len(loader)
+            number_train_loss /= len(loader)
+            auc /=len(loader)
+            f1 /= len(loader)
+            numb_acc = 100. * (n_correct / len(loader.dataset))
+
+            if use_loss != 'number' and not ep % 10:
                 # Make figure
                 fig, axs = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(10, 10))
-                im = axs[0, 0].imshow(inputs[-1, :, :].sum(axis=0).detach().cpu().view(width, width), vmin=0, cmap='bwr')
+                im = axs[0, 0].imshow(inputs[-1, :, :config.map_size].sum(axis=0).detach().cpu().view(width, width), vmin=0)
                 axs[0, 0].set_title('Input Gaze (unsequenced)')
                 plt.colorbar(im, ax=axs[0,0], orientation='horizontal')
 
                 im1 = axs[1, 0].imshow(map_local[-1, :].detach().cpu().view(width, width))
-                axs[1, 0].set_title(f'Predicted Map (Predicted number: {pred[-1].item()})')
+                axs[1, 0].set_title(f'Predicted Map (Predicted number: {pred[-1].item()}, Number acc: {numb_acc:.3})')
                 plt.colorbar(im1, ax=axs[1,0], orientation='horizontal')
                 # fig.colorbar(im1, orientation='horizontal')
 
-                im2 = axs[0, 1].imshow(torch.sigmoid(map_local[-1, :]).detach().cpu().view(width, width), vmin=0, vmax=1, cmap='bwr')
-                axs[0, 1].set_title(f'Sigmoid(Predicted Map) AUC={auc:.3} F1={f1:.3}')
+                # im2 = axs[0, 1].imshow(torch.sigmoid(map_local[-1, :]).detach().cpu().view(width, width), vmin=0, vmax=1, cmap='bwr')
+                # axs[0, 1].set_title(f'Sigmoid(Predicted Map) AUC={auc:.3} F1={f1:.3}')
+                # plt.colorbar(im2, ax=axs[0,1], orientation='horizontal')
+
+                im2 = axs[0, 1].imshow(torch.tanh(torch.relu(map_local[-1, :])).detach().cpu().view(width, width))
+                axs[0, 1].set_title(f'Tanh(Relu(Predicted Map)) AUC={auc:.3} F1={f1:.3}')
                 plt.colorbar(im2, ax=axs[0,1], orientation='horizontal')
 
-                im3 = axs[1, 1].imshow(map_label_local[-1, :].detach().cpu().view(width, width), vmin=0, vmax=1, cmap='bwr')
+                im3 = axs[1, 1].imshow(map_label_local[-1, :].detach().cpu().view(width, width), vmin=0, vmax=1)
                 axs[1, 1].set_title(f'Actual Map (number={numb_label[-1].item()})')
                 plt.colorbar(im3, ax=axs[1,1], orientation='horizontal')
                 # plt.show()
-                plt.savefig(f'figures/predicted_maps/{filename}_ep{ep}.png', bbox_inches='tight', dpi=200)
+                plt.savefig(f'figures/predicted_maps/{filename}_ep{ep}_{which_set}.png', bbox_inches='tight', dpi=200)
                 plt.close()
+        return train_loss, number_train_loss, map_train_loss, numb_acc, auc, f1
 
+    add_number_loss = False
+    for ep in range(n_epochs):
+        if isinstance(scheduler, list):
+            print(f'Epoch {ep}, Learning rates: {opt_rnn.param_groups[0]["lr"]}, {opt_readout.param_groups[0]["lr"]}')
+        else:
+            print(f'Epoch {ep}, Learning rate: {optimizer.param_groups[0]["lr"]}')
+
+        train_loss, train_num_loss, train_map_loss, train_num_acc, train_auc, train_f1, add_number_loss = train(train_loader, ep, add_number_loss)
+        val_loss, val_num_loss, val_map_loss, val_num_acc, val_auc, val_f1 = test(valid_loader, add_number_loss, which_set='valid')
+        test_loss, test_num_loss, test_map_loss, test_num_acc, test_auc, test_f1 = test(test_loader, add_number_loss, which_set='test')
+
+        optimised_losses[ep] = train_loss
+        numb_losses[ep] = train_num_loss
+        numb_accs[ep] = train_num_acc
+        map_losses[ep] = train_map_loss
+        map_auc[ep] = train_auc
+        map_f1[ep] = train_f1
+        valid_optimised_losses[ep] = val_loss
+        valid_numb_losses[ep] = val_num_loss
+        valid_numb_accs[ep] = val_num_acc
+        valid_map_losses[ep] = val_map_loss
+        valid_map_auc[ep] = val_auc
+        valid_map_f1[ep] = val_f1
+        test_optimised_losses[ep] = test_loss
+        test_numb_losses[ep] = test_num_loss
+        test_numb_accs[ep] = test_num_acc
+        test_map_losses[ep] = test_map_loss
+        test_map_auc[ep] = test_auc
+        test_map_f1[ep] = test_f1
+
+        pct_done = round(100. * (ep / n_epochs))
+        if not ep % 5:
             # Print and save performance
             # print(f'Progress {pct_done}% trained: \t Loss (Map/Numb): {map_loss.item():.6}/{number_loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}% \t Number {numb_acc:.3}% \t Mean Map Acc {accs.mean():.3}%')
-            print(f'Epoch {ep}, Progress {pct_done}% trained: \t Loss (Map/Numb): {map_train_loss:.6}/{number_train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}% \t Map AUC: {auc:.3} \t Map f1: {f1:.3}')
-            np.savez('results/'+filename, numb_accs=numb_accs, map_accs=map_accs,
-                     numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc, map_f1=map_f1)
+            print(f'Epoch {ep}, Progress {pct_done}% trained')
+            print(f'Train Loss (Num/Map): {train_num_loss:.6}/{train_map_loss:.6}, \t Train Performance (Num/MapAUC/MapF1) {train_num_acc:.3}%/{train_auc:.3}/{train_f1:.3}')
+            print(f'Valid Loss (Num/Map): {val_num_loss:.6}/{val_map_loss:.6}, \t Valid Performance (Num/MapAUC/MapF1) {val_num_acc:.3}%/{val_auc:.3}/{val_f1:.3}')
+            print(f'Test Loss (Num/Map): {test_num_loss:.6}/{test_map_loss:.6}, \t Test Performance (Num/MapAUC/MapF1) {test_num_acc:.3}%/{test_auc:.3}/{test_f1:.3}')
 
-    print(f'Final performance: \t Loss (Map/Numb): {map_train_loss:.6}/{number_train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map AUC: {auc:.3}% \t Map f1: {f1:.3}')
-    np.savez('results/'+filename, numb_accs=numb_accs, map_accs=map_accs,
-             numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc, map_f1=map_f1)
+            np.savez('results/'+filename,
+                     train_loss=optimised_losses,
+                     numb_loss=numb_losses,
+                     numb_acc=numb_accs,
+                     map_loss=map_losses,
+                     map_auc=map_auc,
+                     map_f1=map_f1,
+                     valid_loss=valid_optimised_losses,
+                     valid_numb_loss=valid_numb_losses,
+                     valid_numb_acc=valid_numb_accs,
+                     valid_map_loss=valid_map_losses,
+                     valid_map_auc=valid_map_auc,
+                     valid_map_f1=valid_map_f1,
+                     test_loss=test_optimised_losses,
+                     test_numb_loss=test_numb_losses,
+                     test_numb_acc=test_numb_accs,
+                     test_map_loss=test_map_losses,
+                     test_map_auc=test_map_auc,
+                     test_map_f1=test_map_f1)
+            torch.save(model, f'models/{filename}.pt')
+
+    print(f'Final performance:')
+    print(f'Train Loss (Num/Map): {train_num_loss:.6}/{train_map_loss:.6}, \t Train Performance (Num/MapAUC/MapF1) {train_num_acc:.3}%/{train_auc:.3}/{train_f1:.3}')
+    print(f'Valid Loss (Num/Map): {val_num_loss:.6}/{val_map_loss:.6}, \t Valid Performance (Num/MapAUC/MapF1) {val_num_acc:.3}%/{val_auc:.3}/{val_f1:.3}')
+    print(f'Test Loss (Num/Map): {test_num_loss:.6}/{test_map_loss:.6}, \t Test Performance (Num/MapAUC/MapF1) {test_num_acc:.3}%/{test_auc:.3}/{test_f1:.3}')
+
+    np.savez('results/'+filename,
+             train_loss=optimised_losses,
+             numb_loss=numb_losses,
+             numb_acc=numb_accs,
+             map_loss=map_losses,
+             map_auc=map_auc,
+             map_f1=map_f1,
+             valid_loss=valid_optimised_losses,
+             valid_numb_loss=valid_numb_losses,
+             valid_numb_acc=valid_numb_accs,
+             valid_map_loss=valid_map_losses,
+             valid_map_auc=valid_map_auc,
+             valid_map_f1=valid_map_f1,
+             test_loss=test_optimised_losses,
+             test_numb_loss=test_numb_losses,
+             test_numb_acc=test_numb_accs,
+             test_map_loss=test_map_losses,
+             test_map_auc=test_map_auc,
+             test_map_f1=test_map_f1)
     torch.save(model, f'models/{filename}.pt')
-    return numb_acc, map_acc
+
 
 def train_content_gated_model(model, optimizer, config, scheduler=None):
     print('Content-gated model...')
@@ -806,15 +1089,15 @@ def train_content_gated_model(model, optimizer, config, scheduler=None):
     control = config.control
     preglimpsed = config.preglimpsed
     eye_weight = config.eye_weight
-    model.to(device)
+    clip_grad_norm = 1
 
     # Load the data
     batch_size = 64
     seq_len = 11
     width = int(np.sqrt(model.dorsal.map_size))
-    gaze, num, shape, map_, min_num, min_shape = get_min_data(preglimpsed, device)
+    gaze, pix, num, shape, map_, min_num, min_shape = get_min_data(preglimpsed, device)
     test_set = 'min_trianglestar_2-7_varylum_130x130_2000_noresize'
-    gaze_test, num_test, shape_test, map_test, min_num_test, min_shape_test = get_min_data(test_set, device)
+    gaze_test, pix_test, num_test, shape_test, map_test, min_num_test, min_shape_test = get_min_data(test_set, device)
     seq_len = gaze.shape[1]
     nex = gaze.shape[0]
     # with torch.no_grad():
@@ -932,7 +1215,7 @@ def train_content_gated_model(model, optimizer, config, scheduler=None):
             # Calculate gradients
             loss.backward()
             # Gradient clipping
-            nn.utils.clip_grad_norm_(model.parameters(), 1)
+            nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
             # Take a gradient step
             optimizer.step()
             hidden.detach_()
@@ -1168,22 +1451,25 @@ def get_min_data(preglimpsed, device=None):
     with torch.no_grad():
         print(f'Loading presaved dataset {preglimpsed}...')
         dir = 'preglimpsed_location_sequences/'
-        num = np.load(f'{dir}number_{preglimpsed}_{n_glimpses}glimpses.npy')
+        num = np.load(f'{dir}number_{preglimpsed}.npy')
         num = torch.from_numpy(num).long()
         num = num.to(device)
-        shape = np.load(f'{dir}shape_{preglimpsed}_{n_glimpses}glimpses.npy')
+        shape = np.load(f'{dir}shape_{preglimpsed}.npy')
         shape = torch.from_numpy(shape).long()
         shape = shape.to(device)
-        min_num = np.load(f'{dir}min_num_{preglimpsed}_{n_glimpses}glimpses.npy')
+        min_num = np.load(f'{dir}min_num_{preglimpsed}.npy')
         min_num = torch.from_numpy(min_num).long()
         min_num = min_num.to(device)
-        min_shape = np.load(f'{dir}min_shape_{preglimpsed}_{n_glimpses}glimpses.npy')
+        min_shape = np.load(f'{dir}min_shape_{preglimpsed}.npy')
         min_shape = torch.from_numpy(min_shape).long()
         min_shape = min_shape.to(device)
-        gaze = np.load(f'{dir}gazes_{preglimpsed}_{n_glimpses}glimpses.npy')
+        gaze = np.load(f'{dir}gazes_{preglimpsed}.npy')
         gaze = torch.from_numpy(gaze).float()
         gaze = gaze.to(device)
-        map_ = np.load(f'{dir}map_{preglimpsed}_{n_glimpses}glimpses.npy')
+        pix = np.load(f'{dir}pix_{preglimpsed}.npy')
+        pix = torch.from_numpy(pix).float()
+        pix = pix.to(device)
+        map_ = np.load(f'{dir}map_{preglimpsed}.npy')
         map_ = torch.from_numpy(map_).float()
         map_ = map_.to(device)
 
@@ -1202,7 +1488,7 @@ def get_min_data(preglimpsed, device=None):
             # data = torch.from_numpy(data).float()
             # data = data.to(device)
 
-    return gaze, num, shape, map_, min_num, min_shape
+    return gaze, pix, num, shape, map_, min_num, min_shape
 
 def get_data(seq_len=7, n_classes=7, map_size=1056, device=None, preglimpsed=None):
     """Synthesize data for unique task.
@@ -1396,19 +1682,20 @@ def main(config):
     rnn_act = config.rnn_act
     preglimpsed = config.preglimpsed
     eye_weight = config.eye_weight
+    detached = True if 'detached' in use_loss else False
     lr = 0.01
     mom = 0.9
-    wd = 0.0
+    wd = 1e-6
     config.n_epochs = 2000
     config.control = None
 
+
     # input_size = 1  # difference code
-    input_size = 26**2 # ds-factor=5 676
+    # input_size = 26**2 # ds-factor=5 676
     # input_size = 10 # for testing
     # input_size = 33**2 # 1089   # one_hot
     # out_size = 8
     numb_size = 8
-    dropout_prob = 0.0
 
     # device = torch.device("cuda")
     if config.no_cuda:
@@ -1454,46 +1741,79 @@ def main(config):
     #         for use_loss in ['map_then_both-detached']:
                 # if use_loss == 'map_then_both' and map_size <= 50:
                 #     continue
-    hidden_size = int(np.round(map_size + map_size*0.1))
+    kwargs = {'act':rnn_act, 'eye_weight':eye_weight, 'detached':detached, 'dropout':config.dropout}
+    if config.train_on == 'pix':
+        input_size = 1152
+    elif config.train_on == 'loc':
+        input_size = map_size
+    elif config.train_on == 'both':
+        input_size = map_size + 1152
+    hidden_size = int(np.round(input_size + input_size*0.1))
     # hidden_size = map_size*2
     if model_version == 'two_step':
-        model = TwoStepModel(hidden_size, map_size, numb_size, act=rnn_act, eye_weight=eye_weight)
+        model = TwoStepModel(input_size, hidden_size, map_size, numb_size, **kwargs)
+    elif model_version == 'three_step':
+        model = ThreeStepModel(hidden_size, map_size, numb_size, **kwargs)
     elif model_version == 'content_gated':
-        model = ContentGated_cheat(hidden_size, map_size, numb_size, act=rnn_act)
+        model = ContentGated_cheat(hidden_size, map_size, numb_size, **kwargs)
     elif model_version == 'two_step_ws':
         if 'detached' in use_loss:
-            model = TwoStepModel_weightshare_detached(hidden_size, map_size, numb_size, init=False, act=rnn_act, eye_weight=eye_weight)
+            model = TwoStepModel_weightshare_detached(hidden_size, map_size, numb_size, init=False, **kwargs)
         else:
-            model = TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=False, act=rnn_act, eye_weight=eye_weight)
+            model = TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=False, **kwargs)
     elif model_version == 'two_step_ws_init':
         if 'detached' in use_loss:
-            model = TwoStepModel_weightshare_detached(hidden_size, map_size, numb_size, init=True, act=rnn_act, eye_weight=eye_weight)
+            model = TwoStepModel_weightshare_detached(hidden_size, map_size, numb_size, init=True, **kwargs)
         else:
-            model = TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=True, act=rnn_act, eye_weight=eye_weight)
+            model = TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=True, **kwargs)
     elif 'one_step' in model_version:
         if use_loss == 'number':
-            model = RNN(map_size, hidden_size, numb_size, act=rnn_act, eye_weight=eye_weight)
+            model = RNN(map_size, hidden_size, numb_size, **kwargs)
         elif use_loss == 'map':
-            model = RNN(map_size, hidden_size, map_size, act=rnn_act, eye_weight=eye_weight)
+            model = RNN(map_size, hidden_size, map_size, **kwargs)
     elif model_version == 'number_as_sum':
         model = NumberAsMapSum(map_size, hidden_size)
     else:
         print('Model version not implemented.')
         exit()
+    # Apparently should move model to device before constructing optimizers for it
+    model = model.to(config.device)
     if config.use_schedule:
         # Learning rate scheduler
         start_lr = 0.1
-        scale = 0.9955
-        opt = torch.optim.SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
-        lambda1 = lambda epoch: scale ** epoch
-        scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lambda1)
+        scale = 0.9978  # 0.9955
+        if 'detached' in use_loss:
+            opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
+            if 'two' in model_version:
+                opt_readout = torch.optim.SGD(model.readout.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
+            elif 'three' in model_version:
+                readout_params = [{'params': model.readout1.parameters()}, {'params':model.readout2.parameters()}]
+                opt_readout = torch.optim.SGD(readout_params, lr=start_lr, momentum=mom, weight_decay=wd)
+            lambda1 = lambda epoch: scale ** epoch
+            scheduler_rnn = torch.optim.lr_scheduler.LambdaLR(opt_rnn, lr_lambda=lambda1)
+            scheduler_readout = torch.optim.lr_scheduler.LambdaLR(opt_readout, lr_lambda=lambda1)
+            opt = [opt_rnn, opt_readout]
+            scheduler = [scheduler_rnn, scheduler_readout]
+        else:
+            opt = torch.optim.SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
+            lambda1 = lambda epoch: scale ** epoch
+            scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lambda1)
     else:
-        opt = torch.optim.SGD(model.parameters(), lr=lr, momentum=mom, weight_decay=wd)
-        scheduler = None
+        if 'detached' in use_loss:
+            opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=lr, momentum=mom, weight_decay=wd)
+            if 'two' in model_version:
+                opt_readout = torch.optim.SGD(model.readout.parameters(), lr=lr, momentum=mom, weight_decay=wd)
+            elif 'three' in model_version:
+                readout_params = [{'params': model.readout1.parameters()}, {'params':model.readout2.parameters()}]
+                opt_readout = torch.optim.SGD(readout_params, lr=start_lr, momentum=mom, weight_decay=wd)
+            opt = [opt_rnn, opt_readout]
+        else:
+            opt = torch.optim.SGD(model.parameters(), lr=lr, momentum=mom, weight_decay=wd)
+            scheduler = None
 
-        # n_epochs = 1000
+        # n_epochs = 2000
         # start_lr = 0.1
-        # scale = 0.9955
+        # scale = 0.9978
         # gamma=0.1
         # lrs = np.zeros((n_epochs+1,))
         # lrs_lr = np.zeros((n_epochs+1,))
@@ -1505,7 +1825,7 @@ def main(config):
         #     lrs[ep+1] = lrs[ep] * scale
         #     lrs_lr[ep+1] = start_lr * (scale ** ep)
         #     lrs_exp[ep+1] = lrs_exp[ep] * scale
-        # print(lrs[500])
+        # print(lrs[1000])
         # lrs[:50]
         # print(lrs[-10:])
         # plt.plot(lrs)
@@ -1513,7 +1833,7 @@ def main(config):
         # plt.plot(lrs_exp, label='exponential')
         # plt.legend()
 
-    if 'two' in model_version:
+    if 'two' in model_version or 'three' in model_version:
         # train_two_step_model(model, opt, n_epochs, device, differential,
         #                      use_loss, model_version, preglimpsed=preglimpsed, eye_weight=eye_weight)
         train_two_step_model(model, opt, config, scheduler)
@@ -1550,6 +1870,8 @@ def get_config():
     parser.add_argument('--preglimpsed', type=str, default=None)
     parser.add_argument('--eye_weight', action='store_true', default=False)
     parser.add_argument('--use_schedule', action='store_true', default=False)
+    parser.add_argument('--dropout', type=float, default=0.5)
+    parser.add_argument('--train_on', type=str, default='loc')  ## loc, pix, or both
     config = parser.parse_args()
     print(config)
     return config
