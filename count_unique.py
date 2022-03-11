@@ -1087,6 +1087,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 axes.grid(linestyle='--')
             ax[0, 2].axis('off')
             plt.savefig(f'figures/{filename}_results.png')
+            plt.close()
 
     print(f'Final performance:')
     print(f'Train Loss (Num/Map): {train_num_loss:.6}/{train_map_loss:.6}, \t Train Performance (Num/MapAUC/MapF1) {train_num_acc:.3}%/{train_auc:.3}/{train_f1:.3}')
