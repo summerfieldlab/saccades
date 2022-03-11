@@ -714,9 +714,9 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
         filename = f'two_step_results_{control}'
     else:
         if use_loss == 'map_then_both':
-            filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}-hardthresh{sched}_dr{drop}_tanhrelu_rand_trainon-{config.train_on}'
+            filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}-hardthresh{sched}_lr{config.lr}_wd{config.wd}_dr{drop}_tanhrelu_rand_trainon-{config.train_on}'
         else:
-            filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}{sched}_dr{drop}_tanhrelu_rand_trainon-{config.train_on}'
+            filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}{sched}_lr{config.lr}_wd{config.wd}_dr{drop}_tanhrelu_rand_trainon-{config.train_on}'
     if preglimpsed is not None:
         filename += '_' + preglimpsed
     if eye_weight:
@@ -1059,7 +1059,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             kwargs_test = {'alpha': 0.8, 'color': 'red'}
             row, col = 2, 3
             fig, ax = plt.subplots(row, col, sharex=True, figsize=(6*col, 5*row))
-            plt.suptitle(f'{config.model_version}, {config.rnn_act}, {config.use_loss}, dr={config.dropout}% on intermediate, \n tanh(relu(map)), ORDER SHUFFLED, pos_weight=130-4.5/4.5',fontsize=20)
+            plt.suptitle(f'{config.model_version}, nonlin={config.rnn_act}, {config.use_loss}, dr={config.dropout}% on intermediate, \n tanh(relu(map)), seq shuffled, pos_weight=130-4.5/4.5',fontsize=20)
             ax[0,0].set_title('Number Loss')
             ax[0,0].plot(test_numb_losses[:ep+1], label='test number loss', **kwargs_test)
             ax[0,0].plot(valid_numb_losses[:ep+1], label='valid number loss', **kwargs_val)
@@ -1730,9 +1730,10 @@ def main(config):
     preglimpsed = config.preglimpsed
     eye_weight = config.eye_weight
     detached = True if 'detached' in use_loss else False
-    lr = 0.01
+    # lr = 0.01
+    lr = config.lr
     mom = 0.9
-    wd = 1e-6
+    wd = config.wd
     config.n_epochs = 2000
     config.control = None
 
@@ -1918,6 +1919,8 @@ def get_config():
     parser.add_argument('--eye_weight', action='store_true', default=False)
     parser.add_argument('--use_schedule', action='store_true', default=False)
     parser.add_argument('--dropout', type=float, default=0.5)
+    parser.add_argument('--wd', type=float, default=1e-6)
+    parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--train_on', type=str, default='loc')  ## loc, pix, or both
     config = parser.parse_args()
     print(config)
