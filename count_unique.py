@@ -96,6 +96,35 @@ class ContentGated_cheat(nn.Module):
 
         return min_shape, min_number, counts, maps, hidden
 
+class IntegratedModel(nn.Module):
+    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        act = kwargs['act'] if 'act' in kwargs.keys() else None
+        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
+        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
+        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
+        self.hidden_size = hidden_size
+        self.map_size = map_size
+        self.out_size = output_size
+        self.detached = detached
+        # detached=False should always be false for the twostep model here,
+        self.pix_fc1 = nn.Linear(1152, 2000)
+        self.pix_fc2 = nn.Linear(2000, map_size)
+        # even if we want to detach in the forward of this class
+        self.rnn = TwoStepModel(map_size*2, hidden_size, map_size, output_size, detached=detached, dropout=0)
+        # self.rnn = tanhRNN(input_size, hidden_size, map_size)
+        # self.readout1 = nn.Linear(map_size, map_size, bias=True)
+        self.readout = nn.Linear(map_size, output_size, bias=True)
+
+    def forward(self, x, hidden):
+        gaze = x[:, :self.map_size]
+        pix = x[:, self.map_size:]
+        pix = torch.relu(self.pix_fc1(pix))
+        pix = torch.relu(self.pix_fc2(pix))
+        combined = torch.cat((gaze, pix), dim=1)
+        number, map_, hidden = self.rnn(combined, hidden)
+        return number, map_, hidden
+
 class ThreeStepModel(nn.Module):
     def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
@@ -751,7 +780,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             hidden = hidden.to(device)
             prev_input = torch.zeros((inputs.shape[0], 1), dtype=torch.long)
 
-
+            # FORWARD PASS
             for i in range(seq_len):
                 if differential:
                     unonehot = inputs[:, i, :].nonzero(as_tuple=False)[:, 1].unsqueeze(1)
@@ -1059,15 +1088,15 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             kwargs_test = {'alpha': 0.8, 'color': 'red'}
             row, col = 2, 3
             fig, ax = plt.subplots(row, col, sharex=True, figsize=(6*col, 5*row))
-            plt.suptitle(f'{config.model_version}, nonlin={config.rnn_act}, {config.use_loss}, dr={config.dropout}% on intermediate, \n tanh(relu(map)), seq shuffled, pos_weight=130-4.5/4.5',fontsize=20)
+            plt.suptitle(f'{config.model_version}, nonlin={config.rnn_act}, loss={config.use_loss}, dr={config.dropout}% on intermediate, \n tanh(relu(map)), seq shuffled, pos_weight=130-4.5/4.5 \n {preglimpsed}',fontsize=20)
             ax[0,0].set_title('Number Loss')
             ax[0,0].plot(test_numb_losses[:ep+1], label='test number loss', **kwargs_test)
             ax[0,0].plot(valid_numb_losses[:ep+1], label='valid number loss', **kwargs_val)
             ax[0,0].plot(numb_losses[:ep+1], label='train number loss', **kwargs_train)
             ax[1,0].set_title('Map Loss')
             ax[1,0].plot(valid_map_losses[:ep+1], label='valid map loss', **kwargs_val)
-            ax[1,0].plot(test_map_losses[:ep+1], label='test map loss', **kwargs_test)
             ax[1,0].plot(map_losses[:ep+1], label='train map loss', **kwargs_train)
+            ax[1,0].plot(test_map_losses[:ep+1], label='test map loss', **kwargs_test)
             ax[0,1].set_title('Number Accuracy')
             ax[0,1].set_ylim([10, 100])
             ax[0,1].plot(test_numb_accs[:ep+1], label='test number acc', **kwargs_test)
@@ -1086,7 +1115,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 axes.legend()
                 axes.grid(linestyle='--')
             ax[0, 2].axis('off')
-            plt.savefig(f'figures/{filename}_results.png')
+            plt.savefig(f'figures/{filename}_results.png', bbox_inches='tight', dpi=300)
             plt.close()
 
     print(f'Final performance:')
@@ -1801,6 +1830,8 @@ def main(config):
     # hidden_size = map_size*2
     if model_version == 'two_step':
         model = TwoStepModel(input_size, hidden_size, map_size, numb_size, **kwargs)
+    elif model_version == 'integrated':
+        model = IntegratedModel(input_size, hidden_size, map_size, numb_size, **kwargs)
     elif model_version == 'three_step':
         model = ThreeStepModel(input_size, hidden_size, map_size, numb_size, **kwargs)
     elif model_version == 'content_gated':
@@ -1882,7 +1913,7 @@ def main(config):
         # plt.plot(lrs_exp, label='exponential')
         # plt.legend()
 
-    if 'two' in model_version or 'three' in model_version:
+    if 'two' in model_version or 'three' in model_version or model_version=='integrated':
         # train_two_step_model(model, opt, n_epochs, device, differential,
         #                      use_loss, model_version, preglimpsed=preglimpsed, eye_weight=eye_weight)
         train_two_step_model(model, opt, config, scheduler)
