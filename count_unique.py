@@ -1115,7 +1115,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 axes.legend()
                 axes.grid(linestyle='--')
             ax[0, 2].axis('off')
-            plt.savefig(f'figures/{filename}_results.png', bbox_inches='tight', dpi=300)
+            plt.savefig(f'figures/{filename}_results.png', dpi=300)
             plt.close()
 
     print(f'Final performance:')
