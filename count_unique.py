@@ -878,7 +878,8 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
 
         if config.use_schedule:
             if 'detached' in use_loss:
-                if add_number_loss or 'both' in use_loss:
+                # decrease number loss twice as slow? not sure? basically guessing first 2000 for map next 2000 for map, don't want learning rate to be too small for number weights to learn
+                if (add_number_loss or 'both' in use_loss) and ep % 2:
                     scheduler_readout.step()
                 scheduler_rnn.step()
             else:
@@ -1087,16 +1088,16 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             kwargs_val = {'alpha': 0.8, 'color': 'cyan'}
             kwargs_test = {'alpha': 0.8, 'color': 'red'}
             row, col = 2, 3
-            fig, ax = plt.subplots(row, col, sharex=True, figsize=(6*col, 5*row))
+            fig, ax = plt.subplots(row, col, figsize=(6*col, 6*row))
             plt.suptitle(f'{config.model_version}, nonlin={config.rnn_act}, loss={config.use_loss}, dr={config.dropout}% on intermediate, \n tanh(relu(map)), seq shuffled, pos_weight=130-4.5/4.5 \n {preglimpsed}',fontsize=20)
             ax[0,0].set_title('Number Loss')
             ax[0,0].plot(test_numb_losses[:ep+1], label='test number loss', **kwargs_test)
             ax[0,0].plot(valid_numb_losses[:ep+1], label='valid number loss', **kwargs_val)
             ax[0,0].plot(numb_losses[:ep+1], label='train number loss', **kwargs_train)
             ax[1,0].set_title('Map Loss')
+            ax[1,0].plot(test_map_losses[:ep+1], label='test map loss', **kwargs_test)
             ax[1,0].plot(valid_map_losses[:ep+1], label='valid map loss', **kwargs_val)
             ax[1,0].plot(map_losses[:ep+1], label='train map loss', **kwargs_train)
-            ax[1,0].plot(test_map_losses[:ep+1], label='test map loss', **kwargs_test)
             ax[0,1].set_title('Number Accuracy')
             ax[0,1].set_ylim([10, 100])
             ax[0,1].plot(test_numb_accs[:ep+1], label='test number acc', **kwargs_test)
@@ -1114,6 +1115,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             for axes in ax.flatten():
                 axes.legend()
                 axes.grid(linestyle='--')
+                axes.set_xlabel('Epochs')
             ax[0, 2].axis('off')
             plt.savefig(f'figures/{filename}_results.png', dpi=300)
             plt.close()
@@ -1764,7 +1766,7 @@ def main(config):
     lr = config.lr
     mom = 0.9
     wd = config.wd
-    config.n_epochs = 2000
+    # config.n_epochs = 2000
     config.control = None
 
 
@@ -1954,6 +1956,7 @@ def get_config():
     parser.add_argument('--wd', type=float, default=1e-6)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--train_on', type=str, default='loc')  ## loc, pix, or both
+    parser.add_argument('--n_epochs', type=int, default=2000)
     config = parser.parse_args()
     print(config)
     return config
