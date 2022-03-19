@@ -108,8 +108,10 @@ class IntegratedModel(nn.Module):
         self.out_size = output_size
         self.detached = detached
         # detached=False should always be false for the twostep model here,
-        self.pix_fc1 = nn.Linear(1152, 2000)
-        self.pix_fc2 = nn.Linear(2000, map_size)
+        # self.pix_fc1 = nn.Linear(1152, 2000)
+        # self.pix_fc2 = nn.Linear(2000, map_size)
+        self.pix_fc1 = nn.Linear(1152, map_size)
+
         # even if we want to detach in the forward of this class
         self.rnn = TwoStepModel(map_size*2, hidden_size, map_size, output_size, detached=detached, dropout=0)
         # self.rnn = tanhRNN(input_size, hidden_size, map_size)
@@ -120,9 +122,49 @@ class IntegratedModel(nn.Module):
         gaze = x[:, :self.map_size]
         pix = x[:, self.map_size:]
         pix = torch.relu(self.pix_fc1(pix))
-        pix = torch.relu(self.pix_fc2(pix))
+        # pix = torch.relu(self.pix_fc2(pix))
         combined = torch.cat((gaze, pix), dim=1)
         number, map_, hidden = self.rnn(combined, hidden)
+        return number, map_, hidden
+
+class IntegratedSkipModel(nn.Module):
+    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        act = kwargs['act'] if 'act' in kwargs.keys() else None
+        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
+        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
+        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
+        self.hidden_size = hidden_size
+        self.map_size = map_size
+        self.out_size = output_size
+        self.detached = detached
+        # detached=False should always be false for the twostep model here,
+        self.pix_fc1 = nn.Linear(1152, map_size)
+
+        # even if we want to detach in the forward of this class
+        # self.rnn = TwoStepModel(map_size*2, hidden_size, map_size, output_size, detached=detached, dropout=0)
+        self.map_rnn = RNN(map_size*2, hidden_size, map_size, **kwargs)
+        self.pix_rnn = RNN(map_size, map_size * 1.1, map_size, **kwargs)
+        # self.rnn = tanhRNN(input_size, hidden_size, map_size)
+        # self.readout1 = nn.Linear(map_size, map_size, bias=True)
+        self.readout = nn.Linear(map_size*2, output_size, bias=True)
+
+    def forward(self, x, hidden):
+        gaze = x[:, :self.map_size]
+        pix = x[:, self.map_size:]
+        pix = torch.relu(self.pix_fc1(pix))
+
+        combined = torch.cat((gaze, pix), dim=1)
+        map_, hidden = self.map_rnn(combined, hidden)
+        if self.detached:
+            map_to_pass_on = map_.detach()
+        else:
+            map_to_pass_on = map_
+        map_to_pass_on = torch.tanh(torch.relu(map_to_pass_on))
+
+        pix = self.pix_rnn(pix)
+        map_with_skippix = torch.cat((map_to_pass_on, pix), dim=1)
+        number = self.readout(map_with_skippix)
         return number, map_, hidden
 
 class ThreeStepModel(nn.Module):
@@ -138,13 +180,15 @@ class ThreeStepModel(nn.Module):
         self.detached = detached
         # detached=False should always be false for the twostep model here,
         # even if we want to detach in the forward of this class
-        self.rnn = TwoStepModel(input_size, hidden_size, map_size, map_size, detached=False, dropout=0)
+        # self.rnn = TwoStepModel(input_size, hidden_size, map_size, map_size, detached=False, dropout=0)
+        self.rnn = RNN(input_size, hidden_size, map_size)
         # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-        # self.readout1 = nn.Linear(map_size, map_size, bias=True)
-        self.readout = nn.Linear(map_size, output_size, bias=True)
+        self.readout1 = nn.Linear(map_size, map_size/2, bias=True)
+        self.readout2 = nn.Linear(map_size/2, output_size, bias=True)
 
     def forward(self, x, hidden):
-        map_, _, hidden = self.rnn(x, hidden)
+        # map_, _, hidden = self.rnn(x, hidden)
+        map_, hidden = self.rnn(x, hidden)
         if self.detached:
             map_to_pass_on = map_.detach()
         else:
@@ -152,7 +196,8 @@ class ThreeStepModel(nn.Module):
         map_to_pass_on = torch.tanh(torch.relu(map_to_pass_on))
         # number = self.readout(torch.sigmoid(map_to_pass_on))
         # intermediate = torch.relu(self.readout1(map_to_pass_on))
-        number = self.readout(map_to_pass_on)
+        number = torch.relu(self.readout1(map_to_pass_on))
+        number = self.readout2(number)
         # number = torch.relu(self.fc(map))
         return number, map_, hidden
 
@@ -1828,7 +1873,7 @@ def main(config):
         input_size = map_size
     elif config.train_on == 'both':
         input_size = map_size + 1152
-    hidden_size = int(np.round(input_size + input_size*0.1))
+    hidden_size = int(np.round(input_size*1.1))
     # hidden_size = map_size*2
     if model_version == 'two_step':
         model = TwoStepModel(input_size, hidden_size, map_size, numb_size, **kwargs)
@@ -1866,11 +1911,11 @@ def main(config):
         scale = 0.9978  # 0.9955
         if 'detached' in use_loss:
             opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
-            # if 'two' in model_version:
-            opt_readout = torch.optim.SGD(model.readout.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
-            # elif 'three' in model_version:
-                # readout_params = [{'params': model.readout1.parameters()}, {'params':model.readout2.parameters()}]
-                # opt_readout = torch.optim.SGD(readout_params, lr=start_lr, momentum=mom, weight_decay=wd)
+            if 'two' in model_version:
+                opt_readout = torch.optim.SGD(model.readout.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
+            elif 'three' in model_version:
+                readout_params = [{'params': model.readout1.parameters()}, {'params':model.readout2.parameters()}]
+                opt_readout = torch.optim.SGD(readout_params, lr=start_lr, momentum=mom, weight_decay=wd)
             lambda1 = lambda epoch: scale ** epoch
             scheduler_rnn = torch.optim.lr_scheduler.LambdaLR(opt_rnn, lr_lambda=lambda1)
             scheduler_readout = torch.optim.lr_scheduler.LambdaLR(opt_readout, lr_lambda=lambda1)
