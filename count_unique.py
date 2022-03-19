@@ -183,8 +183,8 @@ class ThreeStepModel(nn.Module):
         # self.rnn = TwoStepModel(input_size, hidden_size, map_size, map_size, detached=False, dropout=0)
         self.rnn = RNN(input_size, hidden_size, map_size)
         # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-        self.readout1 = nn.Linear(map_size, map_size/2, bias=True)
-        self.readout2 = nn.Linear(map_size/2, output_size, bias=True)
+        self.readout1 = nn.Linear(map_size, map_size//2, bias=True)
+        self.readout2 = nn.Linear(map_size//2, output_size, bias=True)
 
     def forward(self, x, hidden):
         # map_, _, hidden = self.rnn(x, hidden)
