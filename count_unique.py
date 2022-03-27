@@ -1,4 +1,5 @@
 import sys
+import os
 from datetime import datetime
 import argparse
 from itertools import combinations
@@ -802,7 +803,7 @@ def train_rnn(model, optimizer, config):
             print(f'Epoch {ep}, Progress {pct_done}% trained: \t Loss: {train_loss:.6}, Accuracy or F1: {acc:.6}% ({correct}/{len(dataset)})')
             np.savez(filename, numb_accs=numb_accs, numb_losses=numb_losses)
     np.savez(filename, numb_accs=numb_accs, numb_losses=numb_losses)
-    torch.save(model, f'models/{filename}.pt')
+    torch.save(model.state_dict(), f'models/{filename}.pt')
 
 def train_two_step_model(model, optimizer, config, scheduler=None):
     if 'detached' in config.use_loss:
@@ -885,13 +886,14 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
     # Where to save the results
     nonlinearity = config.rnn_act + '_' if config.rnn_act is not None else ''
     sched = '_sched' if config.use_schedule else ''
+    pretrained = '-pretrained' if config.pretrained_map else ''
     if control:
         filename = f'two_step_results_{control}'
     else:
         if use_loss == 'map_then_both':
-            filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}-hardthresh{sched}_lr{config.lr}_wd{config.wd}_dr{drop}_tanhrelu_rand_trainon-{config.train_on}'
+            filename = f'{model_version}{pretrained}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}-hardthresh{sched}_lr{config.lr}_wd{config.wd}_dr{drop}_tanhrelu_rand_trainon-{config.train_on}'
         else:
-            filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}{sched}_lr{config.lr}_wd{config.wd}_dr{drop}_tanhrelu_rand_trainon-{config.train_on}'
+            filename = f'{model_version}{pretrained}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}{sched}_lr{config.lr}_wd{config.wd}_dr{drop}_tanhrelu_rand_trainon-{config.train_on}'
     if preglimpsed is not None:
         filename += '_' + preglimpsed
     if eye_weight:
@@ -944,7 +946,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             number_loss = criterion(number, numb_label)
             if use_loss == 'map':
                 loss = map_loss
-            elif use_loss == 'number':
+            elif 'number' in use_loss:
                 loss = number_loss
             elif use_loss == 'both':
                 loss = map_loss + number_loss
@@ -992,6 +994,12 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 # loss = map_loss + number_loss
                 # model.train()
                 loss = map_loss + number_loss
+            elif use_loss == 'number-detached':
+                number_loss.backward()
+                # Gradient clipping
+                nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+                # Take a gradient step
+                opt_readout.step()
             else:
                 loss.backward()
                 # print('must specify which loss to optimize')
@@ -1098,7 +1106,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 number_loss = criterion(number, numb_label)
                 if use_loss == 'map':
                     loss = map_loss
-                elif use_loss == 'number':
+                elif 'number' in use_loss:
                     loss = number_loss
                 elif use_loss == 'both':
                     loss = map_loss + number_loss
@@ -1355,8 +1363,9 @@ def train_content_gated_model(model, optimizer, config, scheduler=None):
     # Where to save the results
     nonlinearity = 'tanh_' if model.dorsal.rnn.act_fun is not None else ''
     sched = '_sched' if config.use_schedule else ''
+    pretrained = '-pretrained' if config.pretrained_map else ''
 
-    filename = f'{model_version}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}{sched}'
+    filename = f'{model_version}{pretrained}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}{sched}'
     if preglimpsed is not None:
         filename += '_' + preglimpsed
     if eye_weight:
@@ -2016,9 +2025,19 @@ def main(config):
 
     if config.pretrained_map:
         # Load trained model and initialize rnn params with pretained
-        saved_model = torch.load('models/two_step_results_mapsz900_loss-both-detached_sched_lr0.01_wd0.0_dr0.0_tanhrelu_rand_trainon-loc_no_hearts_2-7_varylum_130x130_90000_noresize_11glimpses.pt')
-        model.rnn.i2h = saved_model.rnn.i2h
-        model.rnn.i2o = saved_model.rnn.i2o
+        if os.path.isdir('models_nooper'):
+            saved_model = torch.load('models_nooper/two_step_results_mapsz900_loss-both-detached_sched_lr0.01_wd0.0_dr0.0_tanhrelu_rand_trainon-loc_no_hearts_2-7_varylum_130x130_90000_noresize_11glimpses.pt')
+        else:
+            saved_model = torch.load('models/two_step_results_mapsz900_loss-both-detached_sched_lr0.01_wd0.0_dr0.0_tanhrelu_rand_trainon-loc_no_hearts_2-7_varylum_130x130_90000_noresize_11glimpses.pt')
+
+        # model.load_state_dict(saved_model)
+        with torch.no_grad():
+            model.rnn = saved_model.rnn
+        # model.rnn.i2h = saved_model.rnn.i2h
+        # model.rnn.i2o = saved_model.rnn.i2o
+        for name, param in model.rnn.named_parameters():
+            param.requires_grad = False
+
 
     # Apparently should move model to device before constructing optimizers for it
     model = model.to(config.device)
