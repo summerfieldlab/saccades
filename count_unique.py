@@ -46,6 +46,7 @@ class Timer():
         self.elapsed_time = self.end - self.start
         print('Execution time: {}'.format(self.elapsed_time))
 
+# Models for min task
 class ContentGated_cheat(nn.Module):
     """Same as ContentGated except the shape label is passed directly.
 
@@ -96,6 +97,7 @@ class ContentGated_cheat(nn.Module):
 
         return min_shape, min_number, counts, maps, hidden
 
+# Models with integrated pixel and gaze streams
 class IntegratedModel(nn.Module):
     def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
@@ -167,6 +169,7 @@ class IntegratedSkipModel(nn.Module):
         number = self.readout(map_with_skippix)
         return number, map_, hidden
 
+# Gaze only models
 class ThreeStepModel(nn.Module):
     def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
@@ -235,6 +238,79 @@ class TwoStepModel(nn.Module):
         number = self.readout(map_to_pass_on)
         # number = torch.relu(self.fc(map))
         return number, map_, hidden
+
+
+class ConvReadoutMapNet(nn.Module):
+    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        act = kwargs['act'] if 'act' in kwargs.keys() else None
+        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
+        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
+        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
+        self.hidden_size = hidden_size
+        self.map_size = map_size
+        self.width = int(np.sqrt(map_size))
+        self.out_size = output_size
+        self.detached = detached
+        self.rnn = RNN(input_size, hidden_size, map_size, act, eye_weight)
+        self.initHidden = self.rnn.initHidden
+        self.readout = ConvNet(self.width, self.width, self.out_size, dropout)
+
+    def forward(self, x, hidden):
+        batch_size = x.shape[0]
+        map_, hidden = self.rnn(x, hidden)
+        # map_ = self.drop_layer(map_)
+        if self.detached:
+            map_to_pass_on = map_.detach()
+        else:
+            map_to_pass_on = map_
+        # If this model is mapping rather than counting, nonlineartities get applied later
+        if self.map_size != self.out_size: # counting
+            map_to_pass_on = torch.tanh(torch.relu(map_to_pass_on))
+        map_to_pass_on = map_to_pass_on.view((-1, 1, self.width, self.width))
+        number = self.readout(map_to_pass_on)
+        # number = torch.relu(self.fc(map))
+        return number, map_, hidden
+
+class ConvNet(nn.Module):
+    def __init__(self, width, height, output_size, dropout):
+        super().__init__()
+        self.kernel1_size = 5
+        self.cnn1_nchannels_out = 6
+        self.poolsize = 2
+        self.kernel2_size = 6
+        self.cnn2_nchannels_out = 12
+        self.LReLU = nn.LeakyReLU(0.1)
+
+        # Default initialization is init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        # (Also assumes leaky Relu for gain)
+        # which is appropriate for all layers here
+        self.conv1 = nn.Conv2d(1, self.cnn1_nchannels_out, self.kernel1_size)    # (NChannels_in, NChannels_out, kernelsize)
+        # torch.nn.init.kaiming_uniform_(self.conv1.weight, nonlinearity='relu')
+        self.pool = nn.MaxPool2d(self.poolsize, self.poolsize)     # kernel height, kernel width
+        self.conv2 = nn.Conv2d(self.cnn1_nchannels_out, self.cnn2_nchannels_out, self.kernel2_size)   # (NChannels_in, NChannels_out, kernelsize)
+        # torch.nn.init.kaiming_uniform_(self.conv2.weight, nonlinearity='relu')
+        # track the size of the cnn transformations
+        self.cnn2_width_out = ((width - self.kernel1_size+1) - self.kernel2_size + 1) // self.poolsize
+        self.cnn2_height_out = ((height - self.kernel1_size+1) - self.kernel2_size + 1) // self.poolsize
+
+        # pass through FC layers
+        self.fc1 = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), 120)  # size input, size output
+
+        self.fc2 = nn.Linear(120, output_size)
+
+        # Dropout
+        self.drop_layer = nn.Dropout(p=dropout)  # 20% chance of each neuron being dropped out / zeroed during each forward pass
+
+    def forward(self, x):
+        x = self.LReLU(self.conv1(x))
+        x = self.pool(self.LReLU(self.conv2(x)))
+        x = x.view(-1, x.shape[1]*x.shape[2]*x.shape[3]) # this reshapes the tensor to be a 1D vector, from whatever the final convolutional layer output
+        # add dropout before fully connected layers, widest part of network
+        x = self.drop_layer(x)
+        x = self.LReLU(self.fc1(x))
+        x = self.fc2(x)
+        return x
 
 # class TwoStepModel_hist(nn.Module):
     # def __init__(self, input_size, hidden_size, map_size, output_size):
@@ -353,20 +429,27 @@ class RNN(nn.Module):
         self.input_size = input_size
         self.out_size = output_size
         self.hidden_size = hidden_size
+        self.eye_weight = eye_weight
         if act == 'tanh':
             self.act_fun = torch.tanh
+            gain = 5/3
         elif act == 'relu':
             self.act_fun = torch.relu
+            gain = np.sqrt(2)
+        elif act == 'sig':
+            self.act_fun = nn.Sigmoid()
+            gain = 1
         else:
             self.act_fun = None
+            gain = 1
 
         self.i2h = nn.Linear(input_size + hidden_size, hidden_size)
         self.drop_layer = nn.Dropout(p=dropout)
         self.i2o = nn.Linear(input_size + hidden_size, output_size)
-        if eye_weight:
-            with torch.no_grad():
-                self.i2o.weight[:, :input_size] = (torch.eye(input_size) * 1.05) - 0.05
-                self.i2h.weight[:, input_size:] = (torch.eye(hidden_size) * 1.05) - 0.05
+        self.init_params(gain)
+
+                # self.i2o.weight[:, :input_size] = (torch.eye(input_size) * 1.05) - 0.05
+                # self.i2h.weight[:, input_size:] = (torch.eye(hidden_size) * 1.05) - 0.05
         # self.softmax = nn.LogSoftmax(dim=1)
 
     def forward(self, input, hidden):
@@ -378,6 +461,24 @@ class RNN(nn.Module):
         output = self.i2o(combined)
         # output = self.softmax(output)
         return output, hidden
+
+    def init_params(self, gain):
+        if self.act_fun == 'relu':
+            nn.init.kaiming_uniform_(self.i2h.weight, a=math.sqrt(5), nonlinearity='relu')
+            nn.init.kaiming_uniform_(self.i2o.weight, a=math.sqrt(5), nonlinearity='relu')
+        elif self.act_fun == 'lrelu':
+            nn.init.kaiming_uniform_(self.i2h.weight, a=math.sqrt(5), nonlinearity='leaky_relu')
+            nn.init.kaiming_uniform_(self.i2o.weight, a=math.sqrt(5), nonlinearity='leaky_relu')
+        elif self.act_fun is None:
+            nn.init.kaiming_uniform_(self.i2h.weight, a=math.sqrt(5), nonlinearity='linear')
+            nn.init.kaiming_uniform_(self.i2o.weight, a=math.sqrt(5), nonlinearity='linear')
+        else:
+            nn.init.xavier_uniform_(self.i2h.weight, gain=gain)
+            nn.init.xavier_uniform_(self.i2o.weight, gain=gain)
+        if self.eye_weight:
+            with torch.no_grad():
+                nn.init.eye_(self.i2o.weight[:, :self.input_size])
+                nn.init.eye_(self.i2h.weight[:, self.input_size:])
 
     def initHidden(self, batch_size):
         return torch.zeros(batch_size, self.hidden_size)
@@ -1811,6 +1912,8 @@ def main(config):
     lr = config.lr
     mom = 0.9
     wd = config.wd
+    wd_readout = config.wd
+    wd_rnn = 0
     # config.n_epochs = 2000
     config.control = None
 
@@ -1877,6 +1980,8 @@ def main(config):
     # hidden_size = map_size*2
     if model_version == 'two_step':
         model = TwoStepModel(input_size, hidden_size, map_size, numb_size, **kwargs)
+    elif model_version == 'two_step_conv':
+        model = ConvReadoutMapNet(input_size, hidden_size, map_size, numb_size, **kwargs)
     elif model_version == 'integrated':
         model = IntegratedModel(input_size, hidden_size, map_size, numb_size, **kwargs)
     elif model_version == 'three_step':
@@ -1903,19 +2008,32 @@ def main(config):
     else:
         print('Model version not implemented.')
         exit()
+
+    print('Params to learn:')
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"\t {name} {param.shape}")
+
+    if config.pretrained_map:
+        # Load trained model and initialize rnn params with pretained
+        saved_model = torch.load('models/two_step_results_mapsz900_loss-both-detached_sched_lr0.01_wd0.0_dr0.0_tanhrelu_rand_trainon-loc_no_hearts_2-7_varylum_130x130_90000_noresize_11glimpses.pt')
+        model.rnn.i2h = saved_model.rnn.i2h
+        model.rnn.i2o = saved_model.rnn.i2o
+
     # Apparently should move model to device before constructing optimizers for it
     model = model.to(config.device)
+
     if config.use_schedule:
         # Learning rate scheduler
         start_lr = 0.1
         scale = 0.9978  # 0.9955
         if 'detached' in use_loss:
-            opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
+            opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=start_lr, momentum=mom, weight_decay=wd_rnn)
             if 'two' in model_version:
-                opt_readout = torch.optim.SGD(model.readout.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
+                opt_readout = torch.optim.SGD(model.readout.parameters(), lr=start_lr, momentum=mom, weight_decay=wd_readout)
             elif 'three' in model_version:
                 readout_params = [{'params': model.readout1.parameters()}, {'params':model.readout2.parameters()}]
-                opt_readout = torch.optim.SGD(readout_params, lr=start_lr, momentum=mom, weight_decay=wd)
+                opt_readout = torch.optim.SGD(readout_params, lr=start_lr, momentum=mom, weight_decay=wd_readout)
             lambda1 = lambda epoch: scale ** epoch
             scheduler_rnn = torch.optim.lr_scheduler.LambdaLR(opt_rnn, lr_lambda=lambda1)
             scheduler_readout = torch.optim.lr_scheduler.LambdaLR(opt_readout, lr_lambda=lambda1)
@@ -1927,9 +2045,9 @@ def main(config):
             scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lambda1)
     else:
         if 'detached' in use_loss:
-            opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=lr, momentum=mom, weight_decay=wd)
+            opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=lr, momentum=mom, weight_decay=wd_rnn)
             # if 'two' in model_version:
-            opt_readout = torch.optim.SGD(model.readout.parameters(), lr=lr, momentum=mom, weight_decay=wd)
+            opt_readout = torch.optim.SGD(model.readout.parameters(), lr=lr, momentum=mom, weight_decay=wd_readout)
             # elif 'three' in model_version:
             #     readout_params = [{'params': model.readout1.parameters()}, {'params':model.readout2.parameters()}]
             #     opt_readout = torch.optim.SGD(readout_params, lr=start_lr, momentum=mom, weight_decay=wd)
@@ -1998,10 +2116,11 @@ def get_config():
     parser.add_argument('--eye_weight', action='store_true', default=False)
     parser.add_argument('--use_schedule', action='store_true', default=False)
     parser.add_argument('--dropout', type=float, default=0.5)
-    parser.add_argument('--wd', type=float, default=1e-6)
+    parser.add_argument('--wd', type=float, default=0) # 1e-6
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--train_on', type=str, default='loc')  ## loc, pix, or both
     parser.add_argument('--n_epochs', type=int, default=2000)
+    parser.add_argument('--pretrained_map', action='store_true', default=False)
     config = parser.parse_args()
     print(config)
     return config
