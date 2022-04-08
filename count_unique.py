@@ -247,15 +247,17 @@ class ConvReadoutMapNet(nn.Module):
         act = kwargs['act'] if 'act' in kwargs.keys() else None
         eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
         detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
+        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
+        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
+        big = kwargs['big'] if 'big' in kwargs.keys() else False
         self.hidden_size = hidden_size
         self.map_size = map_size
         self.width = int(np.sqrt(map_size))
         self.out_size = output_size
         self.detached = detached
-        self.rnn = RNN(input_size, hidden_size, map_size, act, eye_weight)
+        self.rnn = RNN(input_size, hidden_size, map_size, act, eye_weight, drop_rnn)
         self.initHidden = self.rnn.initHidden
-        self.readout = ConvNet(self.width, self.width, self.out_size, dropout)
+        self.readout = ConvNet(self.width, self.width, self.out_size, drop_readout, big=big)
 
     def forward(self, x, hidden):
         batch_size = x.shape[0]
@@ -274,13 +276,26 @@ class ConvReadoutMapNet(nn.Module):
         return number, map_, hidden
 
 class ConvNet(nn.Module):
-    def __init__(self, width, height, output_size, dropout):
+    def __init__(self, width, height, output_size, dropout, big=False):
         super().__init__()
-        self.kernel1_size = 5
-        self.cnn1_nchannels_out = 6
-        self.poolsize = 2
-        self.kernel2_size = 6
-        self.cnn2_nchannels_out = 12
+        # Larger version
+        if big:
+            self.kernel1_size = 5
+            self.cnn1_nchannels_out = 32
+            self.poolsize = 2
+            self.kernel2_size = 6
+            self.cnn2_nchannels_out = 128
+            self.kernel3_size = 6
+            self.cnn3_nchannels_out = 256
+        else:  # Smaller version
+            self.kernel1_size = 5
+            self.cnn1_nchannels_out = 6
+            self.poolsize = 2
+            self.kernel2_size = 6
+            self.cnn2_nchannels_out = 12
+            self.kernel3_size = 6
+            self.cnn3_nchannels_out = 9
+
         self.LReLU = nn.LeakyReLU(0.1)
 
         # Default initialization is init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -290,13 +305,17 @@ class ConvNet(nn.Module):
         # torch.nn.init.kaiming_uniform_(self.conv1.weight, nonlinearity='relu')
         self.pool = nn.MaxPool2d(self.poolsize, self.poolsize)     # kernel height, kernel width
         self.conv2 = nn.Conv2d(self.cnn1_nchannels_out, self.cnn2_nchannels_out, self.kernel2_size)   # (NChannels_in, NChannels_out, kernelsize)
+        self.conv3 = nn.Conv2d(self.cnn2_nchannels_out, self.cnn3_nchannels_out, self.kernel3_size)
         # torch.nn.init.kaiming_uniform_(self.conv2.weight, nonlinearity='relu')
         # track the size of the cnn transformations
-        self.cnn2_width_out = ((width - self.kernel1_size+1) - self.kernel2_size + 1) // self.poolsize
-        self.cnn2_height_out = ((height - self.kernel1_size+1) - self.kernel2_size + 1) // self.poolsize
+        # self.cnn2_width_out = ((width - self.kernel1_size+1) - self.kernel2_size + 1) // self.poolsize
+        # self.cnn2_height_out = ((height - self.kernel1_size+1) - self.kernel2_size + 1) // self.poolsize
+        self.cnn3_width_out = (((width - self.kernel1_size+1) - self.kernel2_size + 1)  // self.poolsize) - self.kernel3_size+1
+        self.cnn3_height_out = (((height - self.kernel1_size+1) - self.kernel2_size + 1)  // self.poolsize) - self.kernel3_size+1
 
         # pass through FC layers
-        self.fc1 = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), 120)  # size input, size output
+        # self.fc1 = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), 120)  # size input, size output
+        self.fc1 = nn.Linear(int(self.cnn3_nchannels_out * self.cnn3_width_out * self.cnn3_height_out), 120)  # size input, size output
 
         self.fc2 = nn.Linear(120, output_size)
 
@@ -306,6 +325,7 @@ class ConvNet(nn.Module):
     def forward(self, x):
         x = self.LReLU(self.conv1(x))
         x = self.pool(self.LReLU(self.conv2(x)))
+        x = self.LReLU(self.conv3(x))
         x = x.view(-1, x.shape[1]*x.shape[2]*x.shape[3]) # this reshapes the tensor to be a 1D vector, from whatever the final convolutional layer output
         # add dropout before fully connected layers, widest part of network
         x = self.drop_layer(x)
@@ -460,7 +480,6 @@ class RNN(nn.Module):
         if self.act_fun is not None:
             hidden = self.act_fun(hidden)
         output = self.i2o(combined)
-        # output = self.softmax(output)
         return output, hidden
 
     def init_params(self, gain):
@@ -650,8 +669,8 @@ def train_rnn_nocount(model, optimizer, n_epochs, device):
     for ep in range(n_epochs):
         correct = np.zeros(7,)
         # shuffle the sequence order on each epoch
-        for i, row in enumerate(data):
-            data[i, :, :] = row[torch.randperm(seq_len), :]
+        # for i, row in enumerate(data):
+        #     data[i, :, :] = row[torch.randperm(seq_len), :]
         dataset = TensorDataset(data, target_nocount)
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
         for batch_idx, (inputs, label) in enumerate(loader):
@@ -806,6 +825,7 @@ def train_rnn(model, optimizer, config):
     torch.save(model.state_dict(), f'models/{filename}.pt')
 
 def train_two_step_model(model, optimizer, config, scheduler=None):
+    """Main train/test loop."""
     if 'detached' in config.use_loss:
         assert isinstance(optimizer, list)
         opt_rnn, opt_readout = optimizer
@@ -821,7 +841,9 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
     preglimpsed = config.preglimpsed
     eye_weight = config.eye_weight
     rnn = model.rnn
-    drop = config.dropout
+    # drop = config.dropout
+    drop_rnn = config.drop_rnn
+    drop_readout = config.drop_readout
     clip_grad_norm = 1
 
     # Synthesize or load the data
@@ -891,9 +913,9 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
         filename = f'two_step_results_{control}'
     else:
         if use_loss == 'map_then_both':
-            filename = f'{model_version}{pretrained}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}-hardthresh{sched}_lr{config.lr}_wd{config.wd}_dr{drop}_tanhrelu_rand_trainon-{config.train_on}'
+            filename = f'{model_version}{pretrained}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}-hardthresh{sched}_lr{config.lr}_wd{config.wd}_dr-rnn{drop_rnn}_dr-ro{drop_readout}_tanhrelu_rand_trainon-{config.train_on}'
         else:
-            filename = f'{model_version}{pretrained}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}{sched}_lr{config.lr}_wd{config.wd}_dr{drop}_tanhrelu_rand_trainon-{config.train_on}'
+            filename = f'{model_version}{pretrained}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}{sched}_lr{config.lr}_wd{config.wd}_dr-rnn{drop_rnn}_dr-ro{drop_readout}_tanhrelu_rand_trainon-{config.train_on}'
     if preglimpsed is not None:
         filename += '_' + preglimpsed
     if eye_weight:
@@ -920,9 +942,9 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             model.zero_grad()
             input_dim = inputs.shape[0]
 
-            for i, row in enumerate(inputs):
+            # for i, row in enumerate(inputs):
             # shuffle the sequence order
-                inputs[i, :, :] = row[torch.randperm(seq_len), :]
+                # inputs[i, :, :] = row[torch.randperm(seq_len), :]
 
             hidden = rnn.initHidden(input_dim)
             hidden = hidden.to(device)
@@ -959,15 +981,19 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                     loss = map_loss
 
             if use_loss == 'map_then_both-detached':
-                if ep > 0 and (map_f1[ep - 1] > 0.5 or ep > n_epochs / 2):
+                ep_thresh = 500
+                retain_graph = False
+		#if ep > 0 and (map_f1[ep - 1] > 0.5 or ep > n_epochs / 2):
+                if ep > ep_thresh:
                     add_number_loss = True
+                    retrain_graph = True
                 # model.train_rnn()
-                map_loss.backward()
+                map_loss.backward(retain_graph=retain_graph)
                 nn.utils.clip_grad_norm_(model.rnn.parameters(), clip_grad_norm)
                 opt_rnn.step()
                 if add_number_loss:
                     # model.train_readout()
-                    number_loss.backward(retain_graph=True)
+                    number_loss.backward()
                     nn.utils.clip_grad_norm_(model.readout.parameters(), clip_grad_norm)
                     opt_readout.step()
                     loss = map_loss + number_loss
@@ -1033,7 +1059,8 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
         if config.use_schedule:
             if 'detached' in use_loss:
                 # decrease number loss twice as slow? not sure? basically guessing first 2000 for map next 2000 for map, don't want learning rate to be too small for number weights to learn
-                if (add_number_loss or 'both' in use_loss) and ep % 2:
+                readout_scheduler_rate = 1 if config.pretrained_map else 2
+                if (add_number_loss or (use_loss == 'both') or (use_loss == 'both-detached') or ('number' in use_loss)):  #and ep % readout_scheduler_rate:
                     scheduler_readout.step()
                 scheduler_rnn.step()
             else:
@@ -1243,7 +1270,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             kwargs_test = {'alpha': 0.8, 'color': 'red'}
             row, col = 2, 3
             fig, ax = plt.subplots(row, col, figsize=(6*col, 6*row))
-            plt.suptitle(f'{config.model_version}, nonlin={config.rnn_act}, loss={config.use_loss}, dr={config.dropout}% on intermediate, \n tanh(relu(map)), seq shuffled, pos_weight=130-4.5/4.5 \n {preglimpsed}',fontsize=20)
+            plt.suptitle(f'{config.model_version}, nonlin={config.rnn_act}, loss={config.use_loss}, dr-rnn={config.drop_rnn}, dr-ro={config.drop_readout} \n tanh(relu(map)), seq not shuffled, pos_weight=130-4.5/4.5 \n {preglimpsed}',fontsize=20)
             ax[0,0].set_title('Number Loss')
             ax[0,0].plot(test_numb_losses[:ep+1], label='test number loss', **kwargs_test)
             ax[0,0].plot(valid_numb_losses[:ep+1], label='valid number loss', **kwargs_val)
@@ -1978,7 +2005,8 @@ def main(config):
     #         for use_loss in ['map_then_both-detached']:
                 # if use_loss == 'map_then_both' and map_size <= 50:
                 #     continue
-    kwargs = {'act':rnn_act, 'eye_weight':eye_weight, 'detached':detached, 'dropout':config.dropout}
+    kwargs = {'act': rnn_act, 'eye_weight': eye_weight, 'detached': detached,
+              'drop_rnn': config.drop_rnn, 'drop_readout': config.drop_readout}
     if config.train_on == 'pix':
         input_size = 1152
     elif config.train_on == 'loc':
@@ -1989,8 +2017,11 @@ def main(config):
     # hidden_size = map_size*2
     if model_version == 'two_step':
         model = TwoStepModel(input_size, hidden_size, map_size, numb_size, **kwargs)
-    elif model_version == 'two_step_conv':
-        model = ConvReadoutMapNet(input_size, hidden_size, map_size, numb_size, **kwargs)
+    elif 'conv' in model_version:
+        if 'big' in model_version:
+            model = ConvReadoutMapNet(input_size, hidden_size, map_size, numb_size, big=True, **kwargs)
+        else:
+            model = ConvReadoutMapNet(input_size, hidden_size, map_size, numb_size, **kwargs)
     elif model_version == 'integrated':
         model = IntegratedModel(input_size, hidden_size, map_size, numb_size, **kwargs)
     elif model_version == 'three_step':
@@ -2045,7 +2076,8 @@ def main(config):
     if config.use_schedule:
         # Learning rate scheduler
         start_lr = 0.1
-        scale = 0.9978  # 0.9955
+        # Can decay lr quicker when starting with the rnn weights pretrained
+        scale = 0.9955 if config.pretrained_map else 0.9978
         if 'detached' in use_loss:
             opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=start_lr, momentum=mom, weight_decay=wd_rnn)
             if 'two' in model_version:
@@ -2134,7 +2166,8 @@ def get_config():
     parser.add_argument('--preglimpsed', type=str, default=None)
     parser.add_argument('--eye_weight', action='store_true', default=False)
     parser.add_argument('--use_schedule', action='store_true', default=False)
-    parser.add_argument('--dropout', type=float, default=0.5)
+    parser.add_argument('--drop_readout', type=float, default=0.5)
+    parser.add_argument('--drop_rnn', type=float, default=0.1)
     parser.add_argument('--wd', type=float, default=0) # 1e-6
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--train_on', type=str, default='loc')  ## loc, pix, or both
