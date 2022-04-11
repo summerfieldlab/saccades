@@ -101,33 +101,50 @@ class ContentGated_cheat(nn.Module):
 # Models with integrated pixel and gaze streams
 class IntegratedModel(nn.Module):
     def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
+        """Integrate pixel and gaze location streams.
+
+        One embedding layer for pixels, merged with place code gaze location
+        before input into RNN trained to produce map of object locations.
+        Three layer conv readout from map.
+        """
         super().__init__()
         act = kwargs['act'] if 'act' in kwargs.keys() else None
         eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
         detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
+        # dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
+        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
+        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
         self.hidden_size = hidden_size
         self.map_size = map_size
+        self.width = int(np.sqrt(map_size))
         self.out_size = output_size
         self.detached = detached
         # detached=False should always be false for the twostep model here,
         # self.pix_fc1 = nn.Linear(1152, 2000)
-        # self.pix_fc2 = nn.Linear(2000, map_size)
-        self.pix_fc1 = nn.Linear(1152, map_size)
+
+        # self.pix_fc1 = nn.Linear(1152, map_size)  # when glimpse width=24
+        self.pix_fc1 = nn.Linear(288, map_size)  # when glimpse width=12
+        self.LReLU = nn.LeakyReLU(0.1)
+        self.pix_fc2 = nn.Linear(map_size, map_size)
 
         # even if we want to detach in the forward of this class
-        self.rnn = TwoStepModel(map_size*2, hidden_size, map_size, output_size, detached=detached, dropout=0)
+        self.rnn = ConvReadoutMapNet(map_size*2, hidden_size, map_size, output_size, **kwargs)
+        self.readout = self.rnn.readout
+        # self.rnn = TwoStepModel(map_size*2, hidden_size, map_size, output_size, detached=detached, dropout=0)
         # self.rnn = tanhRNN(input_size, hidden_size, map_size)
         # self.readout1 = nn.Linear(map_size, map_size, bias=True)
-        self.readout = nn.Linear(map_size, output_size, bias=True)
+        # self.readout = nn.Linear(map_size, output_size, bias=True)
+        # self.readout = ConvNet(self.width, self.width, self.out_size, drop_readout, big=False)
 
     def forward(self, x, hidden):
         gaze = x[:, :self.map_size]
         pix = x[:, self.map_size:]
-        pix = torch.relu(self.pix_fc1(pix))
+        pix = self.LReLU(self.pix_fc1(pix))
+        pix = self.LReLU(self.pix_fc2(pix))
         # pix = torch.relu(self.pix_fc2(pix))
         combined = torch.cat((gaze, pix), dim=1)
         number, map_, hidden = self.rnn(combined, hidden)
+
         return number, map_, hidden
 
 class IntegratedSkipModel(nn.Module):
@@ -983,7 +1000,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             if use_loss == 'map_then_both-detached':
                 ep_thresh = 500
                 retain_graph = False
-		#if ep > 0 and (map_f1[ep - 1] > 0.5 or ep > n_epochs / 2):
+                #if ep > 0 and (map_f1[ep - 1] > 0.5 or ep > n_epochs / 2):
                 if ep > ep_thresh:
                     add_number_loss = True
                     retrain_graph = True
@@ -2080,7 +2097,7 @@ def main(config):
         scale = 0.9955 if config.pretrained_map else 0.9978
         if 'detached' in use_loss:
             opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=start_lr, momentum=mom, weight_decay=wd_rnn)
-            if 'two' in model_version:
+            if 'two' in model_version or model_version == 'integrated':
                 opt_readout = torch.optim.SGD(model.readout.parameters(), lr=start_lr, momentum=mom, weight_decay=wd_readout)
             elif 'three' in model_version:
                 readout_params = [{'params': model.readout1.parameters()}, {'params':model.readout2.parameters()}]
