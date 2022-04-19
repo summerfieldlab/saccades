@@ -21,6 +21,8 @@ from matplotlib import pyplot as plt
 import models
 
 
+
+
 def ncr(n, r):
     r = min(r, n-r)
     numer = reduce(op.mul, range(n, n-r, -1), 1)
@@ -56,6 +58,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
         scheduler_rnn, scheduler_readout = scheduler
 
     print('Two step model...')
+
     n_epochs = config.n_epochs
     device = config.device
     differential = config.differential
@@ -76,6 +79,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
     preglimpsed_train = preglimpsed + '_train' if preglimpsed is not None else None
     data, num, _, map_, _, _ = get_min_data(preglimpsed_train, config.train_on, device)
     seq_len = data.shape[1]
+
     # data = get_input(gaze, pix)
 
     # Calculate the weight per location to trade off precision and recall
@@ -1673,7 +1677,8 @@ def main(config):
                 # if use_loss == 'map_then_both' and map_size <= 50:
                 #     continue
     kwargs = {'act': rnn_act, 'eye_weight': eye_weight, 'detached': detached,
-              'drop_rnn': config.drop_rnn, 'drop_readout': config.drop_readout}
+              'drop_rnn': config.drop_rnn, 'drop_readout': config.drop_readout,
+              'rotate': config.rotate}
     if config.train_on == 'pix':
         input_size = 1152
     elif config.train_on == 'loc':
@@ -1849,6 +1854,7 @@ def get_config():
     parser.add_argument('--train_on', type=str, default='loc')  ## loc, pix, or both
     parser.add_argument('--n_epochs', type=int, default=2000)
     parser.add_argument('--pretrained_map', action='store_true', default=False)
+    parser.add_argument('--rotate', action='store_true', default=False)
     config = parser.parse_args()
     print(config)
     return config

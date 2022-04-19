@@ -2,12 +2,10 @@ import numpy as np
 import math
 import torch
 from torch import nn
-
-
+from scipy.stats import special_ortho_group
 
 torch.set_num_threads(15)
 torch.autograd.set_detect_anomaly(True)
-
 
 class Distinctive(nn.Module):
     def __init__(self, hidden_size, **kwargs):
@@ -304,6 +302,7 @@ class ConvReadoutMapNet(nn.Module):
         detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
         drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
         drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
+        self.rotate = kwargs['rotate'] if 'rotate' in kwargs.keys() else False
         big = kwargs['big'] if 'big' in kwargs.keys() else False
         self.hidden_size = hidden_size
         self.map_size = map_size
@@ -313,20 +312,28 @@ class ConvReadoutMapNet(nn.Module):
         self.rnn = RNN(input_size, hidden_size, map_size, act, eye_weight, drop_rnn)
         self.initHidden = self.rnn.initHidden
         self.readout = ConvNet(self.width, self.width, self.out_size, drop_readout, big=big)
+        if self.rotate:
+            self.rot_mat = torch.from_numpy(special_ortho_group.rvs(input_size)).float()
+
 
     def forward(self, x, hidden):
         batch_size = x.shape[0]
+        if self.rotate:
+            x = torch.matmul(x, self.rot_mat)
         map_, hidden = self.rnn(x, hidden)
         # map_ = self.drop_layer(map_)
         if self.detached:
             map_to_pass_on = map_.detach()
         else:
             map_to_pass_on = map_
+
         # If this model is mapping rather than counting, nonlineartities get applied later
         if self.map_size != self.out_size: # counting
             map_to_pass_on = torch.tanh(torch.relu(map_to_pass_on))
+        if self.rotate:
+            map_to_pass_on = torch.matmul(map_to_pass_on, self.rot_mat)
         map_to_pass_on = map_to_pass_on.view((-1, 1, self.width, self.width))
-        number = self.readout(map_to_pass_on)
+        number, _ = self.readout(map_to_pass_on)
         # number = torch.relu(self.fc(map))
         return number, map_, hidden
 
