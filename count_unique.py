@@ -18,6 +18,7 @@ from functools import reduce
 from matplotlib import pyplot as plt
 from sklearn.metrics import roc_auc_score, f1_score
 from matplotlib import pyplot as plt
+import models
 
 
 def ncr(n, r):
@@ -46,800 +47,6 @@ class Timer():
         self.end = datetime.now()
         self.elapsed_time = self.end - self.start
         print('Execution time: {}'.format(self.elapsed_time))
-
-# Models for min task
-class ContentGated_cheat(nn.Module):
-    """Same as ContentGated except the shape label is passed directly.
-
-    No pixel processing involved. For debugging."""
-    def __init__(self, hidden_size, map_size, output_size, act=None):
-        super().__init__()
-        total_number_size = output_size
-        min_number_size = 4
-        min_shape_size = 4
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.out_size = output_size
-
-        self.dorsal = TwoStepModel(map_size, hidden_size, map_size, total_number_size, act=act)
-
-        self.softmax = nn.LogSoftmax(dim=1)
-
-        size_prod = min_shape_size * total_number_size
-        self.min_shape_readout = nn.Linear(size_prod, min_number_size)
-        self.min_num_readout = nn.Linear(size_prod, min_number_size)
-
-
-    def forward(self, gaze, shape, hidden):
-        # From the gaze, Dorsal stream creates a map of objects in the image
-        # and counts them
-        number, map_, hidden[0, :, :] = self.dorsal(gaze, hidden[0, :, :])
-
-        # The same dorsal module (the same parameters) is applied to shape-
-        # gated versions of the gaze, with separate hidden states for each
-        # shape, producing shape-specific counts. No supervision is provided
-        # for these shape-specific counts, so they are also free to take a
-        # different form.
-        bs, size = gaze.shape
-        gate = [label.expand(size, bs).T for label in shape.T]
-        n_hrt, map_hrt, hidden[1, :, :] = self.dorsal(gaze * gate[0], hidden[1, :, :])
-        n_star, map_star, hidden[2, :, :] = self.dorsal(gaze * gate[1], hidden[2, :, :])
-        n_sqre, map_sqre, hidden[3, :, :] = self.dorsal(gaze * gate[2], hidden[3, :, :])
-        n_tri, map_tri, hidden[4, :, :] = self.dorsal(gaze * gate[3], hidden[4, :, :])
-        counts = [number, n_hrt, n_star, n_sqre, n_tri]
-        counts = [self.softmax(count) for count in counts]
-        maps = [map_, map_hrt, map_star, map_sqre, map_tri]
-
-        # These shape-specific counts are contcatenated and passed to linear
-        # readout layers for min shape and min number
-        combined = torch.cat((n_hrt, n_star, n_sqre, n_tri), dim=1)
-        min_shape = self.min_shape_readout(combined)
-        min_number = self.min_num_readout(combined)
-
-        return min_shape, min_number, counts, maps, hidden
-
-# Models with integrated pixel and gaze streams
-class IntegratedModel(nn.Module):
-    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
-        """Integrate pixel and gaze location streams.
-
-        One embedding layer for pixels, merged with place code gaze location
-        before input into RNN trained to produce map of object locations.
-        Three layer conv readout from map.
-        """
-        super().__init__()
-        act = kwargs['act'] if 'act' in kwargs.keys() else None
-        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
-        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        # dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
-        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
-        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.width = int(np.sqrt(map_size))
-        self.out_size = output_size
-        self.detached = detached
-        # detached=False should always be false for the twostep model here,
-        # self.pix_fc1 = nn.Linear(1152, 2000)
-
-        # self.pix_fc1 = nn.Linear(1152, map_size)  # when glimpse width=24
-        self.pix_fc1 = nn.Linear(288, map_size)  # when glimpse width=12
-        self.LReLU = nn.LeakyReLU(0.1)
-        self.pix_fc2 = nn.Linear(map_size, map_size)
-
-        # even if we want to detach in the forward of this class
-        self.rnn = ConvReadoutMapNet(map_size*2, hidden_size, map_size, output_size, **kwargs)
-        self.readout = self.rnn.readout
-        # self.rnn = TwoStepModel(map_size*2, hidden_size, map_size, output_size, detached=detached, dropout=0)
-        # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-        # self.readout1 = nn.Linear(map_size, map_size, bias=True)
-        # self.readout = nn.Linear(map_size, output_size, bias=True)
-        # self.readout = ConvNet(self.width, self.width, self.out_size, drop_readout, big=False)
-
-    def forward(self, x, hidden):
-        gaze = x[:, :self.map_size]
-        pix = x[:, self.map_size:]
-        pix = self.LReLU(self.pix_fc1(pix))
-        pix = self.LReLU(self.pix_fc2(pix))
-        # pix = torch.relu(self.pix_fc2(pix))
-        combined = torch.cat((gaze, pix), dim=1)
-        number, map_, hidden = self.rnn(combined, hidden)
-
-        return number, map_, hidden
-
-class IntegratedSkipModel(nn.Module):
-    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
-        super().__init__()
-        act = kwargs['act'] if 'act' in kwargs.keys() else None
-        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
-        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.out_size = output_size
-        self.detached = detached
-        # detached=False should always be false for the twostep model here,
-        self.pix_fc1 = nn.Linear(1152, map_size)
-
-        # even if we want to detach in the forward of this class
-        # self.rnn = TwoStepModel(map_size*2, hidden_size, map_size, output_size, detached=detached, dropout=0)
-        self.map_rnn = RNN(map_size*2, hidden_size, map_size, **kwargs)
-        self.pix_rnn = RNN(map_size, map_size * 1.1, map_size, **kwargs)
-        # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-        # self.readout1 = nn.Linear(map_size, map_size, bias=True)
-        self.readout = nn.Linear(map_size*2, output_size, bias=True)
-
-    def forward(self, x, hidden):
-        gaze = x[:, :self.map_size]
-        pix = x[:, self.map_size:]
-        pix = torch.relu(self.pix_fc1(pix))
-
-        combined = torch.cat((gaze, pix), dim=1)
-        map_, hidden = self.map_rnn(combined, hidden)
-        if self.detached:
-            map_to_pass_on = map_.detach()
-        else:
-            map_to_pass_on = map_
-        map_to_pass_on = torch.tanh(torch.relu(map_to_pass_on))
-
-        pix = self.pix_rnn(pix)
-        map_with_skippix = torch.cat((map_to_pass_on, pix), dim=1)
-        number = self.readout(map_with_skippix)
-        return number, map_, hidden
-
-# Gaze only models
-class ThreeStepModel(nn.Module):
-    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
-        super().__init__()
-        act = kwargs['act'] if 'act' in kwargs.keys() else None
-        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
-        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.out_size = output_size
-        self.detached = detached
-        # detached=False should always be false for the twostep model here,
-        # even if we want to detach in the forward of this class
-        # self.rnn = TwoStepModel(input_size, hidden_size, map_size, map_size, detached=False, dropout=0)
-        self.rnn = RNN(input_size, hidden_size, map_size)
-        # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-        self.readout1 = nn.Linear(map_size, map_size//2, bias=True)
-        self.readout2 = nn.Linear(map_size//2, output_size, bias=True)
-
-    def forward(self, x, hidden):
-        # map_, _, hidden = self.rnn(x, hidden)
-        map_, hidden = self.rnn(x, hidden)
-        if self.detached:
-            map_to_pass_on = map_.detach()
-        else:
-            map_to_pass_on = map_
-        map_to_pass_on = torch.tanh(torch.relu(map_to_pass_on))
-        # number = self.readout(torch.sigmoid(map_to_pass_on))
-        # intermediate = torch.relu(self.readout1(map_to_pass_on))
-        number = torch.relu(self.readout1(map_to_pass_on))
-        number = self.readout2(number)
-        # number = torch.relu(self.fc(map))
-        return number, map_, hidden
-
-
-class TwoStepModel(nn.Module):
-    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
-        super().__init__()
-        act = kwargs['act'] if 'act' in kwargs.keys() else None
-        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
-        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.out_size = output_size
-        self.detached = detached
-        self.rnn = RNN(input_size, hidden_size, map_size, act, eye_weight)
-        self.initHidden = self.rnn.initHidden
-        # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-        self.drop_layer = nn.Dropout(p=dropout)
-        self.readout = nn.Linear(map_size, output_size, bias=True)
-
-    def forward(self, x, hidden):
-        map_, hidden = self.rnn(x, hidden)
-        map_ = self.drop_layer(map_)
-        if self.detached:
-            map_to_pass_on = map_.detach()
-        else:
-            map_to_pass_on = map_
-        # If this model is mapping rather than counting, nonlineartities get applied later
-        if self.map_size != self.out_size: # counting
-            map_to_pass_on = torch.tanh(torch.relu(map_to_pass_on))
-        else: # mapping
-            map_to_pass_on = self.drop_layer(map_to_pass_on)
-
-        number = self.readout(map_to_pass_on)
-        # number = torch.relu(self.fc(map))
-        return number, map_, hidden
-
-
-class ConvReadoutMapNet(nn.Module):
-    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
-        super().__init__()
-        act = kwargs['act'] if 'act' in kwargs.keys() else None
-        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
-        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
-        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
-        big = kwargs['big'] if 'big' in kwargs.keys() else False
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.width = int(np.sqrt(map_size))
-        self.out_size = output_size
-        self.detached = detached
-        self.rnn = RNN(input_size, hidden_size, map_size, act, eye_weight, drop_rnn)
-        self.initHidden = self.rnn.initHidden
-        self.readout = ConvNet(self.width, self.width, self.out_size, drop_readout, big=big)
-
-    def forward(self, x, hidden):
-        batch_size = x.shape[0]
-        map_, hidden = self.rnn(x, hidden)
-        # map_ = self.drop_layer(map_)
-        if self.detached:
-            map_to_pass_on = map_.detach()
-        else:
-            map_to_pass_on = map_
-        # If this model is mapping rather than counting, nonlineartities get applied later
-        if self.map_size != self.out_size: # counting
-            map_to_pass_on = torch.tanh(torch.relu(map_to_pass_on))
-        map_to_pass_on = map_to_pass_on.view((-1, 1, self.width, self.width))
-        number = self.readout(map_to_pass_on)
-        # number = torch.relu(self.fc(map))
-        return number, map_, hidden
-
-class ConvNet(nn.Module):
-    def __init__(self, width, height, output_size, dropout, big=False):
-        super().__init__()
-        # Larger version
-        if big:
-            self.kernel1_size = 5
-            self.cnn1_nchannels_out = 32
-            self.poolsize = 2
-            self.kernel2_size = 6
-            self.cnn2_nchannels_out = 128
-            self.kernel3_size = 6
-            self.cnn3_nchannels_out = 256
-        else:  # Smaller version
-            self.kernel1_size = 5
-            self.cnn1_nchannels_out = 6
-            self.poolsize = 2
-            self.kernel2_size = 6
-            self.cnn2_nchannels_out = 12
-            self.kernel3_size = 6
-            self.cnn3_nchannels_out = 9
-
-        self.LReLU = nn.LeakyReLU(0.1)
-
-        # Default initialization is init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        # (Also assumes leaky Relu for gain)
-        # which is appropriate for all layers here
-        self.conv1 = nn.Conv2d(1, self.cnn1_nchannels_out, self.kernel1_size)    # (NChannels_in, NChannels_out, kernelsize)
-        # torch.nn.init.kaiming_uniform_(self.conv1.weight, nonlinearity='relu')
-        self.pool = nn.MaxPool2d(self.poolsize, self.poolsize)     # kernel height, kernel width
-        self.conv2 = nn.Conv2d(self.cnn1_nchannels_out, self.cnn2_nchannels_out, self.kernel2_size)   # (NChannels_in, NChannels_out, kernelsize)
-        self.conv3 = nn.Conv2d(self.cnn2_nchannels_out, self.cnn3_nchannels_out, self.kernel3_size)
-        # torch.nn.init.kaiming_uniform_(self.conv2.weight, nonlinearity='relu')
-        # track the size of the cnn transformations
-        # self.cnn2_width_out = ((width - self.kernel1_size+1) - self.kernel2_size + 1) // self.poolsize
-        # self.cnn2_height_out = ((height - self.kernel1_size+1) - self.kernel2_size + 1) // self.poolsize
-        self.cnn3_width_out = (((width - self.kernel1_size+1) - self.kernel2_size + 1)  // self.poolsize) - self.kernel3_size+1
-        self.cnn3_height_out = (((height - self.kernel1_size+1) - self.kernel2_size + 1)  // self.poolsize) - self.kernel3_size+1
-
-        # pass through FC layers
-        # self.fc1 = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), 120)  # size input, size output
-        self.fc1 = nn.Linear(int(self.cnn3_nchannels_out * self.cnn3_width_out * self.cnn3_height_out), 120)  # size input, size output
-
-        self.fc2 = nn.Linear(120, output_size)
-
-        # Dropout
-        self.drop_layer = nn.Dropout(p=dropout)  # 20% chance of each neuron being dropped out / zeroed during each forward pass
-
-    def forward(self, x):
-        x = self.LReLU(self.conv1(x))
-        x = self.pool(self.LReLU(self.conv2(x)))
-        x = self.LReLU(self.conv3(x))
-        x = x.view(-1, x.shape[1]*x.shape[2]*x.shape[3]) # this reshapes the tensor to be a 1D vector, from whatever the final convolutional layer output
-        # add dropout before fully connected layers, widest part of network
-        x = self.drop_layer(x)
-        x = self.LReLU(self.fc1(x))
-        x = self.fc2(x)
-        return x
-
-# class TwoStepModel_hist(nn.Module):
-    # def __init__(self, input_size, hidden_size, map_size, output_size):
-    #     super(TwoStepModel_hist, self).__init__()
-    #     fc_size = 64
-    #     self.rnn = linearRNN_hist(input_size, hidden_size, map_size)
-    #     # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-    #     self.fc1 = nn.Linear(map_size, fc_size)
-    #     self.fc2 = nn.Linear(fc_size, output_size)
-
-    # def forward(self, x, hidden):
-    #     outs, hidden, hist = self.rnn(x, hidden)
-    #     fc_layer = torch.relu(self.fc1(hist))
-    #     number = self.fc2(fc_layer)
-    #     # number = torch.relu(self.fc(map))
-    #     return outs, hidden, number
-
-class TwoStepModel_weightshare(nn.Module):
-    def __init__(self, hidden_size, map_size, output_size, init, act=None, eye_weight=False):
-        super(TwoStepModel_weightshare, self).__init__()
-        # self.saved_model = torch.load('models/two_step_model_with_maploss_bias.pt')
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.out_size = output_size
-        self.rnn = RNN(map_size, hidden_size, map_size, act, eye_weight)
-        # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-
-        self.readout = Readout(map_size, output_size, init)
-        # self.fc = nn.Linear(map_size, output_size)
-        # self.fc.weight = self.saved_model.fc.weight
-        # self.fc.weight.requires_grad = False
-        # self.fc.bias = self.saved_model.fc.bias
-        # self.fc.bias.requires_grad = False
-
-        # hardcode_weight = torch.linspace(-0.1, 0.1, steps=7, dtype=torch.float)
-        # hardcode_bias = torch.linspace(0.3, -0.3, steps=7, dtype=torch.float)
-        # with torch.no_grad():
-        #     for i in range(output_size):
-        #         self.fc.weight[i, :] = hardcode_weight[i]
-        #         self.fc.bias[i] =  hardcode_bias[i]
-
-    def forward(self, x, hidden):
-        map_, hidden = self.rnn(x, hidden)
-        # number = self.fc(torch.sigmoid(map_))
-        number = self.readout(torch.sigmoid(map_))
-        # number = torch.relu(self.fc(map))
-        return number, map_, hidden
-
-
-class TwoStepModel_weightshare_detached(TwoStepModel_weightshare):
-
-    def forward(self, x, hidden):
-        map_, hidden = self.rnn(x, hidden)
-        # number = self.fc(torch.sigmoid(map_))
-        map_detached = map_.detach()
-        number = self.readout(torch.sigmoid(map_detached))
-        # number = torch.relu(self.fc(map))
-        return number, map_, hidden
-
-    def train_rnn(self):
-        for param in self.readout.parameters():
-            param.requires_grad = False
-        for param in self.rnn.parameters():
-            param.requires_grad = True
-
-    def train_readout(self):
-        for param in self.readout.parameters():
-            param.requires_grad = True
-        for param in self.rnn.parameters():
-            param.requires_grad = False
-
-class Readout(nn.Module):
-    def __init__(self, map_size, out_size, init):
-        super(Readout, self).__init__()
-        self.map_size = map_size
-        self.out_size = out_size
-        weight_bound = 7
-        bias_bound = 4 * weight_bound
-        # self.weight = torch.nn.Parameter(torch.empty((out_size,)))
-        # self.bias = torch.nn.Parameter(torch.empty((out_size,)))
-        if init:
-            self.weight = torch.nn.Parameter(torch.linspace(-weight_bound, weight_bound, self.out_size))
-            self.bias = torch.nn.Parameter(torch.linspace(bias_bound, -bias_bound, self.out_size))
-        else:
-            self.weight = torch.nn.Parameter(torch.empty((out_size,)))
-            self.bias = torch.nn.Parameter(torch.empty((out_size,)))
-            nn.init.uniform_(self.weight, -1, 1)
-            nn.init.uniform_(self.bias, -1, 1)
-
-        # self.weight_mat = self.weight.expand(map_size, out_size)
-        # self.weight_mat = self.weight.repeat(map_size, out_size)
-        # self.init_params()
-
-    # def init_params(self):
-    #     weight_bound = 1
-    #     bias_bound = 4 * weight_bound
-    #     with torch.no_grad():
-    #         self.weight = torch.nn.Parameter(torch.linspace(-weight_bound, weight_bound, self.out_size))
-    #         self.bias = torch.nn.Parameter(torch.linspace(bias_bound, -bias_bound, self.out_size))
-        # nn.init.uniform_(self.weight, -weight_bound, weight_bound)
-        # if self.bias is not None:
-        #     nn.init.uniform_(self.bias, -bias_bound, bias_bound)
-
-    def forward(self, map):
-        # map = torch.sigmoid(map)
-        # out = torch.matmul(map, self.weight_mat) + self.bias
-        weight_mat = self.weight.repeat(self.map_size, 1)
-        # out = torch.addmm(self.bias, map, self.weight_mat)
-        out = torch.addmm(self.bias, map, weight_mat)
-        return out
-
-
-class RNN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, act=None, eye_weight=False, dropout=0):
-        super(RNN, self).__init__()
-        self.input_size = input_size
-        self.out_size = output_size
-        self.hidden_size = hidden_size
-        self.eye_weight = eye_weight
-        if act == 'tanh':
-            self.act_fun = torch.tanh
-            gain = 5/3
-        elif act == 'relu':
-            self.act_fun = torch.relu
-            gain = np.sqrt(2)
-        elif act == 'sig':
-            self.act_fun = nn.Sigmoid()
-            gain = 1
-        else:
-            self.act_fun = None
-            gain = 1
-
-        self.i2h = nn.Linear(input_size + hidden_size, hidden_size)
-        self.drop_layer = nn.Dropout(p=dropout)
-        self.i2o = nn.Linear(input_size + hidden_size, output_size)
-        self.init_params(gain)
-
-                # self.i2o.weight[:, :input_size] = (torch.eye(input_size) * 1.05) - 0.05
-                # self.i2h.weight[:, input_size:] = (torch.eye(hidden_size) * 1.05) - 0.05
-        # self.softmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, input, hidden):
-        combined = torch.cat((input, hidden), 1)
-        hidden = self.i2h(combined)
-        hidden = self.drop_layer(hidden)
-        if self.act_fun is not None:
-            hidden = self.act_fun(hidden)
-        output = self.i2o(combined)
-        return output, hidden
-
-    def init_params(self, gain):
-        if self.act_fun == 'relu':
-            nn.init.kaiming_uniform_(self.i2h.weight, a=math.sqrt(5), nonlinearity='relu')
-            nn.init.kaiming_uniform_(self.i2o.weight, a=math.sqrt(5), nonlinearity='relu')
-        elif self.act_fun == 'lrelu':
-            nn.init.kaiming_uniform_(self.i2h.weight, a=math.sqrt(5), nonlinearity='leaky_relu')
-            nn.init.kaiming_uniform_(self.i2o.weight, a=math.sqrt(5), nonlinearity='leaky_relu')
-        elif self.act_fun is None:
-            nn.init.kaiming_uniform_(self.i2h.weight, a=math.sqrt(5), nonlinearity='linear')
-            nn.init.kaiming_uniform_(self.i2o.weight, a=math.sqrt(5), nonlinearity='linear')
-        else:
-            nn.init.xavier_uniform_(self.i2h.weight, gain=gain)
-            nn.init.xavier_uniform_(self.i2o.weight, gain=gain)
-        if self.eye_weight:
-            with torch.no_grad():
-                nn.init.eye_(self.i2o.weight[:, :self.input_size])
-                nn.init.eye_(self.i2h.weight[:, self.input_size:])
-
-    def initHidden(self, batch_size):
-        return torch.zeros(batch_size, self.hidden_size)
-
-class linearRNN_hist(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super(linearRNN_hist, self).__init__()
-
-        self.hidden_size = hidden_size
-
-        self.i2h = nn.Linear(input_size + hidden_size, hidden_size)
-        self.i2o_1 = nn.Linear(input_size + hidden_size, output_size)
-        self.i2o_2 = nn.Linear(input_size + hidden_size, output_size)
-        self.i2o_3 = nn.Linear(input_size + hidden_size, output_size)
-        self.i2o_4 = nn.Linear(input_size + hidden_size, output_size)
-        self.i2o_5 = nn.Linear(input_size + hidden_size, output_size)
-        self.i2o_6 = nn.Linear(input_size + hidden_size, output_size)
-        self.i2o_7 = nn.Linear(input_size + hidden_size, output_size)
-        # self.softmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, input, hidden):
-        combined = torch.cat((input, hidden), 1)
-        hidden = self.i2h(combined)
-        out1 = self.i2o_1(combined)
-        out2 = self.i2o_2(combined)
-        out3 = self.i2o_3(combined)
-        out4 = self.i2o_4(combined)
-        out5 = self.i2o_5(combined)
-        out6 = self.i2o_6(combined)
-        out7 = self.i2o_7(combined)
-        outs = [out1, out2, out3, out4, out5, out6, out7]
-
-        hist = torch.stack([torch.argmax(out, dim=1) for out in outs]).T.float()
-
-        # output = self.softmax(output)
-        return outs, hidden, hist
-
-    def initHidden(self, batch_size):
-        return torch.zeros(batch_size, self.hidden_size)
-
-class NumberAsMapSum(nn.Module):
-    def __init__(self, input_size, hidden_size):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.input_size = input_size
-        self.rnn = RNN(input_size, hidden_size, input_size)
-
-    def forward(self, input, hidden):
-        map_, hidden = self.rnn(input, hidden)
-        number = torch.sum(torch.sigmoid(map_), axis=1)
-        # number_oh = F.one_hot(torch.relu(number).long(), self.input_size)
-
-        return number, hidden, map_
-
-def train_sum_model(model, optimizer, config):
-    n_epochs = config.n_epochs
-    device = config.device
-    use_loss = config.use_loss
-    model_version = config.model_version
-    print('Training number-as-sum model..')
-    model.train()
-
-    print('Using MSE loss for number objective.')
-    criterion = nn.MSELoss()
-
-    batch_size = 64
-    seq_len = 7
-    n_classes = 7
-    filename = f'results/number-as-sum_results_mapsz{model.input_size}_loss-{use_loss}.npz'
-    # data, target, _, _ = get_data(seq_len, n_classes, device)
-    data, target, map_, _, _ = get_data(seq_len, n_classes, model.input_size, device)
-    nex = data.shape[0]
-    positive = (data.sum(axis=1) > 0).sum(axis=0)
-    negative = -positive + nex
-    pos_weight = torch.true_divide(negative, positive)
-    # Remove infs
-    to_replace = torch.tensor(nex).float().to(device)
-    pos_weight = torch.where(torch.isinf(pos_weight), to_replace, pos_weight)
-    criterion_map = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-
-    # To store learning curves
-    numb_losses = np.zeros((n_epochs,))
-    numb_accs = np.zeros((n_epochs,))
-    map_losses = np.zeros((n_epochs,))
-    map_accs = np.zeros((n_epochs, model.input_size))
-    map_auc = np.zeros((n_epochs,))
-
-    dataset = TensorDataset(data, target, map_)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    for ep in range(n_epochs):
-        m_correct = np.zeros(model.input_size,)
-        n_correct = 0
-        auc = 0
-        train_loss = 0
-        map_train_loss = 0
-        for batch_idx, (inputs, label, map_label) in enumerate(loader):
-            input_dim = inputs.shape[0]
-            hidden = model.rnn.initHidden(input_dim)
-            hidden = hidden.to(device)
-            model.zero_grad()
-            for i in range(seq_len):
-                number, hidden, map_pred = model(inputs[:, i, :], hidden)
-            number_loss = criterion(number, label.float())
-
-            map_loss = criterion_map(map_pred, map_label)
-            if 'number' in use_loss:
-                loss = number_loss
-            if 'map' in use_loss:
-                loss = map_loss
-            if 'both' in use_loss:
-                loss = number_loss + map_loss
-
-            loss.backward()
-            optimizer.step()
-            hidden.detach_()
-
-            # Evaluate performance
-            with torch.no_grad():
-                train_loss += loss.item()
-                map_train_loss += map_loss.item()
-                numb_local = number.round()
-                label_local = label
-                map_local = map_pred
-                map_label_local = map_label
-                sigout = torch.sigmoid(map_local).round()
-                m_correct += sum(sigout == map_label_local).cpu().numpy()
-                map_label_flat = map_label_local.cpu().numpy().flatten()
-                auc += roc_auc_score(map_label_flat, sigout.cpu().flatten())
-                f1 += f1_score(map_label_flat, sigout.cpu().flatten())
-                n_correct += numb_local.eq(label_local.view_as(numb_local)).sum().item()
-
-        train_loss /= batch_idx + 1
-        map_train_loss /= batch_idx + 1
-
-        accs = 100. * (m_correct / len(dataset))
-        map_accs[ep, :] = accs
-        auc /= batch_idx+1
-        f1 /= batch_idx+1
-
-        numb_acc = 100. * (n_correct / len(dataset))
-        numb_accs[ep] = numb_acc
-
-        pct_done = round(100. * (ep / n_epochs))
-        map_losses[ep] = map_train_loss
-        numb_losses[ep] = train_loss
-        map_acc = accs.mean()
-        map_auc[ep] = auc
-
-        if not ep % 10:
-            # print(f'Progress {pct_done}% trained: \t Loss (Map/Numb): {map_loss.item():.6}/{number_loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}% \t Number {numb_acc:.3}% \t Mean Map Acc {accs.mean():.3}%')
-            print(f'Epoch {ep}, Progress {pct_done}% trained: \t Loss (Map/Numb): {map_train_loss:.6}/{train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}% \t Map AUC: {auc:.3}')
-            np.savez(filename, numb_accs=numb_accs, map_accs=map_accs,
-                     numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc)
-
-    print(f'Final performance: \t Loss (Map/Numb): {map_train_loss:.6}/{train_loss:.6}, \t Accuracy: \t Number {numb_acc:.3}% \t Map {map_acc:.3}%')
-    np.savez(filename, numb_accs=numb_accs, map_accs=map_accs,
-             numb_losses=numb_losses, map_losses=map_losses, map_auc=map_auc)
-
-def train_rnn_nocount(model, optimizer, n_epochs, device):
-    print('Linear RNN...')
-    rnn = model
-    # criterion = nn.CrossEntropyLoss()
-    criterion = nn.BCEWithLogitsLoss()
-    batch_size = 64
-    seq_len = 7
-    n_classes = 7
-    data, target, target_nocount, _ = get_data(seq_len, n_classes, device)
-    for ep in range(n_epochs):
-        correct = np.zeros(7,)
-        # shuffle the sequence order on each epoch
-        # for i, row in enumerate(data):
-        #     data[i, :, :] = row[torch.randperm(seq_len), :]
-        dataset = TensorDataset(data, target_nocount)
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        for batch_idx, (inputs, label) in enumerate(loader):
-            input_dim = inputs.shape[0]
-            hidden = rnn.initHidden(input_dim)
-            rnn.zero_grad()
-
-            for i in range(seq_len):
-                output, hidden = rnn(inputs[:, i, :], hidden)
-            loss = criterion(output, label)
-            loss.backward()
-            optimizer.step()
-            out_local = output
-            # Evaluate performance
-            sigout = torch.sigmoid(out_local).round()
-            correct += sum(sigout == label).cpu().numpy()
-        accs = 100. * (correct / len(dataset))
-        pct_done = round(100. * (ep / n_epochs))
-        print(f'Progress {pct_done}% trained: \t Loss: {loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}%')
-
-
-def train_rnn_nocount_diffs(model, optimizer, n_epochs, device):
-    print('Linear RNN...')
-    rnn = model
-    # criterion = nn.CrossEntropyLoss()
-    criterion = nn.BCEWithLogitsLoss()
-    batch_size = 64
-    seq_len = 7
-    n_classes = 7
-    data, target, target_nocount, _ = get_data(seq_len, n_classes, device)
-    for ep in range(n_epochs):
-        correct = np.zeros(7,)
-        # shuffle the sequence order on each epoch
-        for i, row in enumerate(data):
-            data[i, :, :] = row[torch.randperm(seq_len), :]
-        dataset = TensorDataset(data, target_nocount)
-        loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-        for batch_idx, (inputs, label) in enumerate(loader):
-            input_dim = inputs.shape[0]
-            hidden = rnn.initHidden(input_dim)
-            rnn.zero_grad()
-            prev_input = torch.zeros((inputs.shape[0], 1), dtype=torch.long)
-            for i in range(seq_len):
-                unonehot = inputs[:, i, :].nonzero(as_tuple=False)[:, 1].unsqueeze(1)
-                this_input = torch.true_divide(unonehot, 6) - prev_input
-                output, hidden = rnn(this_input, hidden)
-                prev_input = this_input
-            loss = criterion(output, label)
-            loss.backward()
-            optimizer.step()
-            out_local = output
-            # Evaluate performance
-            sigout = torch.sigmoid(out_local).round()
-            correct += sum(sigout == label).cpu().numpy()
-        accs = 100. * (correct / len(dataset))
-        pct_done = round(100. * (ep / n_epochs))
-        print(f'Progress {pct_done}% trained: \t Loss: {loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}%')
-
-
-def train_rnn(model, optimizer, config):
-    n_epochs = config.n_epochs
-    device = config.device
-    use_loss = config.use_loss
-    model_version = config.model_version
-    preglimpsed = config.preglimpsed
-    eye_weight = config.eye_weight
-
-    print('One-step RNN on unique task...')
-    rnn = model
-    rnn.train()
-
-    batch_size = 64
-    seq_len = 7
-    n_classes = 7
-    nonlinearity = 'tanh_' if rnn.act_fun is not None else ''
-    sched = '_sched' if config.use_schedule else ''
-    filename = f'results/{model_version}_{nonlinearity}results_mapsz{rnn.input_size}_loss-{use_loss}{sched}'
-    if preglimpsed is not None:
-        filename += '_' + preglimpsed
-    if eye_weight:
-        filename += '_eye'
-    print(f'Results will be saved in {filename}')
-    # data, target, _, _ = get_data(seq_len, n_classes, device)
-    data, target, map_, _, _  = get_data(seq_len, rnn.out_size, rnn.input_size, device, preglimpsed)
-    nex, seq_len = data.shape[0], data.shape[1]
-    print(f'Sequence length is {seq_len}')
-    if use_loss == 'map':
-        target = map_
-        positive = map_.sum(axis=0).float()
-        negative = -positive + nex
-        pos_weight = torch.true_divide(negative, positive)
-        # Remove infs
-        to_replace = torch.tensor(nex).float().to(device)
-        pos_weight = torch.where(torch.isinf(pos_weight), to_replace, pos_weight)
-        criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-    else:
-        criterion = nn.CrossEntropyLoss()
-    # verify_dataset(data, target, seq_len)
-    numb_losses = np.zeros((n_epochs,))
-    numb_accs = np.zeros((n_epochs,))
-    # np.save('toy_data_shuffled.npy', data.numpy())
-    # np.save('toy_target_shuffled.npy', target.numpy())
-    # exit()
-    # data = torch.from_numpy(np.load('../relational_saccades/all_data_ds5_randseq.npy'))
-    # target = torch.from_numpy(np.load('../relational_saccades/all_target_ds5_randseq.npy'))
-    # target = target.long()
-    dataset = TensorDataset(data, target)
-    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
-    for ep in range(n_epochs):
-        correct = 0
-        train_loss = 0
-        # for i, row in enumerate(data):
-        # shuffle the sequence order on each epoch
-        #     data[i, :, :] = row[torch.randperm(seq_len), :]
-
-        for batch_idx, (inputs, label) in enumerate(loader):
-            input_dim = inputs.shape[0]
-            hidden = rnn.initHidden(input_dim)
-            hidden = hidden.to(device)
-            rnn.zero_grad()
-            for i in range(seq_len):
-                output, hidden = rnn(inputs[:, i, :], hidden)
-            loss = criterion(output, label)
-            label_local = label
-            loss.backward()
-            optimizer.step()
-            hidden.detach_()
-
-            with torch.no_grad():
-                out_local = output
-                # Evaluate performance
-                if use_loss == 'map':
-                    sigout = torch.sigmoid(out_local).round()
-                    # correct += roc_auc_score(label_local.cpu().numpy().flatten(), sigout.cpu().flatten())
-                    correct += f1_score(label_local.cpu().numpy().flatten(), sigout.cpu().flatten())
-                else:
-                    pred = out_local.argmax(dim=1, keepdim=True)
-                    correct += pred.eq(label_local.view_as(pred)).sum().item()
-                train_loss += loss.item()
-        train_loss /= batch_idx + 1
-        numb_losses[ep] = train_loss
-        if use_loss == 'map':
-            acc = 100. * (correct / (batch_idx + 1))
-        else:
-            acc = 100. * (correct / len(dataset))
-        numb_accs[ep] = acc
-        if not ep % 5:
-            pct_done = round(100. * (ep / n_epochs))
-            print(f'Epoch {ep}, Progress {pct_done}% trained: \t Loss: {train_loss:.6}, Accuracy or F1: {acc:.6}% ({correct}/{len(dataset)})')
-            np.savez(filename, numb_accs=numb_accs, numb_losses=numb_losses)
-    np.savez(filename, numb_accs=numb_accs, numb_losses=numb_losses)
-    torch.save(model.state_dict(), f'models/{filename}.pt')
 
 def train_two_step_model(model, optimizer, config, scheduler=None):
     """Main train/test loop."""
@@ -1027,7 +234,6 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 #     print(f'{n}:')
                 #     if p.requires_grad and p.grad is not None:
                 #         print(f'{p.grad.abs().mean()}')
-                # import pdb; pdb.set_trace()
                 number_loss.backward()
                 # Gradient clipping
                 nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
@@ -1342,6 +548,449 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
              test_map_loss=test_map_losses,
              test_map_auc=test_map_auc,
              test_map_f1=test_map_f1)
+    torch.save(model, f'models/{filename}.pt')
+
+def train_nomap_model(model, optimizer, config, scheduler=None):
+    print('Cheat model...')
+    n_epochs = config.n_epochs
+    device = config.device
+    model_version = config.model_version
+    control = config.control
+    preglimpsed = config.preglimpsed
+    eye_weight = config.eye_weight
+    rnn = model.rnn
+    # drop = config.dropout
+    drop_rnn = config.drop_rnn
+    drop_readout = config.drop_readout
+    clip_grad_norm = 1
+
+    # Synthesize or load the data
+    batch_size = 64
+    preglimpsed_train = preglimpsed + '_train' if preglimpsed is not None else None
+    _, num, shape, _, _, _ = get_min_data(preglimpsed_train, config.train_on, device)
+    seq_len = shape.shape[1]
+    criterion = nn.CrossEntropyLoss()
+
+    trainset = TensorDataset(shape, num)
+    preglimpsed_val = preglimpsed + '_valid' if preglimpsed is not None else None
+    _, num, shape, _, _, _ = get_min_data(preglimpsed_val, config.train_on, device)
+    validset = TensorDataset(shape, num)
+    preglimpsed_test = preglimpsed + '_test0' if preglimpsed is not None else None
+    _, num, shape, _, _, _ = get_min_data(preglimpsed_test, config.train_on, device)
+    testset = TensorDataset(shape, num)
+    train_loader = DataLoader(trainset, batch_size=batch_size, shuffle=True)
+    valid_loader = DataLoader(validset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(testset, batch_size=batch_size, shuffle=True)
+
+    # To store learning curves
+    numb_losses = np.zeros((n_epochs+1,))
+    numb_accs = np.zeros((n_epochs+1,))
+    valid_numb_losses = np.zeros((n_epochs+1,))
+    valid_numb_accs = np.zeros((n_epochs+1,))
+    test_numb_losses = np.zeros((n_epochs+1,))
+    test_numb_accs = np.zeros((n_epochs+1,))
+
+    # Where to save the results
+    nonlinearity = config.rnn_act + '_' if config.rnn_act is not None else ''
+    sched = '_sched' if config.use_schedule else ''
+    pretrained = '-pretrained' if config.pretrained_map else ''
+    filename = f'{model_version}{pretrained}_{nonlinearity}results{sched}_lr{config.lr}_wd{config.wd}_dr-rnn{drop_rnn}_dr-ro{drop_readout}'
+    if preglimpsed is not None:
+        filename += '_' + preglimpsed
+    if eye_weight:
+        filename += '_eye'
+
+    print(f'**Training cheat model, hidden layer size {model.hidden_size}')
+    def train(loader, ep):
+        model.train()
+        n_correct = 0
+        train_loss = 0
+        number_train_loss = 0
+        for batch_idx, (inputs, numb_label) in enumerate(loader):
+            model.zero_grad()
+            batch_size = inputs.shape[0]
+
+            # for i, row in enumerate(inputs):
+            # shuffle the sequence order
+                # inputs[i, :, :] = row[torch.randperm(seq_len), :]
+
+            hidden = rnn.initHidden(batch_size)
+            hidden = hidden.to(device)
+
+            # FORWARD PASS
+            for i in range(seq_len):
+                this_input = inputs[:, i, :]
+                number, hidden = model(this_input, hidden)
+
+            loss = criterion(number, numb_label)
+            loss.backward()
+            # Gradient clipping
+            nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+            # Take a gradient step
+            optimizer.step()
+            hidden.detach_()
+
+            # Evaluate performance
+            with torch.no_grad():
+                train_loss += loss.item()
+                numb_local = number
+                pred = numb_local.argmax(dim=1, keepdim=True)
+                n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
+        if config.use_schedule:
+            scheduler.step()
+        # Evaluate performance
+        train_loss /= len(loader)
+        numb_acc = 100. * (n_correct / len(loader.dataset))
+        return train_loss, numb_acc
+
+    def test(loader, **kwargs):
+        model.eval()
+        n_correct = 0
+        train_loss = 0
+        with torch.no_grad():
+            for batch_idx, (inputs, numb_label) in enumerate(loader):
+                batch_size = inputs.shape[0]
+                hidden = rnn.initHidden(batch_size)
+                hidden = hidden.to(device)
+                for i in range(seq_len):
+                    this_input = inputs[:, i, :]
+                    number, hidden = model(this_input, hidden)
+                loss = criterion(number, numb_label)
+
+                # Evaluate performance
+                train_loss += loss.item()
+                numb_local = number
+                pred = numb_local.argmax(dim=1, keepdim=True)
+                n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
+            # Evaluate performance
+            train_loss /= len(loader)
+            numb_acc = 100. * (n_correct / len(loader.dataset))
+        return train_loss, numb_acc
+    # Evaluate performance before training
+    numb_losses[0], numb_accs[0] = test(train_loader)
+    valid_numb_losses[0], valid_numb_accs[0] = test(valid_loader)
+    test_numb_losses[0], test_numb_accs[0] = test(test_loader)
+    print('Performance before Training')
+    print(f'Train Loss (Num): {numb_losses[0]:.6}, \t Train Performance (Num) {numb_accs[0]:.3}%')
+    print(f'Valid Loss (Num): {valid_numb_losses[0]:.6}, \t Valid Performance (Num) {valid_numb_accs[0]:.3}%')
+    print(f'Test Loss (Num): {test_numb_losses[0]:.6}, \t Test Performance (Num) {test_numb_accs[0]:.3}%')
+
+    for ep in range(1, n_epochs + 1):
+        print(f'Epoch {ep}, Learning rate: {optimizer.param_groups[0]["lr"]}')
+
+        train_loss, train_num_acc = train(train_loader, ep)
+        val_loss, val_num_acc = test(valid_loader, which_set='valid')
+        test_loss, test_num_acc = test(test_loader, which_set='test')
+
+        numb_losses[ep] = train_loss
+        numb_accs[ep] = train_num_acc
+        valid_numb_losses[ep] = val_loss
+        valid_numb_accs[ep] = val_num_acc
+        test_numb_losses[ep] = test_loss
+        test_numb_accs[ep] = test_num_acc
+        pct_done = round(100. * (ep / n_epochs))
+        if not ep % 5 or ep == 1:
+            # Print and save performance
+            # print(f'Progress {pct_done}% trained: \t Loss (Map/Numb): {map_loss.item():.6}/{number_loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}% \t Number {numb_acc:.3}% \t Mean Map Acc {accs.mean():.3}%')
+            print(f'Epoch {ep}, Progress {pct_done}% trained')
+            print(f'Train Loss (Num): {train_loss:.6}, \t Train Performance (Num) {train_num_acc:.3}%')
+            print(f'Valid Loss (Num): {val_loss:.6}, \t Valid Performance (Num) {val_num_acc:.3}%')
+            print(f'Test Loss (Num): {test_loss:.6}, \t Test Performance (Num) {test_num_acc:.3}%')
+
+            np.savez('results/'+filename,
+                     numb_loss=numb_losses,
+                     numb_acc=numb_accs,
+                     valid_numb_loss=valid_numb_losses,
+                     valid_numb_acc=valid_numb_accs,
+                     test_numb_loss=test_numb_losses,
+                     test_numb_acc=test_numb_accs)
+            torch.save(model, f'models/{filename}.pt')
+            # Plot performance
+            kwargs_train = {'alpha': 0.8, 'color': 'blue'}
+            kwargs_val = {'alpha': 0.8, 'color': 'cyan'}
+            kwargs_test = {'alpha': 0.8, 'color': 'red'}
+            row, col = 2, 2
+            fig, ax = plt.subplots(row, col, figsize=(6*col, 6*row))
+            plt.suptitle(f'{config.model_version}, nonlin={config.rnn_act}, dr-rnn={config.drop_rnn}, dr-ro={config.drop_readout}, seq not shuffled  \n {preglimpsed}', fontsize=18)
+            ax[1, 0].set_title('Number Loss')
+            ax[1, 0].plot(test_numb_losses[:ep+1], label='test number loss', **kwargs_test)
+            ax[1, 0].plot(valid_numb_losses[:ep+1], label='valid number loss', **kwargs_val)
+            ax[1, 0].plot(numb_losses[:ep+1], label='train number loss', **kwargs_train)
+            ax[1, 1].set_title('Number Accuracy')
+            ax[1, 1].set_ylim([0, 101])
+            ax[1, 1].plot(test_numb_accs[:ep+1], label='test number acc', **kwargs_test)
+            ax[1, 1].plot(valid_numb_accs[:ep+1], label='valid number acc', **kwargs_val)
+            ax[1, 1].plot(numb_accs[:ep+1], label='train number acc', **kwargs_train)
+            ax[0, 0].axis('off')
+            ax[0, 1].axis('off')
+            for axes in ax.flatten():
+                axes.legend()
+                axes.grid(linestyle='--')
+                axes.set_xlabel('Epochs')
+            plt.savefig(f'figures/{filename}_results.png', dpi=300)
+            plt.close()
+
+    print(f'Final performance:')
+    print(f'Train Loss (Num): {train_loss:.6}, \t Train Performance (Num) {train_num_acc:.3}%')
+    print(f'Valid Loss (Num): {val_loss:.6}, \t Valid Performance (Num) {val_num_acc:.3}%')
+    print(f'Test Loss (Num): {test_loss:.6}, \t Test Performance (Num) {test_num_acc:.3}%')
+
+    np.savez('results/'+filename,
+             numb_loss=numb_losses,
+             numb_acc=numb_accs,
+             valid_numb_loss=valid_numb_losses,
+             valid_numb_acc=valid_numb_accs,
+             test_numb_loss=test_numb_losses,
+             test_numb_acc=test_numb_accs)
+    torch.save(model, f'models/{filename}.pt')
+
+def train_shape_number(model, optimizer, config, scheduler=None):
+    print('Shape and number model...')
+    n_epochs = config.n_epochs
+    device = config.device
+    model_version = config.model_version
+    control = config.control
+    preglimpsed = config.preglimpsed
+    eye_weight = config.eye_weight
+    rnn = model.rnn
+    # drop = config.dropout
+    drop_rnn = config.drop_rnn
+    drop_readout = config.drop_readout
+    use_loss = config.use_loss
+    clip_grad_norm = 1
+
+    # Synthesize or load the data
+    batch_size = 64
+    preglimpsed_train = preglimpsed + '_train' if preglimpsed is not None else None
+    # data, num, shape, map_, min_num, min_shape
+    pix, num, shape, _, _, _ = get_min_data(preglimpsed_train, config.train_on, device)
+    seq_len = shape.shape[1]
+    criterion = nn.CrossEntropyLoss()
+    shape_crit = nn.MSELoss()
+
+    trainset = TensorDataset(pix, shape, num)
+    preglimpsed_val = preglimpsed + '_valid' if preglimpsed is not None else None
+    pix, num, shape, _, _, _ = get_min_data(preglimpsed_val, config.train_on, device)
+    validset = TensorDataset(pix, shape, num)
+    preglimpsed_test = preglimpsed + '_test0' if preglimpsed is not None else None
+    pix, num, shape, _, _, _ = get_min_data(preglimpsed_test, config.train_on, device)
+    testset = TensorDataset(pix, shape, num)
+    train_loader = DataLoader(trainset, batch_size=batch_size, shuffle=True)
+    valid_loader = DataLoader(validset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(testset, batch_size=batch_size, shuffle=True)
+
+    # To store learning curves
+    train_losses = np.zeros((n_epochs+1,))
+    numb_losses = np.zeros((n_epochs+1,))
+    shape_losses = np.zeros((n_epochs+1,))
+    numb_accs = np.zeros((n_epochs+1,))
+    valid_losses = np.zeros((n_epochs+1,))
+    valid_numb_losses = np.zeros((n_epochs+1,))
+    valid_shape_losses = np.zeros((n_epochs+1,))
+    valid_numb_accs = np.zeros((n_epochs+1,))
+    test_losses = np.zeros((n_epochs+1,))
+    test_numb_losses = np.zeros((n_epochs+1,))
+    test_shape_losses = np.zeros((n_epochs+1,))
+    test_numb_accs = np.zeros((n_epochs+1,))
+
+    # Where to save the results
+    nonlinearity = config.rnn_act + '_' if config.rnn_act is not None else ''
+    sched = '_sched' if config.use_schedule else ''
+    pretrained = '-pretrained' if config.pretrained_map else ''
+    filename = f'{model_version}{pretrained}_{nonlinearity}results_loss-{use_loss}{sched}_lr{config.lr}_wd{config.wd}_dr-rnn{drop_rnn}_dr-ro{drop_readout}'
+    if preglimpsed is not None:
+        filename += '_' + preglimpsed
+    if eye_weight:
+        filename += '_eye'
+
+    print(f'**Training distinctive shape and number model, hidden layer size {model.hidden_size}')
+    def train(loader, ep):
+        model.train()
+        n_correct = 0
+        train_loss = 0
+        numb_train_loss = 0
+        shape_train_loss = 0
+        for batch_idx, (pix, shape_label, numb_label) in enumerate(loader):
+            model.zero_grad()
+            batch_size = pix.shape[0]
+            # for i, row in enumerate(inputs):
+            # shuffle the sequence order
+                # inputs[i, :, :] = row[torch.randperm(seq_len), :]
+            hidden = rnn.initHidden(batch_size)
+            hidden = hidden.to(device)
+
+            # FORWARD PASS
+            this_shape_loss = 0
+            for i in range(seq_len):
+                this_input = pix[:, i, :]
+                number, shape, hidden = model(this_input, hidden)
+                shape_loss = shape_crit(shape, shape_label[:,i,:])
+                this_shape_loss += shape_loss.item()
+                if 'shape' in use_loss:
+                    shape_loss.backward(retain_graph=True)
+            avg_shape_loss = this_shape_loss/seq_len
+
+            numb_loss = criterion(number, numb_label)
+            numb_loss.backward()
+            if 'shape' in use_loss:
+                loss = numb_loss + avg_shape_loss
+            else:
+                loss = numb_loss
+            # Gradient clipping
+            nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+            # Take a gradient step
+            optimizer.step()
+            hidden.detach_()
+
+            # Evaluate performance
+            with torch.no_grad():
+                train_loss += loss.item()
+                numb_train_loss += numb_loss.item()
+                shape_train_loss += avg_shape_loss
+                numb_local = number
+                pred = numb_local.argmax(dim=1, keepdim=True)
+                n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
+        if config.use_schedule:
+            scheduler.step()
+        # Evaluate performance
+        train_loss /= len(loader)
+        numb_train_loss /= len(loader)
+        shape_train_loss /= len(loader)
+        numb_acc = 100. * (n_correct / len(loader.dataset))
+        return train_loss, numb_train_loss, shape_train_loss, numb_acc
+
+    def test(loader, **kwargs):
+        model.eval()
+        n_correct = 0
+        test_loss = 0
+        numb_test_loss = 0
+        shape_test_loss = 0
+        with torch.no_grad():
+            for batch_idx, (pix, shape_label, numb_label) in enumerate(loader):
+                batch_size = pix.shape[0]
+                hidden = rnn.initHidden(batch_size)
+                hidden = hidden.to(device)
+                this_shape_loss = 0
+                for i in range(seq_len):
+                    this_input = pix[:, i, :]
+                    number, shape, hidden = model(this_input, hidden)
+                    shape_loss = shape_crit(shape, shape_label[:,i,:])
+                    this_shape_loss += shape_loss.item()
+                avg_shape_loss = this_shape_loss/seq_len
+                numb_loss = criterion(number, numb_label)
+                if 'shape' in config.use_loss:
+                    loss = numb_loss + avg_shape_loss
+                else:
+                    loss = numb_loss
+
+                # Evaluate performance
+                test_loss += loss.item()
+                shape_test_loss += avg_shape_loss
+                numb_test_loss += numb_loss.item()
+                numb_local = number
+                pred = numb_local.argmax(dim=1, keepdim=True)
+                n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
+            # Evaluate performance
+            test_loss /= len(loader)
+            numb_test_loss /= len(loader)
+            shape_test_loss /= len(loader)
+            numb_acc = 100. * (n_correct / len(loader.dataset))
+        return test_loss, numb_test_loss, shape_test_loss, numb_acc
+    # Evaluate performance before training
+    train_losses[0], numb_losses[0], shape_losses[0], numb_accs[0] = test(train_loader)
+    valid_losses[0], valid_numb_losses[0], valid_shape_losses[0], valid_numb_accs[0] = test(valid_loader)
+    test_losses[0], test_numb_losses[0], test_shape_losses[0], test_numb_accs[0] = test(test_loader)
+    print('Performance before Training')
+    print(f'Train Loss (Total/Num/Shape): {train_losses[0]:.6}/{numb_losses[0]:.6}/{shape_losses[0]:.6}, \t Train Performance (Num) {numb_accs[0]:.3}%')
+    print(f'Valid Loss (Total/Num/Shape): {valid_losses[0]:.6}/{valid_numb_losses[0]:.6}/{valid_shape_losses[0]:.6}, \t Valid Performance (Num) {valid_numb_accs[0]:.3}%')
+    print(f'Test Loss (Total/Num/Shape): {test_losses[0]:.6}/{test_numb_losses[0]:.6}/{test_shape_losses[0]:.6}, \t Test Performance (Num) {test_numb_accs[0]:.3}%')
+
+    for ep in range(1, n_epochs + 1):
+        print(f'Epoch {ep}, Learning rate: {optimizer.param_groups[0]["lr"]}')
+
+        train_loss, num_loss, shape_loss, train_num_acc = train(train_loader, ep)
+        val_loss, val_num_loss, val_shape_loss,val_num_acc = test(valid_loader, which_set='valid')
+        test_loss, test_num_loss, test_shape_loss, test_num_acc = test(test_loader, which_set='test')
+
+        train_losses[ep] = train_loss
+        numb_losses[ep] = num_loss
+        shape_losses[ep] = shape_loss
+        numb_accs[ep] = train_num_acc
+        valid_losses[ep] = val_loss
+        valid_numb_losses[ep] = val_num_loss
+        valid_shape_losses[ep] = val_shape_loss
+        valid_numb_accs[ep] = val_num_acc
+        test_losses[ep] = test_loss
+        test_numb_losses[ep] = test_num_loss
+        test_shape_losses[ep] = test_shape_loss
+        test_numb_accs[ep] = test_num_acc
+        pct_done = round(100. * (ep / n_epochs))
+        if not ep % 5 or ep == 1:
+            # Print and save performance
+            # print(f'Progress {pct_done}% trained: \t Loss (Map/Numb): {map_loss.item():.6}/{number_loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}% \t Number {numb_acc:.3}% \t Mean Map Acc {accs.mean():.3}%')
+            print(f'Epoch {ep}, Progress {pct_done}% trained')
+            print(f'Train Loss (Total/Num/Shape): {train_losses[ep]:.6}/{numb_losses[ep]:.6}/{shape_losses[ep]:.6}, \t Train Performance (Num) {numb_accs[ep]:.3}%')
+            print(f'Valid Loss (Total/Num/Shape): {valid_losses[ep]:.6}/{valid_numb_losses[ep]:.6}/{valid_shape_losses[ep]:.6}, \t Valid Performance (Num) {valid_numb_accs[ep]:.3}%')
+            print(f'Test Loss (Total/Num/Shape): {test_losses[ep]:.6}/{test_numb_losses[ep]:.6}/{test_shape_losses[ep]:.6}, \t Test Performance (Num) {test_numb_accs[ep]:.3}%')
+
+            np.savez('results/'+filename,
+                     numb_loss=numb_losses,
+                     numb_acc=numb_accs,
+                     valid_numb_loss=valid_numb_losses,
+                     valid_numb_acc=valid_numb_accs,
+                     test_numb_loss=test_numb_losses,
+                     test_numb_acc=test_numb_accs)
+            torch.save(model, f'models/{filename}.pt')
+            # Plot performance
+            kwargs_train = {'alpha': 0.8, 'color': 'blue'}
+            kwargs_val = {'alpha': 0.8, 'color': 'cyan'}
+            kwargs_test = {'alpha': 0.8, 'color': 'red'}
+            row, col = 2, 2
+            fig, ax = plt.subplots(row, col, figsize=(6*col, 6*row))
+            plt.suptitle(f'{config.model_version}, nonlin={config.rnn_act}, dr-rnn={config.drop_rnn}, dr-ro={config.drop_readout}, seq not shuffled  \n {preglimpsed}', fontsize=18)
+            ax[0, 0].set_title('Number Loss')
+            ax[0, 0].plot(test_numb_losses[:ep+1], label='test number loss', **kwargs_test)
+            ax[0, 0].plot(valid_numb_losses[:ep+1], label='valid number loss', **kwargs_val)
+            ax[0, 0].plot(numb_losses[:ep+1], label='train number loss', **kwargs_train)
+            ax[0, 1].set_title('Number Accuracy')
+            ax[0, 1].set_ylim([0, 101])
+            ax[0, 1].plot(test_numb_accs[:ep+1], label='test number acc', **kwargs_test)
+            ax[0, 1].plot(valid_numb_accs[:ep+1], label='valid number acc', **kwargs_val)
+            ax[0, 1].plot(numb_accs[:ep+1], label='train number acc', **kwargs_train)
+
+            ax[1, 0].set_title('Shape Loss')
+            ax[1, 0].plot(test_shape_losses[:ep+1], label='test shape loss', **kwargs_test)
+            ax[1, 0].plot(valid_shape_losses[:ep+1], label='valid shape loss', **kwargs_val)
+            ax[1, 0].plot(shape_losses[:ep+1], label='train shape loss', **kwargs_train)
+            ax[1, 1].set_title('Total Loss')
+            ax[1, 1].plot(test_losses[:ep+1], label='test loss', **kwargs_test)
+            ax[1, 1].plot(valid_losses[:ep+1], label='valid loss', **kwargs_val)
+            ax[1, 1].plot(train_losses[:ep+1], label='train loss', **kwargs_train)
+            for axes in ax.flatten():
+                axes.legend()
+                axes.grid(linestyle='--')
+                axes.set_xlabel('Epochs')
+            plt.savefig(f'figures/{filename}_results.png', dpi=300)
+            plt.close()
+
+    print(f'Final performance:')
+    print(f'Train Loss (Total/Num/Shape): {train_losses[ep]:.6}/{numb_losses[ep]:.6}/{shape_losses[ep]:.6}, \t Train Performance (Num) {numb_accs[ep]:.3}%')
+    print(f'Valid Loss (Total/Num/Shape): {valid_losses[ep]:.6}/{valid_numb_losses[ep]:.6}/{valid_shape_losses[ep]:.6}, \t Valid Performance (Num) {valid_numb_accs[ep]:.3}%')
+    print(f'Test Loss (Total/Num/Shape): {test_losses[ep]:.6}/{test_numb_losses[ep]:.6}/{test_shape_losses[ep]:.6}, \t Test Performance (Num) {test_numb_accs[ep]:.3}%')
+
+    np.savez('results/'+filename,
+             train_loss=train_losses,
+             numb_loss=numb_losses,
+             shape_loss=shape_losses,
+             numb_acc=numb_accs,
+             valid_loss=valid_losses,
+             valid_numb_loss=valid_numb_losses,
+             valid_shape_loss=valid_shape_losses,
+             valid_numb_acc=valid_numb_accs,
+             test_loss=test_losses,
+             test_numb_loss=test_numb_losses,
+             test_shape_loss=test_shape_losses,
+             test_numb_acc=test_numb_accs)
     torch.save(model, f'models/{filename}.pt')
 
 
@@ -1717,12 +1366,13 @@ def get_min_data(preglimpsed, train_on, device=None):
 
     with torch.no_grad():
         print(f'Loading presaved dataset {preglimpsed}...')
-        dir = 'preglimpsed_location_sequences/'
+        dir = 'preglimpsed_sequences/'
         num = np.load(f'{dir}number_{preglimpsed}.npy')
         num = torch.from_numpy(num).long()
         num = num.to(device)
         shape = np.load(f'{dir}shape_{preglimpsed}.npy')
-        shape = torch.from_numpy(shape).long()
+        # shape = torch.from_numpy(shape).long()
+        shape = torch.from_numpy(shape).float()
         shape = shape.to(device)
         min_num = np.load(f'{dir}min_num_{preglimpsed}.npy')
         min_num = torch.from_numpy(min_num).long()
@@ -2033,35 +1683,40 @@ def main(config):
     hidden_size = int(np.round(input_size*1.1))
     # hidden_size = map_size*2
     if model_version == 'two_step':
-        model = TwoStepModel(input_size, hidden_size, map_size, numb_size, **kwargs)
+        model = models.TwoStepModel(input_size, hidden_size, map_size, numb_size, **kwargs)
     elif 'conv' in model_version:
         if 'big' in model_version:
-            model = ConvReadoutMapNet(input_size, hidden_size, map_size, numb_size, big=True, **kwargs)
+            model = models.ConvReadoutMapNet(input_size, hidden_size, map_size, numb_size, big=True, **kwargs)
         else:
-            model = ConvReadoutMapNet(input_size, hidden_size, map_size, numb_size, **kwargs)
+            model = models.ConvReadoutMapNet(input_size, hidden_size, map_size, numb_size, **kwargs)
     elif model_version == 'integrated':
-        model = IntegratedModel(input_size, hidden_size, map_size, numb_size, **kwargs)
+        model = models.IntegratedModel(input_size, hidden_size, map_size, numb_size, **kwargs)
     elif model_version == 'three_step':
-        model = ThreeStepModel(input_size, hidden_size, map_size, numb_size, **kwargs)
+        model = models.ThreeStepModel(input_size, hidden_size, map_size, numb_size, **kwargs)
     elif model_version == 'content_gated':
-        model = ContentGated_cheat(hidden_size, map_size, numb_size, **kwargs)
+        model = models.ContentGated_cheat(hidden_size, map_size, numb_size, **kwargs)
     elif model_version == 'two_step_ws':
         if 'detached' in use_loss:
-            model = TwoStepModel_weightshare_detached(hidden_size, map_size, numb_size, init=False, **kwargs)
+            model = models.TwoStepModel_weightshare_detached(hidden_size, map_size, numb_size, init=False, **kwargs)
         else:
-            model = TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=False, **kwargs)
+            model = models.TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=False, **kwargs)
     elif model_version == 'two_step_ws_init':
         if 'detached' in use_loss:
-            model = TwoStepModel_weightshare_detached(hidden_size, map_size, numb_size, init=True, **kwargs)
+            model = models.TwoStepModel_weightshare_detached(hidden_size, map_size, numb_size, init=True, **kwargs)
         else:
-            model = TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=True, **kwargs)
+            model = models.TwoStepModel_weightshare(hidden_size, map_size, numb_size, init=True, **kwargs)
     elif 'one_step' in model_version:
         if use_loss == 'number':
-            model = RNN(map_size, hidden_size, numb_size, **kwargs)
+            model = models.RNN(map_size, hidden_size, numb_size, **kwargs)
         elif use_loss == 'map':
-            model = RNN(map_size, hidden_size, map_size, **kwargs)
+            model = models.RNN(map_size, hidden_size, map_size, **kwargs)
     elif model_version == 'number_as_sum':
-        model = NumberAsMapSum(map_size, hidden_size)
+        model = models.NumberAsMapSum(map_size, hidden_size)
+    elif model_version == 'cheat':
+        model = models.DistinctiveCheat(**kwargs)
+    elif model_version == 'distinctive':
+        hidden_size = int(120*1.1)
+        model = models.Distinctive(hidden_size, **kwargs)
     else:
         print('Model version not implemented.')
         exit()
@@ -2150,6 +1805,10 @@ def main(config):
         # train_two_step_model(model, opt, n_epochs, device, differential,
         #                      use_loss, model_version, preglimpsed=preglimpsed, eye_weight=eye_weight)
         train_two_step_model(model, opt, config, scheduler)
+    elif model_version == 'cheat':
+        train_nomap_model(model, opt, config, scheduler)
+    elif model_version == 'distinctive':
+        train_shape_number(model, opt, config, scheduler)
     elif model_version == 'content_gated':
         train_content_gated_model(model, opt, config, scheduler)
     elif 'one' in model_version and (use_loss == 'number' or use_loss == 'map'):
