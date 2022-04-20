@@ -828,10 +828,13 @@ def train_shape_number(model, optimizer, config, scheduler=None):
             for i in range(seq_len):
                 this_input = pix[:, i, :]
                 number, shape, hidden = model(this_input, hidden)
-                shape_loss = shape_crit(shape, shape_label[:,i,:])
-                this_shape_loss += shape_loss.item()
                 if 'shape' in use_loss:
+                    shape_loss = shape_crit(shape, shape_label[:, i, :])
                     shape_loss.backward(retain_graph=True)
+                    this_shape_loss += shape_loss.item()
+                else:
+                    shape_loss = -1
+                    this_shape_loss += shape_loss
             avg_shape_loss = this_shape_loss/seq_len
 
             numb_loss = criterion(number, numb_label)
@@ -878,8 +881,12 @@ def train_shape_number(model, optimizer, config, scheduler=None):
                 for i in range(seq_len):
                     this_input = pix[:, i, :]
                     number, shape, hidden = model(this_input, hidden)
-                    shape_loss = shape_crit(shape, shape_label[:,i,:])
-                    this_shape_loss += shape_loss.item()
+                    if 'shape' in use_loss:
+                        shape_loss = shape_crit(shape, shape_label[:, i, :])
+                        this_shape_loss += shape_loss.item()
+                    else:
+                        shape_loss = -1
+                        this_shape_loss += shape_loss
                 avg_shape_loss = this_shape_loss/seq_len
                 numb_loss = criterion(number, numb_label)
                 if 'shape' in config.use_loss:
