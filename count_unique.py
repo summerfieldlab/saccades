@@ -11,16 +11,17 @@ from torch.utils.data import TensorDataset, DataLoader
 from torch.nn.functional import one_hot
 torch.set_num_threads(15)
 torch.autograd.set_detect_anomaly(True)
+torch.backends.cudnn.benchmark = False
 import math
 import random
 import operator as op
 from functools import reduce
 from matplotlib import pyplot as plt
+import matplotlib as mpl
 from sklearn.metrics import roc_auc_score, f1_score
-from matplotlib import pyplot as plt
 import models
 
-
+print(f'matplotlib version {mpl.__version__}')
 
 
 def ncr(n, r):
@@ -555,7 +556,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
     torch.save(model, f'models/{filename}.pt')
 
 def train_nomap_model(model, optimizer, config, scheduler=None):
-    print('Cheat model...')
+    print('no map model...')
     n_epochs = config.n_epochs
     device = config.device
     model_version = config.model_version
@@ -765,12 +766,14 @@ def train_shape_number(model, optimizer, config, scheduler=None):
 
     # Synthesize or load the data
     batch_size = 64
+    nclasses = 6
     preglimpsed_train = preglimpsed + '_train' if preglimpsed is not None else None
     # data, num, shape, map_, min_num, min_shape
     pix, num, shape, _, _, _ = get_min_data(preglimpsed_train, config.train_on, device)
     seq_len = shape.shape[1]
     criterion = nn.CrossEntropyLoss()
     shape_crit = nn.MSELoss()
+    shape_bce = nn.BCELoss()
 
     trainset = TensorDataset(pix, shape, num)
     preglimpsed_val = preglimpsed + '_valid' if preglimpsed is not None else None
@@ -792,10 +795,12 @@ def train_shape_number(model, optimizer, config, scheduler=None):
     valid_numb_losses = np.zeros((n_epochs+1,))
     valid_shape_losses = np.zeros((n_epochs+1,))
     valid_numb_accs = np.zeros((n_epochs+1,))
+    valid_conf_mats = np.zeros((n_epochs+1, nclasses, nclasses))
     test_losses = np.zeros((n_epochs+1,))
     test_numb_losses = np.zeros((n_epochs+1,))
     test_shape_losses = np.zeros((n_epochs+1,))
     test_numb_accs = np.zeros((n_epochs+1,))
+    test_conf_mats = np.zeros((n_epochs+1, nclasses, nclasses))
 
     # Where to save the results
     nonlinearity = config.rnn_act + '_' if config.rnn_act is not None else ''
@@ -829,7 +834,11 @@ def train_shape_number(model, optimizer, config, scheduler=None):
                 this_input = pix[:, i, :]
                 number, shape, hidden = model(this_input, hidden)
                 if 'shape' in use_loss:
+                    import pdb;pdb.set_trace()
                     shape_loss = shape_crit(shape, shape_label[:, i, :])
+                    idx = shape_label[:, i, :].sum(dim=-1).nonzero(as_tuple=False)
+                    shape_class_label = torch.argmax(shape_label[:, i, :], dim=-1)
+                    bce_loss = shape_bce(shape, shape_class_label)
                     shape_loss.backward(retain_graph=True)
                     this_shape_loss += shape_loss.item()
                 else:
@@ -872,6 +881,10 @@ def train_shape_number(model, optimizer, config, scheduler=None):
         test_loss = 0
         numb_test_loss = 0
         shape_test_loss = 0
+        class_correct = [0. for i in range(nclasses)]
+        class_total = [0. for i in range(nclasses)]
+        classes = [0. for i in range(nclasses)]
+        confusion_matrix = np.zeros((nclasses, nclasses))
         with torch.no_grad():
             for batch_idx, (pix, shape_label, numb_label) in enumerate(loader):
                 batch_size = pix.shape[0]
@@ -901,16 +914,28 @@ def train_shape_number(model, optimizer, config, scheduler=None):
                 numb_local = number
                 pred = numb_local.argmax(dim=1, keepdim=True)
                 n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
-            # Evaluate performance
+
+                # class-specific analysis and confusion matrix
+                c = (pred.squeeze() == numb_label)
+                for i in range(c.shape[0]):
+                    label = numb_label[i]
+                    class_correct[label-2] += c[i].item()
+                    class_total[label-2] += 1
+                    confusion_matrix[label-2, pred[i]-2] += 1
+
+            # Calculate average performance
             test_loss /= len(loader)
             numb_test_loss /= len(loader)
             shape_test_loss /= len(loader)
             numb_acc = 100. * (n_correct / len(loader.dataset))
-        return test_loss, numb_test_loss, shape_test_loss, numb_acc
+
+
+
+        return test_loss, numb_test_loss, shape_test_loss, numb_acc, confusion_matrix
     # Evaluate performance before training
-    train_losses[0], numb_losses[0], shape_losses[0], numb_accs[0] = test(train_loader)
-    valid_losses[0], valid_numb_losses[0], valid_shape_losses[0], valid_numb_accs[0] = test(valid_loader)
-    test_losses[0], test_numb_losses[0], test_shape_losses[0], test_numb_accs[0] = test(test_loader)
+    train_losses[0], numb_losses[0], shape_losses[0], numb_accs[0], _ = test(train_loader)
+    valid_losses[0], valid_numb_losses[0], valid_shape_losses[0], valid_numb_accs[0], _ = test(valid_loader)
+    test_losses[0], test_numb_losses[0], test_shape_losses[0], test_numb_accs[0], _ = test(test_loader)
     print('Performance before Training')
     print(f'Train Loss (Total/Num/Shape): {train_losses[0]:.6}/{numb_losses[0]:.6}/{shape_losses[0]:.6}, \t Train Performance (Num) {numb_accs[0]:.3}%')
     print(f'Valid Loss (Total/Num/Shape): {valid_losses[0]:.6}/{valid_numb_losses[0]:.6}/{valid_shape_losses[0]:.6}, \t Valid Performance (Num) {valid_numb_accs[0]:.3}%')
@@ -920,8 +945,8 @@ def train_shape_number(model, optimizer, config, scheduler=None):
         print(f'Epoch {ep}, Learning rate: {optimizer.param_groups[0]["lr"]}')
 
         train_loss, num_loss, shape_loss, train_num_acc = train(train_loader, ep)
-        val_loss, val_num_loss, val_shape_loss,val_num_acc = test(valid_loader, which_set='valid')
-        test_loss, test_num_loss, test_shape_loss, test_num_acc = test(test_loader, which_set='test')
+        val_loss, val_num_loss, val_shape_loss,val_num_acc, val_conf_mat = test(valid_loader, which_set='valid')
+        test_loss, test_num_loss, test_shape_loss, test_num_acc, test_conf_mat = test(test_loader, which_set='test')
 
         train_losses[ep] = train_loss
         numb_losses[ep] = num_loss
@@ -931,10 +956,12 @@ def train_shape_number(model, optimizer, config, scheduler=None):
         valid_numb_losses[ep] = val_num_loss
         valid_shape_losses[ep] = val_shape_loss
         valid_numb_accs[ep] = val_num_acc
+        valid_conf_mats[ep, :, :] = val_conf_mat
         test_losses[ep] = test_loss
         test_numb_losses[ep] = test_num_loss
         test_shape_losses[ep] = test_shape_loss
         test_numb_accs[ep] = test_num_acc
+        test_conf_mats[ep, :, :] = test_conf_mat
         pct_done = round(100. * (ep / n_epochs))
         if not ep % 5 or ep == 1:
             # Print and save performance
@@ -945,13 +972,22 @@ def train_shape_number(model, optimizer, config, scheduler=None):
             print(f'Test Loss (Total/Num/Shape): {test_losses[ep]:.6}/{test_numb_losses[ep]:.6}/{test_shape_losses[ep]:.6}, \t Test Performance (Num) {test_numb_accs[ep]:.3}%')
 
             np.savez('results/'+filename,
+                     train_loss=train_losses,
                      numb_loss=numb_losses,
+                     shape_loss=shape_losses,
                      numb_acc=numb_accs,
+                     valid_loss=valid_losses,
                      valid_numb_loss=valid_numb_losses,
+                     valid_shape_loss=valid_shape_losses,
                      valid_numb_acc=valid_numb_accs,
+                     valid_conf_mat=valid_conf_mats,
+                     test_loss=test_losses,
                      test_numb_loss=test_numb_losses,
-                     test_numb_acc=test_numb_accs)
+                     test_shape_loss=test_shape_losses,
+                     test_numb_acc=test_numb_accs,
+                     test_conf_mat=test_conf_mats)
             torch.save(model, f'models/{filename}.pt')
+
             # Plot performance
             kwargs_train = {'alpha': 0.8, 'color': 'blue'}
             kwargs_val = {'alpha': 0.8, 'color': 'cyan'}
@@ -998,11 +1034,33 @@ def train_shape_number(model, optimizer, config, scheduler=None):
              valid_numb_loss=valid_numb_losses,
              valid_shape_loss=valid_shape_losses,
              valid_numb_acc=valid_numb_accs,
+             valid_conf_mat=valid_conf_mats,
              test_loss=test_losses,
              test_numb_loss=test_numb_losses,
              test_shape_loss=test_shape_losses,
-             test_numb_acc=test_numb_accs)
+             test_numb_acc=test_numb_accs,
+             test_conf_mat=test_conf_mats)
     torch.save(model, f'models/{filename}.pt')
+
+    # Plot confusion matrices
+    fig, (ax1, ax2) = plt.subplots(1, 2)
+    ax1.imshow(val_conf_mat[:, :])
+    ax1.set_title('Confusion Matrix (Validation)')
+    ax1.set_ylabel('True Label')
+    ax1.set_xlabel('Estimated Class')
+    ax1.set_xticks([0, 1, 2, 3, 4, 5], [2, 3, 4, 5, 6, 7])
+    ax1.set_yticks([0, 1, 2, 3, 4, 5], [2, 3, 4, 5, 6, 7])
+    # ax1.set_xticklabels([2, 3, 4, 5, 6, 7])
+    # ax1.set_yticklabels([2, 3, 4, 5, 6, 7])
+    ax2.imshow(test_conf_mat[:, :])
+    ax2.set_title('Confusion Matrix (Test)')
+    ax2.set_xlabel('Estimated Class')
+    ax2.set_xticks([0, 1, 2, 3, 4, 5], [2, 3, 4, 5, 6, 7])
+    ax2.set_yticks([0, 1, 2, 3, 4, 5], [2, 3, 4, 5, 6, 7])
+    # ax2.set_xticklabels([2, 3, 4, 5, 6, 7])
+    # ax2.set_yticklabels([2, 3, 4, 5, 6, 7])
+    plt.savefig(f'figures/{filename}_confusion.png', dpi=300)
+
 
 
 def train_content_gated_model(model, optimizer, config, scheduler=None):
@@ -1685,7 +1743,7 @@ def main(config):
                 #     continue
     kwargs = {'act': rnn_act, 'eye_weight': eye_weight, 'detached': detached,
               'drop_rnn': config.drop_rnn, 'drop_readout': config.drop_readout,
-              'rotate': config.rotate}
+              'rotate': config.rotate, 'device': config.device}
     if config.train_on == 'pix':
         input_size = 1152
     elif config.train_on == 'loc':
@@ -1726,9 +1784,14 @@ def main(config):
         model = models.NumberAsMapSum(map_size, hidden_size)
     elif model_version == 'cheat':
         model = models.DistinctiveCheat(**kwargs)
+    elif model_version == 'cheat_small':
+        model = models.DistinctiveCheat_small(**kwargs)
     elif model_version == 'distinctive':
         hidden_size = int(120*1.1)
         model = models.Distinctive(hidden_size, **kwargs)
+    elif model_version == 'pixel+shape':
+        hidden_size = int(120*1.1)
+        model = models.PixelPlusShapeModel(hidden_size, **kwargs)
     else:
         print('Model version not implemented.')
         exit()
@@ -1762,6 +1825,7 @@ def main(config):
         start_lr = 0.1
         # Can decay lr quicker when starting with the rnn weights pretrained
         scale = 0.9955 if config.pretrained_map else 0.9978
+        0.8 ** 200
         if 'detached' in use_loss:
             opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=start_lr, momentum=mom, weight_decay=wd_rnn)
             if 'two' in model_version or model_version == 'integrated':
@@ -1817,9 +1881,9 @@ def main(config):
         # train_two_step_model(model, opt, n_epochs, device, differential,
         #                      use_loss, model_version, preglimpsed=preglimpsed, eye_weight=eye_weight)
         train_two_step_model(model, opt, config, scheduler)
-    elif model_version == 'cheat':
+    elif 'cheat' in model_version:
         train_nomap_model(model, opt, config, scheduler)
-    elif model_version == 'distinctive':
+    elif model_version == 'distinctive' or model_version == 'pixel+shape':
         train_shape_number(model, opt, config, scheduler)
     elif model_version == 'content_gated':
         train_content_gated_model(model, opt, config, scheduler)
@@ -1862,6 +1926,7 @@ def get_config():
     parser.add_argument('--n_epochs', type=int, default=2000)
     parser.add_argument('--pretrained_map', action='store_true', default=False)
     parser.add_argument('--rotate', action='store_true', default=False)
+    parser.add_argument('--debug', action='store_true', default=False)
     config = parser.parse_args()
     print(config)
     return config
