@@ -4,8 +4,119 @@ import torch
 from torch import nn
 from scipy.stats import special_ortho_group
 
-torch.set_num_threads(15)
-torch.autograd.set_detect_anomaly(True)
+class PixelPlusShapeModel(nn.Module):
+    """RNN receives joint embedding of pixels and predicted shape label.
+
+    A convolutional module receives the raw pixel inputs at each glimpse and
+    tries to predict the shape label per glimpse. The last fc layer of the
+    conv module is the pixel embedding to be passed on to the RNN, which is
+    trained to classify the numerosity of the image. The input to the RNN is a
+    joint embedding of the pixel embedding and the predicted shape label. The
+    joint embedding is constructed by concatenating them and applying a random
+    rotation. This rotation may or may not be beneficial. Anecdotal evidence
+    suggests that neural networks can have a hard time using auxiliary inputs
+    when it represented in fewer input units than the primary input.
+    """
+    def __init__(self, hidden_size, **kwargs):
+        super().__init__()
+        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
+        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
+        drop_emb = 0.1
+        device = kwargs['device']
+        # pix_size = 1152
+        # self.width = 48
+        # self.height = 24
+
+        # pix_size = 512
+        # self.width = 16*2
+        # self.height = 16
+
+        pix_size = 288
+        self.width = 12*2
+        self.height = 12
+
+        shape_size = 14
+        self.hidden_size = hidden_size
+        rnn_out_size = 200
+        fc2_size = 10
+        number_size = 8
+
+        self.conv = ConvNet(self.width, self.height, shape_size, drop_emb, big=False)
+        emb_size = self.conv.fc1_size + shape_size # 120 + 14
+        self.LReLU = nn.LeakyReLU(0.1)
+        self.rnn = RNN(emb_size, self.hidden_size, rnn_out_size, dropout=drop_rnn)
+        self.fc2 = nn.Linear(rnn_out_size, fc2_size)
+        self.drop_layer = nn.Dropout(p=drop_readout)
+        self.readout = nn.Linear(fc2_size, number_size)
+        self.softmax = nn.LogSoftmax(dim=1)
+        self.rot_mat = torch.from_numpy(special_ortho_group.rvs(emb_size)).float().to(device)
+
+    def forward(self, pix, hidden):
+        # reshape
+        shape, pix_emb = self.conv(pix.view((-1, 1, self.width, self.height)))
+        shape2 = shape.detach().clone()
+        # Concatenate the shape output and the pixel embedding
+        # Apply a random rotation to embed these two signals together
+        # Otherwise, network may struggle to take advantage of shape signal
+        rnn_input = torch.cat((pix_emb, self.softmax(shape2)), dim=1)
+        rnn_input = torch.matmul(rnn_input, self.rot_mat)
+        rnn_out, hidden = self.rnn(rnn_input, hidden)
+        number = self.LReLU(self.fc2(rnn_out))
+        number = self.drop_layer(number)
+        number = self.readout(number)
+        return number, shape, hidden
+
+
+class ShapeModel(nn.Module):
+    """RNN recieves only the (detached) prediced shape label as input."""
+    def __init__(self, hidden_size, **kwargs):
+        super().__init__()
+        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
+        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
+        drop_emb = 0.1
+        device = kwargs['device']
+        # pix_size = 1152
+        # self.width = 48
+        # self.height = 24
+
+        # pix_size = 512
+        # self.width = 16*2
+        # self.height = 16
+
+        pix_size = 288
+        self.width = 12*2
+        self.height = 12
+
+        shape_size = 14
+        self.hidden_size = hidden_size
+        rnn_out_size = 200
+        fc2_size = 10
+        number_size = 8
+
+        self.conv = ConvNet(self.width, self.height, shape_size, drop_emb, big=False)
+        emb_size = self.conv.fc1_size + shape_size # 120 + 14
+        self.LReLU = nn.LeakyReLU(0.1)
+        self.rnn = RNN(shape_size, self.hidden_size, rnn_out_size, dropout=drop_rnn)
+        self.fc2 = nn.Linear(rnn_out_size, fc2_size)
+        self.drop_layer = nn.Dropout(p=drop_readout)
+        self.readout = nn.Linear(fc2_size, number_size)
+        self.softmax = nn.LogSoftmax(dim=1)
+        self.rot_mat = torch.from_numpy(special_ortho_group.rvs(emb_size)).float().to(device)
+
+    def forward(self, pix, hidden):
+        # reshape
+        shape, pix_emb = self.conv(pix.view((-1, 1, self.width, self.height)))
+        shape2 = shape.detach().clone()
+        # Concatenate the shape output and the pixel embedding
+        # Apply a random rotation to embed these two signals together
+        # Otherwise, network may struggle to take advantage of shape signal
+        # rnn_input = torch.cat((pix_emb, self.softmax(shape2)), dim=1)
+        # rnn_input = torch.matmul(rnn_input, self.rot_mat)
+        rnn_out, hidden = self.rnn(self.softmax(shape2), hidden)
+        number = self.LReLU(self.fc2(rnn_out))
+        number = self.drop_layer(number)
+        number = self.readout(number)
+        return number, shape, hidden
 
 class Distinctive(nn.Module):
     def __init__(self, hidden_size, **kwargs):
@@ -13,9 +124,18 @@ class Distinctive(nn.Module):
         drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
         drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
         drop_emb = 0.1
-        pix_size = 1152
-        self.width = 48
-        self.height = 24
+        # pix_size = 1152
+        # self.width = 48
+        # self.height = 24
+
+        # pix_size = 512
+        # self.width = 16*2
+        # self.height = 16
+
+        pix_size = 288
+        self.width = 12*2
+        self.height = 12
+
         shape_size = 14
         self.hidden_size = hidden_size
         rnn_out_size = 200
@@ -63,6 +183,33 @@ class DistinctiveCheat(nn.Module):
         number = self.drop_layer(number)
         number = self.readout(number)
         return number, hidden
+
+
+class DistinctiveCheat_small(nn.Module):
+    def __init__(self, **kwargs):
+        super().__init__()
+        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
+        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
+        input_size = 14
+        self.hidden_size = 25
+        output_size = 25
+        fc2_size = 10
+        number_size = 8
+        # self.fc1 = nn.Linear(14, 14)
+        # self.LReLU = nn.LeakyReLU(0.1)
+        self.rnn = RNN(input_size, self.hidden_size, number_size, dropout=drop_rnn)
+        # self.fc2 = nn.Linear(output_size, fc2_size)
+        # self.drop_layer = nn.Dropout(p=drop_readout)
+        # self.readout = nn.Linear(fc2_size, number_size)
+
+    def forward(self, glimpse_label, hidden):
+        # glimpse_emb = self.LReLU(self.fc1(glimpse_label))
+        number, hidden = self.rnn(glimpse_label, hidden)
+        # number = self.LReLU(self.fc2(rnn_out))
+        # number = self.drop_layer(number)
+        # number = self.readout(number)
+        return number, hidden
+
 
 # Models for min task
 class ContentGated_cheat(nn.Module):
@@ -217,7 +364,7 @@ class TwoRNNs(nn.Module):
             input_to_map_rnn = gaze
         map_, hidden[:self.map_size] = self.map_rnn(input_to_map_rnn, hidden[:self.map_size])
         gaze = self.map_readout(map.view((-1, 1, self.width, self.width)))
-        combined = torch.cat(pix, gaze)
+        combined = torch.cat((pix, gaze), dim=1)
         number = self.fc(combined)
         return number, map_, hidden
 
@@ -351,11 +498,11 @@ class ConvNet(nn.Module):
             self.cnn3_nchannels_out = 256
         else:  # Smaller version
             self.kernel1_size = 5
-            self.cnn1_nchannels_out = 6
+            self.cnn1_nchannels_out = 16
             self.poolsize = 2
-            self.kernel2_size = 6
+            self.kernel2_size = 2
             self.cnn2_nchannels_out = 12
-            self.kernel3_size = 6
+            self.kernel3_size = 2
             self.cnn3_nchannels_out = 9
 
         self.LReLU = nn.LeakyReLU(0.1)
@@ -378,6 +525,7 @@ class ConvNet(nn.Module):
         # pass through FC layers
         # self.fc1 = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), 120)  # size input, size output
         self.fc1_size = 120
+        # import pdb; pdb.set_trace()
         self.fc1 = nn.Linear(int(self.cnn3_nchannels_out * self.cnn3_width_out * self.cnn3_height_out), self.fc1_size)  # size input, size output
 
         self.fc2 = nn.Linear(self.fc1_size, output_size)
