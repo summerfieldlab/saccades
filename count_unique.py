@@ -18,11 +18,15 @@ import operator as op
 from functools import reduce
 from matplotlib import pyplot as plt
 import matplotlib as mpl
-from sklearn.metrics import roc_auc_score, f1_score
+from sklearn.metrics import roc_auc_score, f1_score, r2_score
+from torchmetrics import R2Score
+import pandas as pd
+import seaborn as sns
 import models
 
 print(f'matplotlib version {mpl.__version__}')
-
+r2score = R2Score(num_outputs=14)
+# r2score = R2Score()
 
 def ncr(n, r):
     r = min(r, n-r)
@@ -556,7 +560,9 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
     torch.save(model, f'models/{filename}.pt')
 
 def train_nomap_model(model, optimizer, config, scheduler=None):
+    """For training shape cheat model."""
     print('no map model...')
+    binarize = True
     n_epochs = config.n_epochs
     device = config.device
     model_version = config.model_version
@@ -604,6 +610,9 @@ def train_nomap_model(model, optimizer, config, scheduler=None):
         filename += '_' + preglimpsed
     if eye_weight:
         filename += '_eye'
+    if binarize:
+        filename += '_bin'
+    print(filename)
 
     print(f'**Training cheat model, hidden layer size {model.hidden_size}')
     def train(loader, ep):
@@ -613,6 +622,8 @@ def train_nomap_model(model, optimizer, config, scheduler=None):
         number_train_loss = 0
         for batch_idx, (inputs, numb_label) in enumerate(loader):
             model.zero_grad()
+            if binarize:
+                inputs = 1.0 * (inputs > 0)
             batch_size = inputs.shape[0]
 
             # for i, row in enumerate(inputs):
@@ -654,6 +665,8 @@ def train_nomap_model(model, optimizer, config, scheduler=None):
         train_loss = 0
         with torch.no_grad():
             for batch_idx, (inputs, numb_label) in enumerate(loader):
+                if binarize:
+                    inputs = 1.0 * (inputs > 0)
                 batch_size = inputs.shape[0]
                 hidden = rnn.initHidden(batch_size)
                 hidden = hidden.to(device)
@@ -732,7 +745,7 @@ def train_nomap_model(model, optimizer, config, scheduler=None):
                 axes.legend()
                 axes.grid(linestyle='--')
                 axes.set_xlabel('Epochs')
-            plt.savefig(f'figures/{filename}_results.png', dpi=300)
+            plt.savefig(f'figures/{model_version}/{filename}_results.png', dpi=300)
             plt.close()
 
     print(f'Final performance:')
@@ -750,7 +763,14 @@ def train_nomap_model(model, optimizer, config, scheduler=None):
     torch.save(model, f'models/{filename}.pt')
 
 def train_shape_number(model, optimizer, config, scheduler=None):
+    """For training model on pixels with aux shape loss.
+
+    Depending on the model, the aux shape loss is just used to shape the pixel
+    embedding or the predicted shape vector is jointly embedded with the pixel
+    embedding.
+    """
     print('Shape and number model...')
+    bce = config.bce
     n_epochs = config.n_epochs
     device = config.device
     model_version = config.model_version
@@ -762,19 +782,18 @@ def train_shape_number(model, optimizer, config, scheduler=None):
     drop_rnn = config.drop_rnn
     drop_readout = config.drop_readout
     use_loss = config.use_loss
-    clip_grad_norm = 1
-
-    # Synthesize or load the data
+    clip_grad_norm = 2
+    criterion = nn.CrossEntropyLoss()
+    crit_mse = nn.MSELoss()
+    crit_bce = nn.BCEWithLogitsLoss(pos_weight=torch.ones([7], device=device)*6)  #BCELoss()
+    # pos_weight = 6 because there are 6 negative examples for each 1 positive example ()
+    # Synthesize or load the train, test and validation data
     batch_size = 64
     nclasses = 6
     preglimpsed_train = preglimpsed + '_train' if preglimpsed is not None else None
     # data, num, shape, map_, min_num, min_shape
     pix, num, shape, _, _, _ = get_min_data(preglimpsed_train, config.train_on, device)
     seq_len = shape.shape[1]
-    criterion = nn.CrossEntropyLoss()
-    shape_crit = nn.MSELoss()
-    shape_bce = nn.BCELoss()
-
     trainset = TensorDataset(pix, shape, num)
     preglimpsed_val = preglimpsed + '_valid' if preglimpsed is not None else None
     pix, num, shape, _, _, _ = get_min_data(preglimpsed_val, config.train_on, device)
@@ -790,15 +809,24 @@ def train_shape_number(model, optimizer, config, scheduler=None):
     train_losses = np.zeros((n_epochs+1,))
     numb_losses = np.zeros((n_epochs+1,))
     shape_losses = np.zeros((n_epochs+1,))
+    # shape_r2 = np.zeros((n_epochs+1,14))
+    shape_accs_bce = np.zeros((n_epochs+1,))
+    shape_accs_ce = np.zeros((n_epochs+1,))
     numb_accs = np.zeros((n_epochs+1,))
     valid_losses = np.zeros((n_epochs+1,))
     valid_numb_losses = np.zeros((n_epochs+1,))
     valid_shape_losses = np.zeros((n_epochs+1,))
+    # valid_shape_r2 = np.zeros((n_epochs+1,14))
+    valid_shape_accs_bce = np.zeros((n_epochs+1,))
+    valid_shape_accs_ce = np.zeros((n_epochs+1,))
     valid_numb_accs = np.zeros((n_epochs+1,))
     valid_conf_mats = np.zeros((n_epochs+1, nclasses, nclasses))
     test_losses = np.zeros((n_epochs+1,))
     test_numb_losses = np.zeros((n_epochs+1,))
     test_shape_losses = np.zeros((n_epochs+1,))
+    # test_shape_r2 = np.zeros((n_epochs+1,14))
+    test_shape_accs_bce = np.zeros((n_epochs+1,))
+    test_shape_accs_ce = np.zeros((n_epochs+1,))
     test_numb_accs = np.zeros((n_epochs+1,))
     test_conf_mats = np.zeros((n_epochs+1, nclasses, nclasses))
 
@@ -811,6 +839,8 @@ def train_shape_number(model, optimizer, config, scheduler=None):
         filename += '_' + preglimpsed
     if eye_weight:
         filename += '_eye'
+    if bce:
+        filename += '_bce'
 
     print(f'**Training distinctive shape and number model, hidden layer size {model.hidden_size}')
     def train(loader, ep):
@@ -819,6 +849,10 @@ def train_shape_number(model, optimizer, config, scheduler=None):
         train_loss = 0
         numb_train_loss = 0
         shape_train_loss = 0
+        # shape_train_r2 = torch.zeros((14,))
+        correct_shape_bce = torch.zeros((14,), device=device)
+        correct_shape_ce = 0
+        cor_shape_bce2 = 0
         for batch_idx, (pix, shape_label, numb_label) in enumerate(loader):
             model.zero_grad()
             batch_size = pix.shape[0]
@@ -830,22 +864,41 @@ def train_shape_number(model, optimizer, config, scheduler=None):
 
             # FORWARD PASS
             this_shape_loss = 0
+            # this_shape_r2 = torch.zeros((14,))
             for i in range(seq_len):
                 this_input = pix[:, i, :]
-                number, shape, hidden = model(this_input, hidden)
+                number, shape, hidden = model(this_input, hidden, bce)
+                ce_label = torch.argmax(shape_label[:, i, :7], dim=1)
+                bce_label = 1.0 * (shape_label[:, i, :7] > 0)
                 if 'shape' in use_loss:
-                    import pdb;pdb.set_trace()
-                    shape_loss = shape_crit(shape, shape_label[:, i, :])
-                    idx = shape_label[:, i, :].sum(dim=-1).nonzero(as_tuple=False)
-                    shape_class_label = torch.argmax(shape_label[:, i, :], dim=-1)
-                    bce_loss = shape_bce(shape, shape_class_label)
+                    # shape_loss = shape_crit(shape, shape_label[:, i, :])
+                    # mse_loss = crit_mse(shape, shape_label[:, i, :])
+                    if bce:
+                        # shape_loss = crit_bce(shape[:, :7], bce_label)
+                        shape_loss = crit_bce(shape[:, :7], shape_label[:, i, :7])
+                    else:
+                        shape_loss = criterion(shape, ce_label)
                     shape_loss.backward(retain_graph=True)
                     this_shape_loss += shape_loss.item()
+                    with torch.no_grad():
+                        sigshape = torch.sigmoid(shape[:, :7])
+                        # this_shape_r2 += r2score(sigshape, shape_label[:, i, :]) #torchmetrics
+                        shape_pred = torch.round(sigshape)
+                        # bin_shape_label = 1 * (shape_label[:, i, :] > 0)
+                        # correct_shape_bce += shape_pred.eq(bce_label).sum(dim=0)
+                        cor_shape2 = shape_pred.eq(bce_label.view_as(sigshape))
+                        # in order to count a glimpse as correctly labeled, the predicted glimpse vector must be approximately equal glimpse label
+                        cor_shape_bce2 += sum([all(row) for row in cor_shape2])
+
+                        pred_shape = torch.argmax(shape[:, :7], dim=1, keepdim=True)
+                        correct_shape_ce += pred_shape.eq(ce_label.view_as(pred_shape)).sum(dim=0).item()
+                    # this_shape_r2 += r2_score(shape_label[:, i, :].detach().cpu(), shape.detach().cpu())
                 else:
                     shape_loss = -1
                     this_shape_loss += shape_loss
+                    # this_shape_r2 += -1
             avg_shape_loss = this_shape_loss/seq_len
-
+            # avg_shape_r2 = this_shape_r2/seq_len
             numb_loss = criterion(number, numb_label)
             numb_loss.backward()
             if 'shape' in use_loss:
@@ -863,17 +916,26 @@ def train_shape_number(model, optimizer, config, scheduler=None):
                 train_loss += loss.item()
                 numb_train_loss += numb_loss.item()
                 shape_train_loss += avg_shape_loss
+                # shape_train_r2 += avg_shape_r2
                 numb_local = number
                 pred = numb_local.argmax(dim=1, keepdim=True)
                 n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
+            if config.debug:
+                break
         if config.use_schedule:
             scheduler.step()
+
         # Evaluate performance
         train_loss /= len(loader)
         numb_train_loss /= len(loader)
         shape_train_loss /= len(loader)
+        # shape_train_r2 /= len(loader)
         numb_acc = 100. * (n_correct / len(loader.dataset))
-        return train_loss, numb_train_loss, shape_train_loss, numb_acc
+        shape_acc_bce = 100. * (correct_shape_bce / (len(loader.dataset)*seq_len))
+        shape_acc_bce2 = 100. * (cor_shape_bce2 / (len(loader.dataset)*seq_len))
+        shape_acc_ce = 100. * (correct_shape_ce / (len(loader.dataset)*seq_len))
+        shape_acc_bce = shape_acc_bce.cpu().numpy()
+        return train_loss, numb_train_loss, shape_train_loss, numb_acc, shape_acc_bce2, shape_acc_ce
 
     def test(loader, **kwargs):
         model.eval()
@@ -881,6 +943,10 @@ def train_shape_number(model, optimizer, config, scheduler=None):
         test_loss = 0
         numb_test_loss = 0
         shape_test_loss = 0
+        # shape_test_r2 = torch.zeros((14,))
+        correct_shape_bce = torch.zeros((14,), device=device)
+        cor_shape_bce2 = 0
+        correct_shape_ce = 0
         class_correct = [0. for i in range(nclasses)]
         class_total = [0. for i in range(nclasses)]
         classes = [0. for i in range(nclasses)]
@@ -891,17 +957,39 @@ def train_shape_number(model, optimizer, config, scheduler=None):
                 hidden = rnn.initHidden(batch_size)
                 hidden = hidden.to(device)
                 this_shape_loss = 0
+                # this_shape_r2 = torch.zeros((14,))
                 for i in range(seq_len):
                     this_input = pix[:, i, :]
-                    number, shape, hidden = model(this_input, hidden)
+                    number, shape, hidden = model(this_input, hidden, bce)
+                    ce_label = torch.argmax(shape_label[:, i, :7], dim=1)
+                    bce_label = 1.0 * (shape_label[:, i, :7] > 0)
                     if 'shape' in use_loss:
-                        shape_loss = shape_crit(shape, shape_label[:, i, :])
+                        if bce:
+                            # shape_loss = crit_bce(shape[:, :7], bce_label)
+                            shape_loss = crit_bce(shape[:, :7], shape_label[:, i, :7])
+                        else:
+                            shape_loss = criterion(shape, ce_label)
                         this_shape_loss += shape_loss.item()
+                        # this_shape_r2 += r2_score(shape_label[:, i, :].detach().cpu(), shape.detach().cpu())
+                        with torch.no_grad():
+                            sigshape = torch.sigmoid(shape[:, :7])
+                            # this_shape_r2 += r2score(sigshape, shape_label[:, i, :]) #torchmetrics
+                            shape_pred = torch.round(sigshape)
+                            # bin_shape_label = 1 * (shape_label[:, i, :] > 0)
+                            # correct_shape_bce += shape_pred.eq(bin_shape_label).sum(dim=0)
+                            cor_shape2 = shape_pred.eq(bce_label.view_as(sigshape))
+                            # in order to count a glimpse as correctly labeled, the predicted glimpse vector must be approximately equal glimpse label
+                            cor_shape_bce2 += sum([all(row) for row in cor_shape2])
+                            pred = torch.argmax(shape[:, :7], dim=1, keepdim=True)
+                            correct_shape_ce += pred.eq(ce_label.view_as(pred)).sum(dim=0).item()
+
                     else:
                         shape_loss = -1
                         this_shape_loss += shape_loss
-                avg_shape_loss = this_shape_loss/seq_len
+                        # this_shape_r2 += -1
+
                 numb_loss = criterion(number, numb_label)
+                avg_shape_loss = this_shape_loss / seq_len
                 if 'shape' in config.use_loss:
                     loss = numb_loss + avg_shape_loss
                 else:
@@ -910,6 +998,7 @@ def train_shape_number(model, optimizer, config, scheduler=None):
                 # Evaluate performance
                 test_loss += loss.item()
                 shape_test_loss += avg_shape_loss
+                # shape_test_r2 += this_shape_r2/seq_len
                 numb_test_loss += numb_loss.item()
                 numb_local = number
                 pred = numb_local.argmax(dim=1, keepdim=True)
@@ -922,68 +1011,84 @@ def train_shape_number(model, optimizer, config, scheduler=None):
                     class_correct[label-2] += c[i].item()
                     class_total[label-2] += 1
                     confusion_matrix[label-2, pred[i]-2] += 1
-
+                if config.debug:
+                    break
             # Calculate average performance
             test_loss /= len(loader)
             numb_test_loss /= len(loader)
             shape_test_loss /= len(loader)
+            # shape_test_r2 /= len(loader)
+            shape_acc_bce = 100. * (correct_shape_bce / (len(loader.dataset)*seq_len))
+            shape_acc_bce = shape_acc_bce.cpu().numpy()
+            shape_acc_bce2 = 100. * (cor_shape_bce2 / (len(loader.dataset)*seq_len))
+            shape_acc_ce = 100. * (correct_shape_ce / (len(loader.dataset)*seq_len))
             numb_acc = 100. * (n_correct / len(loader.dataset))
-
-
-
-        return test_loss, numb_test_loss, shape_test_loss, numb_acc, confusion_matrix
+        return test_loss, numb_test_loss, shape_test_loss, numb_acc, shape_acc_bce2, shape_acc_ce, confusion_matrix
     # Evaluate performance before training
-    train_losses[0], numb_losses[0], shape_losses[0], numb_accs[0], _ = test(train_loader)
-    valid_losses[0], valid_numb_losses[0], valid_shape_losses[0], valid_numb_accs[0], _ = test(valid_loader)
-    test_losses[0], test_numb_losses[0], test_shape_losses[0], test_numb_accs[0], _ = test(test_loader)
+    # train_losses_test, numb_losses_test, shape_losses_test, numb_accs_test, shape_accs_bce_test, shape_accs_ce_test, _ = test(train_loader)
+    train_losses[0], numb_losses[0], shape_losses[0], numb_accs[0], shape_accs_bce[0], shape_accs_ce[0], _ = test(train_loader)
+    valid_losses[0], valid_numb_losses[0], valid_shape_losses[0], valid_numb_accs[0], valid_shape_accs_bce[0], valid_shape_accs_ce[0], _ = test(valid_loader)
+    test_losses[0], test_numb_losses[0], test_shape_losses[0], test_numb_accs[0], test_shape_accs_bce[0], test_shape_accs_ce[0], _ = test(test_loader)
     print('Performance before Training')
-    print(f'Train Loss (Total/Num/Shape): {train_losses[0]:.6}/{numb_losses[0]:.6}/{shape_losses[0]:.6}, \t Train Performance (Num) {numb_accs[0]:.3}%')
-    print(f'Valid Loss (Total/Num/Shape): {valid_losses[0]:.6}/{valid_numb_losses[0]:.6}/{valid_shape_losses[0]:.6}, \t Valid Performance (Num) {valid_numb_accs[0]:.3}%')
-    print(f'Test Loss (Total/Num/Shape): {test_losses[0]:.6}/{test_numb_losses[0]:.6}/{test_shape_losses[0]:.6}, \t Test Performance (Num) {test_numb_accs[0]:.3}%')
+    print(f'Train Loss (Total/Num/Shape): {train_losses[0]:.6}/{numb_losses[0]:.6}/{shape_losses[0]:.6}, \t Train Performance (Num/Shape) {numb_accs[0]:.3}%/{shape_accs_bce[0]:.3}%')
+    print(f'Valid Loss (Total/Num/Shape): {valid_losses[0]:.6}/{valid_numb_losses[0]:.6}/{valid_shape_losses[0]:.6}, \t Valid Performance (Num/Shape) {valid_numb_accs[0]:.3}%/{valid_shape_accs_bce[0]:.3}%')
+    print(f'Test Loss (Total/Num/Shape): {test_losses[0]:.6}/{test_numb_losses[0]:.6}/{test_shape_losses[0]:.6}, \t Test Performance (Num/Shape) {test_numb_accs[0]:.3}%/{test_shape_accs_bce[0]:.3}%')
 
     for ep in range(1, n_epochs + 1):
         print(f'Epoch {ep}, Learning rate: {optimizer.param_groups[0]["lr"]}')
 
-        train_loss, num_loss, shape_loss, train_num_acc = train(train_loader, ep)
-        val_loss, val_num_loss, val_shape_loss,val_num_acc, val_conf_mat = test(valid_loader, which_set='valid')
-        test_loss, test_num_loss, test_shape_loss, test_num_acc, test_conf_mat = test(test_loader, which_set='test')
+        train_loss, num_loss, shape_loss, train_num_acc, train_shape_acc_bce, train_shape_acc_ce = train(train_loader, ep)
+        val_loss, val_num_loss, val_shape_loss, val_num_acc, val_shape_acc_bce, val_shape_acc_ce, val_conf_mat = test(valid_loader, which_set='valid')
+        test_loss, test_num_loss, test_shape_loss, test_num_acc, te_shape_acc_bce, te_shape_acc_ce, test_conf_mat = test(test_loader, which_set='test')
 
         train_losses[ep] = train_loss
         numb_losses[ep] = num_loss
         shape_losses[ep] = shape_loss
+        shape_accs_bce[ep] = train_shape_acc_bce
+        shape_accs_ce[ep] = train_shape_acc_ce
         numb_accs[ep] = train_num_acc
         valid_losses[ep] = val_loss
         valid_numb_losses[ep] = val_num_loss
         valid_shape_losses[ep] = val_shape_loss
+        valid_shape_accs_bce[ep] = val_shape_acc_bce
+        valid_shape_accs_ce[ep] = val_shape_acc_ce
         valid_numb_accs[ep] = val_num_acc
         valid_conf_mats[ep, :, :] = val_conf_mat
         test_losses[ep] = test_loss
         test_numb_losses[ep] = test_num_loss
         test_shape_losses[ep] = test_shape_loss
+        test_shape_accs_bce[ep] = te_shape_acc_bce
+        test_shape_accs_ce[ep] = te_shape_acc_ce
         test_numb_accs[ep] = test_num_acc
         test_conf_mats[ep, :, :] = test_conf_mat
         pct_done = round(100. * (ep / n_epochs))
-        if not ep % 5 or ep == 1:
+        if not ep % 5 or ep < 6:
             # Print and save performance
             # print(f'Progress {pct_done}% trained: \t Loss (Map/Numb): {map_loss.item():.6}/{number_loss.item():.6}, \t Accuracy: {accs[0]:.3}% {accs[1]:.3}% {accs[2]:.3}% {accs[3]:.3}% {accs[4]:.3}% {accs[5]:.3}% {accs[6]:.3}% \t Number {numb_acc:.3}% \t Mean Map Acc {accs.mean():.3}%')
             print(f'Epoch {ep}, Progress {pct_done}% trained')
-            print(f'Train Loss (Total/Num/Shape): {train_losses[ep]:.6}/{numb_losses[ep]:.6}/{shape_losses[ep]:.6}, \t Train Performance (Num) {numb_accs[ep]:.3}%')
-            print(f'Valid Loss (Total/Num/Shape): {valid_losses[ep]:.6}/{valid_numb_losses[ep]:.6}/{valid_shape_losses[ep]:.6}, \t Valid Performance (Num) {valid_numb_accs[ep]:.3}%')
-            print(f'Test Loss (Total/Num/Shape): {test_losses[ep]:.6}/{test_numb_losses[ep]:.6}/{test_shape_losses[ep]:.6}, \t Test Performance (Num) {test_numb_accs[ep]:.3}%')
+            print(f'Train Loss (Total/Num/Shape): {train_losses[ep]:.6}/{numb_losses[ep]:.6}/{shape_losses[ep]:.6}, \t Train Performance (Num/Shape) {numb_accs[ep]:.3}%/{shape_accs_bce[ep]:.3}%')
+            print(f'Valid Loss (Total/Num/Shape): {valid_losses[ep]:.6}/{valid_numb_losses[ep]:.6}/{valid_shape_losses[ep]:.6}, \t Valid Performance (Num/Shape) {valid_numb_accs[ep]:.3}%/{valid_shape_accs_bce[ep]:.3}%')
+            print(f'Test Loss (Total/Num/Shape): {test_losses[ep]:.6}/{test_numb_losses[ep]:.6}/{test_shape_losses[ep]:.6}, \t Test Performance (Num/Shape) {test_numb_accs[ep]:.3}%/{test_shape_accs_bce[ep]:.3}%')
 
             np.savez('results/'+filename,
                      train_loss=train_losses,
                      numb_loss=numb_losses,
                      shape_loss=shape_losses,
+                     shape_acc_bce=shape_accs_bce,
+                     shape_acc_ce=shape_accs_ce,
                      numb_acc=numb_accs,
                      valid_loss=valid_losses,
                      valid_numb_loss=valid_numb_losses,
                      valid_shape_loss=valid_shape_losses,
+                     valid_shape_acc_bce=valid_shape_accs_bce,
+                     valid_shape_acc_ce=valid_shape_accs_ce,
                      valid_numb_acc=valid_numb_accs,
                      valid_conf_mat=valid_conf_mats,
                      test_loss=test_losses,
                      test_numb_loss=test_numb_losses,
                      test_shape_loss=test_shape_losses,
+                     test_shape_acc_bce=test_shape_accs_bce,
+                     test_shape_acc_ce=test_shape_accs_ce,
                      test_numb_acc=test_numb_accs,
                      test_conf_mat=test_conf_mats)
             torch.save(model, f'models/{filename}.pt')
@@ -999,6 +1104,7 @@ def train_shape_number(model, optimizer, config, scheduler=None):
             ax[0, 0].plot(test_numb_losses[:ep+1], label='test number loss', **kwargs_test)
             ax[0, 0].plot(valid_numb_losses[:ep+1], label='valid number loss', **kwargs_val)
             ax[0, 0].plot(numb_losses[:ep+1], label='train number loss', **kwargs_train)
+            ax[0, 0].set_ylabel('Cross Entropy Loss')
             ax[0, 1].set_title('Number Accuracy')
             ax[0, 1].set_ylim([0, 101])
             ax[0, 1].plot(test_numb_accs[:ep+1], label='test number acc', **kwargs_test)
@@ -1009,35 +1115,72 @@ def train_shape_number(model, optimizer, config, scheduler=None):
             ax[1, 0].plot(test_shape_losses[:ep+1], label='test shape loss', **kwargs_test)
             ax[1, 0].plot(valid_shape_losses[:ep+1], label='valid shape loss', **kwargs_val)
             ax[1, 0].plot(shape_losses[:ep+1], label='train shape loss', **kwargs_train)
-            ax[1, 1].set_title('Total Loss')
-            ax[1, 1].plot(test_losses[:ep+1], label='test loss', **kwargs_test)
-            ax[1, 1].plot(valid_losses[:ep+1], label='valid loss', **kwargs_val)
-            ax[1, 1].plot(train_losses[:ep+1], label='train loss', **kwargs_train)
+            # ax[1, 0].set_ylabel('Binary Cross Entropy Loss')
+            ax[1, 1].set_title('Shape Accuracy')
+            ax[1, 1].set_ylim([0, 101])
+            # if bce:
+                # n_eps = ep + 1
+                # epochs = [i for i in range(n_eps)]
+                # test_acc_data = {'accuracy':test_shape_accs_bce[:n_eps, :7].flatten(order='F'),
+                #                  'epoch':epochs*7,
+                #                  'shape':['arrow']*n_eps + ['circle']*n_eps + ['diamond']*n_eps + ['drop']*n_eps + ['halfmoon']*n_eps + ['heart']*n_eps + ['lightning']*n_eps,
+                #                  'dataset': 'test'
+                #                  }
+                # df_test = pd.DataFrame(test_acc_data)
+                # valid_acc_data = {'accuracy':valid_shape_accs_bce[:n_eps, :7].flatten(order='F'),
+                #                  'epoch':epochs*7,
+                #                  'shape':['arrow']*n_eps + ['circle']*n_eps + ['diamond']*n_eps + ['drop']*n_eps + ['halfmoon']*n_eps + ['heart']*n_eps + ['lightning']*n_eps,
+                #                  'dataset': 'valid'
+                #                  }
+                # df_valid = pd.DataFrame(valid_acc_data)
+                # train_acc_data = {'accuracy':shape_accs_bce[:n_eps, :7].flatten(order='F'),
+                #                  'epoch':epochs*7,
+                #                  'shape':['arrow']*n_eps + ['circle']*n_eps + ['diamond']*n_eps + ['drop']*n_eps + ['halfmoon']*n_eps + ['heart']*n_eps + ['lightning']*n_eps,
+                #                  'dataset': 'train'
+                #                  }
+                # df_train = pd.DataFrame(train_acc_data)
+                # df = pd.concat((df_test, df_valid, df_train), ignore_index=True)
+                # sns.lineplot(ax=ax[1, 1], data=df, y='accuracy', x='epoch', hue='shape', style='dataset')
+            ax[1, 1].plot(test_shape_accs_bce[:ep+1], label='test shape acc bce', **kwargs_test)
+            ax[1, 1].plot(valid_shape_accs_bce[:ep+1], label='valid shape acc bce', **kwargs_val)
+            ax[1, 1].plot(shape_accs_bce[:ep+1], label='train shape acc bce', **kwargs_train)
+            # else:
+            ax[1, 1].plot(test_shape_accs_ce[:ep+1], '--', label='test shape acc ce', **kwargs_test)
+            ax[1, 1].plot(valid_shape_accs_ce[:ep+1], '--', label='valid shape acc ce', **kwargs_val)
+            ax[1, 1].plot(shape_accs_ce[:ep+1], '--', label='train shape acc ce', **kwargs_train)
+
             for axes in ax.flatten():
                 axes.legend()
                 axes.grid(linestyle='--')
                 axes.set_xlabel('Epochs')
-            plt.savefig(f'figures/{filename}_results.png', dpi=300)
+                axes.set_xticks(np.arange(ep+1))
+            plt.savefig(f'figures/{model_version}/{filename}_results.png', dpi=300)
             plt.close()
 
     print(f'Final performance:')
-    print(f'Train Loss (Total/Num/Shape): {train_losses[ep]:.6}/{numb_losses[ep]:.6}/{shape_losses[ep]:.6}, \t Train Performance (Num) {numb_accs[ep]:.3}%')
-    print(f'Valid Loss (Total/Num/Shape): {valid_losses[ep]:.6}/{valid_numb_losses[ep]:.6}/{valid_shape_losses[ep]:.6}, \t Valid Performance (Num) {valid_numb_accs[ep]:.3}%')
-    print(f'Test Loss (Total/Num/Shape): {test_losses[ep]:.6}/{test_numb_losses[ep]:.6}/{test_shape_losses[ep]:.6}, \t Test Performance (Num) {test_numb_accs[ep]:.3}%')
+    print(f'Train Loss (Total/Num/Shape): {train_losses[ep]:.6}/{numb_losses[ep]:.6}/{shape_losses[ep]:.6}, \t Train Performance (Num/Shape) {numb_accs[ep]:.3}%/{shape_accs_ce[ep]:.3}')
+    print(f'Valid Loss (Total/Num/Shape): {valid_losses[ep]:.6}/{valid_numb_losses[ep]:.6}/{valid_shape_losses[ep]:.6}, \t Valid Performance (Num/Shape) {valid_numb_accs[ep]:.3}%/{valid_shape_accs_ce[ep]:.3}')
+    print(f'Test Loss (Total/Num/Shape): {test_losses[ep]:.6}/{test_numb_losses[ep]:.6}/{test_shape_losses[ep]:.6}, \t Test Performance (Num/Shape) {test_numb_accs[ep]:.3}%/{test_shape_accs_ce[ep]:.3}')
 
     np.savez('results/'+filename,
              train_loss=train_losses,
              numb_loss=numb_losses,
              shape_loss=shape_losses,
+             shape_acc_bce=shape_accs_bce,
+             shape_acc_ce=shape_accs_ce,
              numb_acc=numb_accs,
              valid_loss=valid_losses,
              valid_numb_loss=valid_numb_losses,
              valid_shape_loss=valid_shape_losses,
+             valid_shape_acc_bce=valid_shape_accs_bce,
+             valid_shape_acc_ce=valid_shape_accs_ce,
              valid_numb_acc=valid_numb_accs,
              valid_conf_mat=valid_conf_mats,
              test_loss=test_losses,
              test_numb_loss=test_numb_losses,
              test_shape_loss=test_shape_losses,
+             test_shape_acc_bce=test_shape_accs_bce,
+             test_shape_acc_ce=test_shape_accs_ce,
              test_numb_acc=test_numb_accs,
              test_conf_mat=test_conf_mats)
     torch.save(model, f'models/{filename}.pt')
@@ -1073,7 +1216,7 @@ def train_content_gated_model(model, optimizer, config, scheduler=None):
     control = config.control
     preglimpsed = config.preglimpsed
     eye_weight = config.eye_weight
-    clip_grad_norm = 1
+    clip_grad_norm = 2
 
     # Load the data
     batch_size = 64
@@ -1675,6 +1818,8 @@ def test_transfer(model):
 def main(config):
     map_size = config.map_size
     model_version = config.model_version
+    if not os.path.isdir(f'figures/{model_version}'):
+        os.mkdir(f'figures/{model_version}')
     use_loss = config.use_loss
     rnn_act = config.rnn_act
     preglimpsed = config.preglimpsed
@@ -1792,6 +1937,9 @@ def main(config):
     elif model_version == 'pixel+shape':
         hidden_size = int(120*1.1)
         model = models.PixelPlusShapeModel(hidden_size, **kwargs)
+    elif model_version == 'shape':
+        hidden_size = int(120*1.1)
+        model = models.ShapeModel(hidden_size, **kwargs)
     else:
         print('Model version not implemented.')
         exit()
@@ -1822,10 +1970,10 @@ def main(config):
 
     if config.use_schedule:
         # Learning rate scheduler
-        start_lr = 0.1
+        start_lr = 0.05
         # Can decay lr quicker when starting with the rnn weights pretrained
         scale = 0.9955 if config.pretrained_map else 0.9978
-        0.8 ** 200
+        # 0.8 ** 200
         if 'detached' in use_loss:
             opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=start_lr, momentum=mom, weight_decay=wd_rnn)
             if 'two' in model_version or model_version == 'integrated':
@@ -1841,7 +1989,8 @@ def main(config):
         else:
             opt = torch.optim.SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
             lambda1 = lambda epoch: scale ** epoch
-            scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lambda1)
+            # scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lambda1)
+            scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=config.n_epochs/10, gamma=0.5)
     else:
         if 'detached' in use_loss:
             opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=lr, momentum=mom, weight_decay=wd_rnn)
@@ -1883,7 +2032,7 @@ def main(config):
         train_two_step_model(model, opt, config, scheduler)
     elif 'cheat' in model_version:
         train_nomap_model(model, opt, config, scheduler)
-    elif model_version == 'distinctive' or model_version == 'pixel+shape':
+    elif model_version == 'distinctive' or model_version == 'pixel+shape' or model_version == 'shape':
         train_shape_number(model, opt, config, scheduler)
     elif model_version == 'content_gated':
         train_content_gated_model(model, opt, config, scheduler)
@@ -1927,6 +2076,7 @@ def get_config():
     parser.add_argument('--pretrained_map', action='store_true', default=False)
     parser.add_argument('--rotate', action='store_true', default=False)
     parser.add_argument('--debug', action='store_true', default=False)
+    parser.add_argument('--bce', action='store_true', default=False)
     config = parser.parse_args()
     print(config)
     return config

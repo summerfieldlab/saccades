@@ -79,13 +79,13 @@ class ShapeModel(nn.Module):
         # self.width = 48
         # self.height = 24
 
-        # pix_size = 512
-        # self.width = 16*2
-        # self.height = 16
+        pix_size = 512
+        self.width = 16*2
+        self.height = 16
 
-        pix_size = 288
-        self.width = 12*2
-        self.height = 12
+        # pix_size = 288
+        # self.width = 12*2
+        # self.height = 12
 
         shape_size = 14
         self.hidden_size = hidden_size
@@ -93,26 +93,30 @@ class ShapeModel(nn.Module):
         fc2_size = 10
         number_size = 8
 
-        self.conv = ConvNet(self.width, self.height, shape_size, drop_emb, big=False)
+        # self.conv = ConvNet(self.width, self.height, shape_size, drop_emb, big=True)
+        self.conv = PixConvNet(self.width, self.height, shape_size, drop_emb)
         emb_size = self.conv.fc1_size + shape_size # 120 + 14
         self.LReLU = nn.LeakyReLU(0.1)
-        self.rnn = RNN(shape_size, self.hidden_size, rnn_out_size, dropout=drop_rnn)
+        self.rnn = RNN(7, self.hidden_size, rnn_out_size, dropout=drop_rnn)
         self.fc2 = nn.Linear(rnn_out_size, fc2_size)
         self.drop_layer = nn.Dropout(p=drop_readout)
         self.readout = nn.Linear(fc2_size, number_size)
+        # self.rot_mat = torch.from_numpy(special_ortho_group.rvs(emb_size)).float().to(device)
         self.softmax = nn.LogSoftmax(dim=1)
-        self.rot_mat = torch.from_numpy(special_ortho_group.rvs(emb_size)).float().to(device)
 
-    def forward(self, pix, hidden):
+    def forward(self, pix, hidden, bce=False):
         # reshape
         shape, pix_emb = self.conv(pix.view((-1, 1, self.width, self.height)))
-        shape2 = shape.detach().clone()
+        if bce:
+            shape2 = torch.sigmoid(shape[:, :7].detach().clone())
+        else:
+            shape2 = self.softmax(shape[:, :7].detach().clone())
         # Concatenate the shape output and the pixel embedding
         # Apply a random rotation to embed these two signals together
         # Otherwise, network may struggle to take advantage of shape signal
         # rnn_input = torch.cat((pix_emb, self.softmax(shape2)), dim=1)
         # rnn_input = torch.matmul(rnn_input, self.rot_mat)
-        rnn_out, hidden = self.rnn(self.softmax(shape2), hidden)
+        rnn_out, hidden = self.rnn(shape2, hidden)
         number = self.LReLU(self.fc2(rnn_out))
         number = self.drop_layer(number)
         number = self.readout(number)
@@ -489,15 +493,15 @@ class ConvNet(nn.Module):
         super().__init__()
         # Larger version
         if big:
-            self.kernel1_size = 5
-            self.cnn1_nchannels_out = 32
+            self.kernel1_size = 3
+            self.cnn1_nchannels_out = 128
             self.poolsize = 2
-            self.kernel2_size = 6
-            self.cnn2_nchannels_out = 128
-            self.kernel3_size = 6
-            self.cnn3_nchannels_out = 256
+            self.kernel2_size = 2
+            self.cnn2_nchannels_out = 256
+            self.kernel3_size = 2
+            self.cnn3_nchannels_out = 32
         else:  # Smaller version
-            self.kernel1_size = 5
+            self.kernel1_size = 3
             self.cnn1_nchannels_out = 16
             self.poolsize = 2
             self.kernel2_size = 2
@@ -544,6 +548,48 @@ class ConvNet(nn.Module):
         out = self.fc2(fc1)
         return out, fc1
 
+
+class PixConvNet(nn.Module):
+    def __init__(self, width, height, output_size, dropout):
+        super().__init__()
+        self.width = width
+        self.height = height
+        self.kernel1_size = 4
+        self.cnn1_nchannels_out = 15
+        self.poolsize = 2
+        self.kernel2_size = 3
+        self.cnn2_nchannels_out = 15
+        self.fc1_size = 120
+
+        # pixels layers
+        self.conv1a = nn.Conv2d(1, self.cnn1_nchannels_out, self.kernel1_size)    # (NChannels_in, NChannels_out, kernelsize)
+        self.conv1b = nn.Conv2d(1, self.cnn1_nchannels_out, self.kernel1_size)
+        self.pix_drop_layer = nn.Dropout(p=dropout)
+        self.pool = nn.MaxPool2d(self.poolsize, self.poolsize)     # kernel height, kernel width
+        self.conv2 = nn.Conv2d(self.cnn1_nchannels_out*2, self.cnn2_nchannels_out, self.kernel2_size)   # (NChannels_in, NChannels_out, kernelsize)
+
+        # track the size of the cnn transformations
+        self.cnn2_width_out = ((height - self.kernel1_size+1) - self.kernel2_size + 1) // (self.poolsize)
+        self.cnn2_height_out = ((height - self.kernel1_size+1) - self.kernel2_size + 1) // (self.poolsize)
+
+        # pass through FC layers
+        self.fc1_pix = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), self.fc1_size)  # size input, size output
+        self.shape_out = nn.Linear(self.fc1_size, output_size)
+
+    def forward(self, x):
+        patch_a = x[:, :, :self.height, :]
+        patch_b = x[:, :, self.height:, :]
+
+        whata = torch.relu(self.conv1a(patch_a))
+        whatb = torch.relu(self.conv1b(patch_b))
+        what = torch.cat((whata, whatb), 1)
+
+        what = self.pool(torch.relu(self.conv2(what)))
+        what = what.view(-1, what.shape[1]*what.shape[2]*what.shape[3]) # this reshapes the tensor to be a 1D vector, from whatever the final convolutional layer output
+        what = torch.relu(self.fc1_pix(what))
+        what = self.pix_drop_layer(what)
+        shape = self.shape_out(what)
+        return shape, what
 # class TwoStepModel_hist(nn.Module):
     # def __init__(self, input_size, hidden_size, map_size, output_size):
     #     super(TwoStepModel_hist, self).__init__()
