@@ -9,8 +9,7 @@ from sklearn.metrics.pairwise import euclidean_distances
 from scipy.spatial import distance
 from itertools import product, combinations
 import random
-from scipy.cluster.hierarchy import linkage
-from utils import colorbar
+
 # EPS = sys.float_info.epsilon
 EPS = 1e-7
 
