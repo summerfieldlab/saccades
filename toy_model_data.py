@@ -356,7 +356,7 @@ def generate_one_example(noise_level):
     if not done:
         print('DID NOT SOLVE')
         example.pred_num = example.lower_bound
-        example.plot_example(pass_count)
+        # example.plot_example(pass_count)
     unique_objects = set(example.objects)
     filled_locations = [1 if i in unique_objects else 0 for i in range(9)]
     example_dict = {'xy': xy_coords, 'shape': shape_coords, 'numerosity': num,
