@@ -19,13 +19,13 @@ from functools import reduce
 from matplotlib import pyplot as plt
 import matplotlib as mpl
 from sklearn.metrics import roc_auc_score, f1_score, r2_score
-from torchmetrics import R2Score
-import pandas as pd
-import seaborn as sns
+# from torchmetrics import R2Score
+# import pandas as pd
+# import seaborn as sns
 import models
 
-print(f'matplotlib version {mpl.__version__}')
-r2score = R2Score(num_outputs=14)
+# print(f'matplotlib version {mpl.__version__}')
+# r2score = R2Score(num_outputs=14)
 # r2score = R2Score()
 
 def ncr(n, r):
