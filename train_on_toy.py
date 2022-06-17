@@ -27,6 +27,7 @@ criterion_mse = nn.MSELoss()
 criterion_mse_noreduce = nn.MSELoss(reduction='none')
 pos_weight = torch.ones([9], device=device) * 2
 criterion_bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+criterion_bce_noreduce = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='none')
 
 
 class NumAsMapsum(nn.Module):
@@ -80,16 +81,19 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
     train_loader, test_loader = loaders
     train_loss = np.zeros((n_epochs,))
     train_map_loss = np.zeros((n_epochs,))
+    train_num_loss = np.zeros((n_epochs,))
     train_acc = np.zeros((n_epochs,))
     test_loss = np.zeros((n_epochs,))
     test_map_loss = np.zeros((n_epochs,))
+    test_num_loss = np.zeros((n_epochs,))
     test_acc = np.zeros((n_epochs,))
-    columns = ['pass count', 'correct', 'predicted', 'true', 'loss', 'epoch']
+    columns = ['pass count', 'correct', 'predicted', 'true', 'loss', 'num loss', 'map loss', 'epoch']
 
     def train(loader):
         rnn.train()
         correct = 0
         epoch_loss = 0
+        num_epoch_loss = 0
         map_epoch_loss = 0
         for i, (input, target, locations, _) in enumerate(loader):
             # shuffle the sequence order to increase dataset size
@@ -112,35 +116,48 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
                     # input = torch.cat((xy[:, t, :], shape[:, t, :]), dim=1)
                     # input.shape
                     pred_num, map, hidden = rnn(input[:, t, :], hidden)
+
             if cross_entropy:
-                loss = criterion(pred_num, target)
+                num_loss = criterion(pred_num, target)
                 pred = pred_num.argmax(dim=1, keepdim=True)
             else:
-                loss = criterion_mse(pred_num, target)
+                num_loss = criterion_mse(pred_num, target)
                 pred = torch.round(pred_num)
-            if config.map_loss:
-                map_loss = criterion_bce(map, locations)
-                loss += map_loss
-                map_loss_to_add = map_loss.item()
-            else:
+
+            if config.use_loss == 'num':
+                loss = num_loss
                 map_loss_to_add = -1
+            elif config.use_loss == 'map':
+                map_loss = criterion_bce(map, locations)
+                map_loss_to_add = map_loss.item()
+                loss = map_loss
+            elif config.use_loss == 'both':
+                map_loss = criterion_bce(map, locations)
+                map_loss_to_add = map_loss.item()
+                loss = num_loss + map_loss
+
+
+
             loss.backward()
             nn.utils.clip_grad_norm_(rnn.parameters(), 2)
             optimizer.step()
 
             correct += pred.eq(target.view_as(pred)).sum().item()
             epoch_loss += loss.item()
+            num_epoch_loss += num_loss.item()
             map_epoch_loss += map_loss_to_add
         scheduler.step()
         accuracy = 100. * correct/len(loader.dataset)
         epoch_loss /= len(loader)
+        num_epoch_loss /= len(loader)
         map_epoch_loss /= len(loader)
-        return epoch_loss, accuracy, map_epoch_loss
+        return epoch_loss, num_epoch_loss, accuracy, map_epoch_loss
 
     def test(loader, epoch):
         rnn.eval()
         n_correct = 0
         epoch_loss = 0
+        num_epoch_loss = 0
         map_epoch_loss = 0
         test_results = pd.DataFrame(columns=columns)
         for i, (input, target, locations, pass_count) in enumerate(loader):
@@ -160,17 +177,23 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
                     # input.shape
                     pred_num, map, hidden = rnn(input[:, t, :], hidden)
             if cross_entropy:
-                loss = criterion(pred_num, target)
+                num_loss = criterion(pred_num, target)
                 pred = pred_num.argmax(dim=1, keepdim=True)
             else:
-                loss = criterion_mse_noreduce(pred_num, target)
+                num_loss = criterion_mse_noreduce(pred_num, target)
                 pred = torch.round(pred_num)
-            if config.map_loss:
-                map_loss = criterion_bce(map, locations)
-                loss += map_loss
-                map_loss_to_add = map_loss.item()
-            else:
+
+            if config.use_loss == 'num':
+                loss = num_loss
                 map_loss_to_add = -1
+            elif config.use_loss == 'map':
+                map_loss = criterion_bce_noreduce(map, locations)
+                map_loss_to_add = map_loss.mean().item()
+                loss = map_loss
+            elif config.use_loss == 'both':
+                map_loss = criterion_bce_noreduce(map, locations)
+                map_loss_to_add = map_loss.mean().item()
+                loss = num_loss + map_loss
 
             correct = pred.eq(target.view_as(pred))
             batch_results['pass count'] = pass_count.detach().numpy()
@@ -178,38 +201,56 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             batch_results['predicted'] = pred.detach().numpy()
             batch_results['true'] = target.detach().numpy()
             batch_results['loss'] = loss.detach().numpy()
+            batch_results['map loss'] = map_loss.detach().numpy()
+            batch_results['num loss'] = num_loss.detach().numpy()
             batch_results['epoch'] = epoch
             test_results = pd.concat((test_results, batch_results))
 
             n_correct += pred.eq(target.view_as(pred)).sum().item()
             epoch_loss += loss.mean().item()
+            num_epoch_loss += num_loss.mean().item()
             map_epoch_loss += map_loss_to_add
 
         accuracy = 100. * n_correct/len(loader.dataset)
         epoch_loss /= len(loader)
+        num_epoch_loss /= len(loader)
         map_epoch_loss /= len(loader)
-        return epoch_loss, accuracy, map_epoch_loss, test_results
+        return epoch_loss, num_epoch_loss, accuracy, map_epoch_loss, test_results
 
     test_results = pd.DataFrame(columns=columns)
     for ep in range(n_epochs):
         epoch_timer = Timer()
-        epoch_tr_loss, tr_accuracy, epoch_tr_map_loss = train(train_loader)
-        epoch_te_loss, te_accuracy, epoch_te_map_loss, epoch_df = test(test_loader, ep)
+        epoch_tr_loss, epoch_tr_num_loss, tr_accuracy, epoch_tr_map_loss = train(train_loader)
+        epoch_te_loss, epoch_te_num_loss, te_accuracy, epoch_te_map_loss, epoch_df = test(test_loader, ep)
         test_results = pd.concat((test_results, epoch_df), ignore_index=True)
         train_loss[ep] = epoch_tr_loss
+        train_num_loss[ep] = epoch_tr_num_loss
         train_acc[ep] = tr_accuracy
         train_map_loss[ep] = epoch_tr_map_loss
         test_loss[ep] = epoch_te_loss
+        test_num_loss[ep] = epoch_te_num_loss
         test_acc[ep] = te_accuracy
         test_map_loss[ep] = epoch_te_map_loss
         if not ep % 5:
-            sns.lineplot(data=test_results, x='epoch', y='loss', hue='pass count')
-            plt.plot(train_loss[:ep + 1], '--', color='black', label='training loss')
-            plt.savefig(f'figures/toy/test_loss_{base_name}.png', dpi=300)
+            sns.lineplot(data=test_results, x='epoch', y='num loss', hue='pass count')
+            plt.plot(train_num_loss[:ep + 1], '--', color='black', label='training loss')
+            plt.title(f'{config.model_type} trainon-{config.train_on} useloss-{config.use_loss} noise-{config.noise_level}')
+            ylim = plt.ylim()
+            plt.ylim([-0.05, ylim[1]])
+            plt.savefig(f'figures/toy/test_num-loss_{base_name}.png', dpi=300)
+            plt.close()
+
+            sns.lineplot(data=test_results, x='epoch', y='map loss', hue='pass count')
+            plt.plot(train_map_loss[:ep + 1], '--', color='black', label='training loss')
+            plt.title(f'{config.model_type} trainon-{config.train_on} useloss-{config.use_loss} noise-{config.noise_level}')
+            ylim = plt.ylim()
+            plt.ylim([-0.05, ylim[1]])
+            plt.savefig(f'figures/toy/test_map-loss_{base_name}.png', dpi=300)
             plt.close()
             # sns.countplot(data=test_results[test_results['correct']==True], x='epoch', hue='pass count')
             # plt.savefig(f'figures/toy/test_correct_{base_name}.png', dpi=300)
             # plt.close()
+
 
         epoch_timer.stop_timer()
         print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]} \t (Train/Test) Loss={train_loss[ep]:.4}/{test_loss[ep]:.4}/ \t Accuracy={train_acc[ep]}%/{test_acc[ep]}%')
@@ -279,7 +320,8 @@ def get_config():
     parser.add_argument('--rotate', action='store_true', default=False)
     parser.add_argument('--small_weights', action='store_true', default=False)
     parser.add_argument('--n_epochs', type=int, default=500)
-    parser.add_argument('--map_loss', action='store_true', default=False)
+    parser.add_argument('--use_loss', type=str, default='both', help='num, map or both')
+    parser.add_argument('--pretrained', type=str, default='toy_model_num_as_mapsum-xy_nl-0.0_niters-1_5eps_10000_map-loss_ep-5.pt')
 
     # parser.add_argument('--rnn_act', type=str, default=None)
     # parser.add_argument('--no_cuda', action='store_true', default=False)
@@ -289,7 +331,7 @@ def get_config():
     # parser.add_argument('--drop_rnn', type=float, default=0.1)
     # parser.add_argument('--wd', type=float, default=0) # 1e-6
     # parser.add_argument('--lr', type=float, default=0.01)
-    # parser.add_argument('--pretrained_map', action='store_true', default=False)
+
     # parser.add_argument('--debug', action='store_true', default=False)
     # parser.add_argument('--bce', action='store_true', default=False)
     config = parser.parse_args()
@@ -307,9 +349,9 @@ def main():
     test_size = config.test_size
     n_iters = config.n_iters
     n_epochs = config.n_epochs
-    base_name = f'{model_type}-{train_on}_nl-{noise_level}_niters-{n_iters}_{n_epochs}eps_{train_size}'
-    if config.map_loss:
-        base_name += '_map-loss'
+    use_loss = config.use_loss
+    base_name = f'{model_type}-{train_on}_loss-{use_loss}_nl-{noise_level}_niters-{n_iters}_{n_epochs}eps_{train_size}'
+
     # Prepare datasets and torch dataloaders
     trainset = get_dataset(noise_level, train_size)
     testset = get_dataset(noise_level, test_size)
