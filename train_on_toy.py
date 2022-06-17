@@ -272,11 +272,29 @@ def get_dataset(noise_level, size):
         data = save_dataset(fname, noise_level, size)
     return data
 
-def get_loader(dataset, train_on, cross_entropy_loss):
+def get_loader(dataset, train_on, cross_entropy_loss, outer):
+    """Prepare a torch DataLoader for the provided dataset.
+
+    Other input arguments control what the input features should be and what
+    datatype the target should be, depending on what loss function will be used.
+    The outer argument appends the flattened outer product of the two input
+    vectors (xy and shape) to the input tensor. This is hypothesized to help
+    enable the network to rely on an integration of the two streams
+    """
     if train_on == 'both':
+        dataset['shape1'] = dataset['shape']
         shape = torch.tensor(dataset['shape']).float().to(device)
         xy = torch.tensor(dataset['xy']).float().to(device)
-        input = torch.cat((xy, shape), dim=-1)
+        if outer:
+            # dataset['shape.t'] = dataset['shape'].apply(lambda x: np.transpose(x))
+            # kernel = np.outer(sh, xy) for sh, xy in zip
+            def get_outer(xy, shape):
+                return [np.outer(x,s).flatten() for x,s in zip(xy, shape)]
+            dataset['kernel'] = dataset.apply(lambda x: get_outer(x.xy, x.shape1), axis=1)
+            kernel = torch.tensor(dataset['kernel']).float().to(device)
+            input = torch.cat((xy, shape, kernel), dim=-1)
+        else:
+            input = torch.cat((xy, shape), dim=-1)
     elif train_on == 'xy':
         input = torch.tensor(dataset['xy']).float().to(device)
     elif train_on == 'shape':
@@ -292,10 +310,12 @@ def get_loader(dataset, train_on, cross_entropy_loss):
     loader = DataLoader(dset, batch_size=BATCH_SIZE, shuffle=True)
     return loader
 
-def get_model(model_type, small_weights, train_on):
+def get_model(model_type, small_weights, train_on, outer):
     xy_sz = 2
     sh_sz = 9
     in_sz = xy_sz if train_on=='xy' else sh_sz if train_on=='shape' else sh_sz + xy_sz
+    if train_on == 'both' and outer:
+        in_sz += xy_sz * sh_sz
     hidden_size = 25
     output_size = 5
     if model_type == 'num_as_mapsum':
@@ -322,7 +342,7 @@ def get_config():
     parser.add_argument('--n_epochs', type=int, default=500)
     parser.add_argument('--use_loss', type=str, default='both', help='num, map or both')
     parser.add_argument('--pretrained', type=str, default='toy_model_num_as_mapsum-xy_nl-0.0_niters-1_5eps_10000_map-loss_ep-5.pt')
-
+    parser.add_argument('--outer', action='store_true', default=False)
     # parser.add_argument('--rnn_act', type=str, default=None)
     # parser.add_argument('--no_cuda', action='store_true', default=False)
     # parser.add_argument('--preglimpsed', type=str, default=None)
@@ -350,17 +370,18 @@ def main():
     n_iters = config.n_iters
     n_epochs = config.n_epochs
     use_loss = config.use_loss
-    base_name = f'{model_type}-{train_on}_loss-{use_loss}_nl-{noise_level}_niters-{n_iters}_{n_epochs}eps_{train_size}'
+    kernel = '-kernel' if config.outer else ''
+    base_name = f'{model_type}-{train_on}{kernel}_loss-{use_loss}_nl-{noise_level}_niters-{n_iters}_{n_epochs}eps_{train_size}'
 
     # Prepare datasets and torch dataloaders
     trainset = get_dataset(noise_level, train_size)
     testset = get_dataset(noise_level, test_size)
-    train_loader = get_loader(trainset, config.train_on, config.cross_entropy)
-    test_loader = get_loader(testset, config.train_on, config.cross_entropy)
+    train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer)
+    test_loader = get_loader(testset, config.train_on, config.cross_entropy, config.outer)
     loaders = [train_loader, test_loader]
 
     # Prepare model and optimizer
-    model = get_model(model_type, config.small_weights, train_on)
+    model = get_model(model_type, config.small_weights, train_on, config.outer)
     opt = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
     scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)
 
