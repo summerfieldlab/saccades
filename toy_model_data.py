@@ -317,46 +317,50 @@ class GlimpsedImage():
         self.count = len(self.filled_locations)
 
 
-def generate_one_example(noise_level):
+def generate_one_example(noise_level, min_pass_count=0, max_pass_count=6):
     """Synthesize a single sequence and determine numerosity."""
     # Synthesize glimpses - paired observations of xy and shape coordinates
     max_dist = np.sqrt((noise_level*0.1)**2 + (noise_level*0.1)**2)
     num = random.randrange(2, 5)
-    xy_coords, objects, noiseless_coords = get_xy_coords(num, noise_level)
-    shape_coords, shape_map = get_shape_coords(xy_coords, objects, noiseless_coords, max_dist)
-    # print(shape_coords)
+    final_pass_count = -1
+    while final_pass_count < min_pass_count or final_pass_count > max_pass_count:
+        xy_coords, objects, noiseless_coords = get_xy_coords(num, noise_level)
+        shape_coords, shape_map = get_shape_coords(xy_coords, objects, noiseless_coords, max_dist)
+        # print(shape_coords)
 
-    # Initialize records
-    example = GlimpsedImage(xy_coords, shape_coords, shape_map, objects, max_dist)
-    pass_count = 0
-    done = example.check_if_done(pass_count)
-
-    # First pass
-    if not done:
-        example.process_xy()
-        pass_count += 1
+        # Initialize records
+        example = GlimpsedImage(xy_coords, shape_coords, shape_map, objects, max_dist)
+        pass_count = 0
         done = example.check_if_done(pass_count)
 
-    while not done and pass_count < 6:
-        pass_count += 1
+        # First pass
+        if not done:
+            example.process_xy()
+            pass_count += 1
+            done = example.check_if_done(pass_count)
 
-        tbr = example.to_be_resolved
+        while not done and pass_count < 6:
+            pass_count += 1
 
-        keys = list(tbr.keys())
-        idx = keys[0]
-        cand_list, loc_list = tbr[idx]
-        new_object_idxs = example.use_shape_to_resolve(idx, cand_list)
+            tbr = example.to_be_resolved
 
-        for loc in new_object_idxs:
-            example.toggle(idx, loc)
+            keys = list(tbr.keys())
+            idx = keys[0]
+            cand_list, loc_list = tbr[idx]
+            new_object_idxs = example.use_shape_to_resolve(idx, cand_list)
 
-        # Check if done
-        done = example.check_if_done(pass_count)
+            for loc in new_object_idxs:
+                example.toggle(idx, loc)
 
-    if not done:
-        print('DID NOT SOLVE')
-        example.pred_num = example.lower_bound
-        # example.plot_example(pass_count)
+            # Check if done
+            done = example.check_if_done(pass_count)
+
+        if not done:
+            print('DID NOT SOLVE')
+            example.pred_num = example.lower_bound
+            # example.plot_example(pass_count)
+
+        final_pass_count = pass_count
     unique_objects = set(example.objects)
     filled_locations = [1 if i in unique_objects else 0 for i in range(9)]
     example_dict = {'xy': xy_coords, 'shape': shape_coords, 'numerosity': num,
@@ -370,11 +374,10 @@ def generate_one_example(noise_level):
     return example_dict
 
 
-def generate_dataset(noise_level, n_examples):
+def generate_dataset(noise_level, n_examples, min_pass_count, max_pass_count):
     """Fill data frame with toy examples."""
 
-    data = [generate_one_example(noise_level) for _ in range(n_examples)]
-    print('Putting data into DataFrame')
+    data = [generate_one_example(noise_level, min_pass_count, max_pass_count) for _ in range(n_examples)]
     df = pd.DataFrame(data)
     # df['pass count'].hist()
     # df[df['unresolved ambiguity'] == True]
