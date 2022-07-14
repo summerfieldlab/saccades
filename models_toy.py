@@ -227,36 +227,36 @@ class MultiplicativeModel(nn.Module):
         return num, map, hidden
 
 
-class HyperModel(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super().__init__()
-        shape_size = 9
-        xy_size = 2
-        embedding_size = 25
-        factor_size = 26
-        n_z = 24
-        map_size = 9
-        # self.embedding = MultiplicativeLayer(shape_size, xy_size, embedding_size)
-        self.embedding = nn.Linear(input_size, hidden_size)
-        # (self, input_size: int, hidden_size: int, hyper_size: int, n_z: int, n_layers: int)
-        self.rnn = HyperLSTM(embedding_size, hidden_size, factor_size, n_z, 2)
-        self.readout = nn.Linear(hidden_size, map_size)
-        # self.initHidden = self.rnn.initHidden
-        self.sigmoid = nn.Sigmoid()
-        self.LReLU = nn.LeakyReLU(0.1)
-
-    def forward(self, x, hidden):
-        # xy = x[:, :2]
-        # shape = x[:, 2:]
-        # x = self.LReLU(self.embedding(xy, shape))
-
-        x = self.LReLU(self.embedding(x))
-        x, hidden = self.rnn(x, hidden)
-        map = self.readout(x)
-        sig = self.sigmoid(map)
-        num = torch.sum(sig, 1)
-
-        return num, map, hidden
-
-    def initHidden(self, batch_size):
-        return None
+# class HyperModel(nn.Module):
+#     def __init__(self, input_size, hidden_size, output_size):
+#         super().__init__()
+#         shape_size = 9
+#         xy_size = 2
+#         embedding_size = 25
+#         factor_size = 26
+#         n_z = 24
+#         map_size = 9
+#         # self.embedding = MultiplicativeLayer(shape_size, xy_size, embedding_size)
+#         self.embedding = nn.Linear(input_size, hidden_size)
+#         # (self, input_size: int, hidden_size: int, hyper_size: int, n_z: int, n_layers: int)
+#         self.rnn = HyperLSTM(embedding_size, hidden_size, factor_size, n_z, 2)
+#         self.readout = nn.Linear(hidden_size, map_size)
+#         # self.initHidden = self.rnn.initHidden
+#         self.sigmoid = nn.Sigmoid()
+#         self.LReLU = nn.LeakyReLU(0.1)
+#
+#     def forward(self, x, hidden):
+#         # xy = x[:, :2]
+#         # shape = x[:, 2:]
+#         # x = self.LReLU(self.embedding(xy, shape))
+#
+#         x = self.LReLU(self.embedding(x))
+#         x, hidden = self.rnn(x, hidden)
+#         map = self.readout(x)
+#         sig = self.sigmoid(map)
+#         num = torch.sum(sig, 1)
+#
+#         return num, map, hidden
+#
+#     def initHidden(self, batch_size):
+#         return None

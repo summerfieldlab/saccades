@@ -15,7 +15,7 @@ import models_toy as mod
 import toy_model_data as toy
 from count_unique import Timer
 # from labml_nn.hypernetworks.hyper_lstm import HyperLSTM
-from hypernet import HyperLSTM
+# from hypernet import HyperLSTM
 # torch.set_num_threads(15)
 
 mom = 0.9
