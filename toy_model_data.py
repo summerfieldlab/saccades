@@ -78,11 +78,26 @@ def get_xy_coords(numerosity, noise_level):
     return np.array(glimpse_coords), np.array(glimpsed_objects), np.array(coords_glimpsed_objects)
 
 
-def get_shape_coords(glimpse_coords, objects, noiseless_coords, max_dist):
-    """Just as there are 9 possible location in space there are 9 possible
-    'shapes'. Each object is randomly assigned one shape.
+def get_shape_coords(glimpse_coords, objects, noiseless_coords, max_dist, shapes_set):
+    """Generate glimpse shape feature vectors.
 
-    returns nx9 array where n is number of glimpses
+    Just as there are 9 possible location in space there are 9 possible
+    'shapes'. Each object is randomly assigned one shape. The shape feature
+    vector indicates the proximity of each glimpse to objects of each shape.
+    If there are no objects of shape m within a radius of max_dist from the
+    glimpse, the mth element of the shape vector will be 0. If the glimpse
+    coordinates are equal to the coordinates of an object of shape m, the mth
+    element of the shape feature vector will be 1.
+
+    Args:
+        glimpse_coords (type): xy coordinates of the glimpses
+        objects (list of int): Symbolic representation (0-8) of the object locations
+        noiseless_coords (list of tuples): xy coordinates of the above
+        max_dist (type): maximum distance to use when bounding proximity measure
+
+    Returns:
+        array: nx9 array where n is number of glimpses.
+
     """
     seq_len = glimpse_coords.shape[0]
     unique_objects = np.unique(objects)
@@ -91,8 +106,12 @@ def get_shape_coords(glimpse_coords, objects, noiseless_coords, max_dist):
     n_shapes = 9
     shape_coords = np.zeros((seq_len, n_shapes))
     # Assign a random shape to each object
-    shape_assign = np.random.choice(range(n_shapes), size=num, replace=True)
+    shape_assign = np.random.choice(shapes_set, size=num, replace=True)
     shape_map = {object: shape for (object, shape) in zip(unique_objects, shape_assign)}
+    shape_map_vector = np.zeros((9,))
+    for object in shape_map.keys():
+        shape_map_vector[object] = shape_map[object]
+    shape_hist = [sum(shape_map_vector == shape) for shape in range(n_shapes)]
     # Calculate a weighted 'glimpse label' that indicates the shapes in a glimpse
     eu_dist = euclidean_distances(glimpse_coords, unique_object_coords)
     # max_dist = np.sqrt((noise_level*0.1)**2 + (noise_level*0.1)**2)
@@ -109,11 +128,11 @@ def get_shape_coords(glimpse_coords, objects, noiseless_coords, max_dist):
     # shape_coords[glimpse_idx, shape_idx] = 1 - eu_dist[glimpse_idx, obj_idx]/min_dist
     # make sure each glimpse has at least some shape info
     assert np.all(shape_coords.sum(axis=1) > 0)
-    return shape_coords, shape_map
+    return shape_coords, shape_map, shape_hist
 
 
 class GlimpsedImage():
-    def __init__(self, xy_coords, shape_coords, shape_map, objects, max_dist):
+    def __init__(self, xy_coords, shape_coords, shape_map, shape_hist, objects, max_dist):
         self.empty_locations = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
         self.filled_locations = set()
         self.lower_bound = 2
@@ -123,6 +142,8 @@ class GlimpsedImage():
         self.xy_coords = xy_coords
         self.shape_coords = shape_coords
         self.shape_map = shape_map
+        self.min_shape = np.argmin(shape_hist)
+        self.min_num = shape_hist[self.min_shape]
 
         self.n_glimpses = xy_coords.shape[0]
         self.objects = objects
@@ -317,7 +338,7 @@ class GlimpsedImage():
         self.count = len(self.filled_locations)
 
 
-def generate_one_example(noise_level, min_pass_count=0, max_pass_count=6):
+def generate_one_example(noise_level, min_pass_count=0, max_pass_count=6, shapes_set=np.arange(9)):
     """Synthesize a single sequence and determine numerosity."""
     # Synthesize glimpses - paired observations of xy and shape coordinates
     max_dist = np.sqrt((noise_level*0.1)**2 + (noise_level*0.1)**2)
@@ -325,11 +346,11 @@ def generate_one_example(noise_level, min_pass_count=0, max_pass_count=6):
     final_pass_count = -1
     while final_pass_count < min_pass_count or final_pass_count > max_pass_count:
         xy_coords, objects, noiseless_coords = get_xy_coords(num, noise_level)
-        shape_coords, shape_map = get_shape_coords(xy_coords, objects, noiseless_coords, max_dist)
+        shape_coords, shape_map, shape_hist = get_shape_coords(xy_coords, objects, noiseless_coords, max_dist, shapes_set)
         # print(shape_coords)
 
         # Initialize records
-        example = GlimpsedImage(xy_coords, shape_coords, shape_map, objects, max_dist)
+        example = GlimpsedImage(xy_coords, shape_coords, shape_map, shape_hist, objects, max_dist)
         pass_count = 0
         done = example.check_if_done(pass_count)
 
@@ -370,14 +391,15 @@ def generate_one_example(noise_level, min_pass_count=0, max_pass_count=6):
                     'special xy': example.special_case_xy,
                     'special shape': example.special_case_shape,
                     'lower bound': example.lower_bound,
-                    'upper bound':example.upper_bound}
+                    'upper bound': example.upper_bound,
+                    'min shape': example.min_shape, 'min num': example.min_num}
     return example_dict
 
 
-def generate_dataset(noise_level, n_examples, min_pass_count, max_pass_count):
+def generate_dataset(noise_level, n_examples, min_pass_count, max_pass_count, shapes_set):
     """Fill data frame with toy examples."""
 
-    data = [generate_one_example(noise_level, min_pass_count, max_pass_count) for _ in range(n_examples)]
+    data = [generate_one_example(noise_level, min_pass_count, max_pass_count, shapes_set) for _ in range(n_examples)]
     df = pd.DataFrame(data)
     # df['pass count'].hist()
     # df[df['unresolved ambiguity'] == True]
