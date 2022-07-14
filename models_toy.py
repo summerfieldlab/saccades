@@ -11,7 +11,7 @@ class RNNClassifier(nn.Module):
         super().__init__()
         map_size = 9
         self.act = kwargs['act'] if 'act' in kwargs.keys() else None
-        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else True
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
         self.embedding = nn.Linear(input_size, hidden_size)
         self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
         self.map_readout = nn.Linear(hidden_size, map_size)
@@ -38,7 +38,7 @@ class RNNClassifier_nosymbol(nn.Module):
         super().__init__()
         map_size = 9
         self.act = kwargs['act'] if 'act' in kwargs.keys() else None
-        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else True
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
         self.n_shapes = 9
         self.embedding = nn.Linear(input_size, hidden_size)
         self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
@@ -95,7 +95,7 @@ class NumAsMapsum(nn.Module):
         pass
 
 class NumAsMapsum_nosymbol(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, kwargs):
+    def __init__(self, input_size, hidden_size, output_size, **kwargs):
         super().__init__()
         map_size = 9
         self.act = kwargs['act'] if 'act' in kwargs.keys() else None
