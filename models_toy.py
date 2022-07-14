@@ -6,15 +6,14 @@ from scipy.stats import special_ortho_group
 from models import RNN, RNN2, MultRNN, MultiplicativeLayer
 
 
-class DetachedReadout(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, act=None, alternate_rnn=False):
+class RNNClassifier(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, **kwargs):
         super().__init__()
         map_size = 9
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else True
         self.embedding = nn.Linear(input_size, hidden_size)
-        if alternate_rnn:
-            self.rnn = RNN2(hidden_size, hidden_size, hidden_size, act)
-        else:
-            self.rnn = RNN(hidden_size, hidden_size, hidden_size, act)
+        self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
         self.map_readout = nn.Linear(hidden_size, map_size)
         self.num_readout = nn.Linear(map_size, output_size)
         self.initHidden = self.rnn.initHidden
@@ -26,24 +25,24 @@ class DetachedReadout(nn.Module):
         x, hidden = self.rnn(x, hidden)
         map = self.map_readout(x)
         sig = self.sigmoid(map)
-        map_to_pass_on = sig.detach().clone()
+        if self.detach:
+            map_to_pass_on = sig.detach().clone()
+        else:
+            map_to_pass_on = sig
         num = self.num_readout(map_to_pass_on)
-        # num = torch.round(torch.sum(x, 1))
-        # num_onehot = nn.functional.one_hot(num, 9)
         return num, map, hidden
 
 
-class DetachedReadout_nosymbol(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, act=None, alternate_rnn=False):
+class RNNClassifier_nosymbol(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, **kwargs):
         super().__init__()
         map_size = 9
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else True
         self.n_shapes = 9
         self.embedding = nn.Linear(input_size, hidden_size)
-        if alternate_rnn:
-            self.rnn = RNN2(hidden_size, hidden_size, hidden_size, act)
-            self.baby_rnn = RNN2(3, 9, 9, act)
-        else:
-            self.rnn = RNN(hidden_size, hidden_size, hidden_size, act)
+        self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
+        self.baby_rnn = RNN2(3, 9, 9, self.act)
         self.map_readout = nn.Linear(hidden_size, map_size)
         self.num_readout = nn.Linear(map_size, output_size)
         self.initHidden = self.rnn.initHidden
@@ -62,21 +61,20 @@ class DetachedReadout_nosymbol(nn.Module):
         x, hidden = self.rnn(x, hidden)
         map = self.map_readout(x)
         sig = self.sigmoid(map)
-        map_to_pass_on = sig.detach().clone()
+        if self.detach:
+            map_to_pass_on = sig.detach().clone()
+        else:
+            map_to_pass_on = sig
         num = self.num_readout(map_to_pass_on)
-        # num = torch.round(torch.sum(x, 1))
-        # num_onehot = nn.functional.one_hot(num, 9)
         return num, map, hidden
 
 class NumAsMapsum(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, act=None, alternate_rnn=False):
+    def __init__(self, input_size, hidden_size, output_size, **kwargs):
         super().__init__()
         map_size = 9
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
         self.embedding = nn.Linear(input_size, hidden_size)
-        if alternate_rnn:
-            self.rnn = RNN2(hidden_size, hidden_size, hidden_size, act)
-        else:
-            self.rnn = RNN(hidden_size, hidden_size, hidden_size, act)
+        self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
         self.readout = nn.Linear(hidden_size, map_size)
         self.initHidden = self.rnn.initHidden
         self.sigmoid = nn.Sigmoid()
@@ -97,16 +95,14 @@ class NumAsMapsum(nn.Module):
         pass
 
 class NumAsMapsum_nosymbol(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, act=None, alternate_rnn=False):
+    def __init__(self, input_size, hidden_size, output_size, kwargs):
         super().__init__()
         map_size = 9
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
         self.n_shapes = 9
         self.embedding = nn.Linear(input_size, hidden_size)
-        if alternate_rnn:
-            self.baby_rnn = RNN2(3, 9, 9, act)
-            self.rnn = RNN2(hidden_size, hidden_size, hidden_size, act)
-        else:
-            self.rnn = RNN(hidden_size, hidden_size, hidden_size, act)
+        self.baby_rnn = RNN2(3, 9, 9, self.act)
+        self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
         self.readout = nn.Linear(hidden_size, map_size)
         self.initHidden = self.rnn.initHidden
         self.sigmoid = nn.Sigmoid()
@@ -130,73 +126,65 @@ class NumAsMapsum_nosymbol(nn.Module):
         # num_onehot = nn.functional.one_hot(num, 9)
         return num, map, hidden
 
-
-class RNNClassifier_nosymbol(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, act=None, alternate_rnn=False):
-        super().__init__()
-        map_size = 9
-        self.n_shapes = 9
-        self.embedding = nn.Linear(input_size, hidden_size)
-        if alternate_rnn:
-            self.baby_rnn = RNN2(3, 9, 9, act)
-            self.rnn = RNN2(hidden_size, hidden_size, hidden_size, act)
-        else:
-            self.rnn = RNN(hidden_size, hidden_size, hidden_size, act)
-        self.readout = nn.Linear(hidden_size, output_size)
-        self.initHidden = self.rnn.initHidden
-        self.LReLU = nn.LeakyReLU(0.1)
-        # self.sigmoid = nn.Sigmoid()
-
-    def forward(self, xy, shape, hidden):
-        """shape here will be batchsize x n_kinds_of_shapes x 3."""
-        batch_size = xy.shape[0]
-        baby_hidden = self.baby_rnn.initHidden(batch_size)
-        baby_hidden = baby_hidden.to(shape.device)
-        for i in range(self.n_shapes):
-            shape_emb, baby_hidden = self.baby_rnn(shape[:, i, :], baby_hidden)
-        combined = torch.cat((xy, shape_emb), 1)
-        x = self.LReLU(self.embedding(combined))
-        x, hidden = self.rnn(x, hidden)
-        num = self.readout(x)
-        return num, shape_emb, hidden
-
-    def init_small(self):
-        pass
-
-
-class RNNClassifier(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, act=None, alternate_rnn=False):
-        super().__init__()
-        map_size = 9
-        self.embedding = nn.Linear(input_size, hidden_size)
-        if alternate_rnn:
-            self.rnn = RNN2(hidden_size, hidden_size, hidden_size, act)
-        else:
-            self.rnn = RNN(hidden_size, hidden_size, hidden_size, act)
-        self.readout = nn.Linear(hidden_size, output_size)
-        self.initHidden = self.rnn.initHidden
-        self.LReLU = nn.LeakyReLU(0.1)
-        # self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x, hidden):
-        x = self.LReLU(self.embedding(x))
-        x, hidden = self.rnn(x, hidden)
-        num = self.readout(x)
-        return num, None, hidden
-
-    def init_small(self):
-        pass
+#
+# class RNNClassifier_nosymbol(nn.Module):
+#     def __init__(self, input_size, hidden_size, output_size, act=None):
+#         super().__init__()
+#         map_size = 9
+#         self.n_shapes = 9
+#         self.embedding = nn.Linear(input_size, hidden_size)
+#         self.baby_rnn = RNN2(3, 9, 9, act)
+#         self.rnn = RNN2(hidden_size, hidden_size, hidden_size, act)
+#         self.readout = nn.Linear(hidden_size, output_size)
+#         self.initHidden = self.rnn.initHidden
+#         self.LReLU = nn.LeakyReLU(0.1)
+#         # self.sigmoid = nn.Sigmoid()
+#
+#     def forward(self, xy, shape, hidden):
+#         """shape here will be batchsize x n_kinds_of_shapes x 3."""
+#         batch_size = xy.shape[0]
+#         baby_hidden = self.baby_rnn.initHidden(batch_size)
+#         baby_hidden = baby_hidden.to(shape.device)
+#         for i in range(self.n_shapes):
+#             shape_emb, baby_hidden = self.baby_rnn(shape[:, i, :], baby_hidden)
+#         combined = torch.cat((xy, shape_emb), 1)
+#         x = self.LReLU(self.embedding(combined))
+#         x, hidden = self.rnn(x, hidden)
+#         num = self.readout(x)
+#         return num, shape_emb, hidden
+#
+#     def init_small(self):
+#         pass
+#
+#
+# class RNNClassifier(nn.Module):
+#     def __init__(self, input_size, hidden_size, output_size, act=None):
+#         super().__init__()
+#         map_size = 9
+#         self.embedding = nn.Linear(input_size, hidden_size)
+#         self.rnn = RNN2(hidden_size, hidden_size, hidden_size, act)
+#         self.readout = nn.Linear(hidden_size, output_size)
+#         self.initHidden = self.rnn.initHidden
+#         self.LReLU = nn.LeakyReLU(0.1)
+#         # self.sigmoid = nn.Sigmoid()
+#
+#     def forward(self, x, hidden):
+#         x = self.LReLU(self.embedding(x))
+#         x, hidden = self.rnn(x, hidden)
+#         num = self.readout(x)
+#         return num, None, hidden
+#
+#     def init_small(self):
+#         pass
 
 
 class RNNRegression(RNNClassifier):
-    def __init__(self, input_size, hidden_size, output_size, act=None, alternate_rnn=False):
-        super().__init__(input_size, hidden_size, output_size, act=None, alternate_rnn=False)
+    def __init__(self, input_size, hidden_size, output_size, **kwargs):
+        super().__init__(input_size, hidden_size, output_size, **kwargs)
         map_size = 9
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
         self.embedding = nn.Linear(input_size, hidden_size)
-        if alternate_rnn:
-            self.rnn = RNN2(hidden_size, hidden_size, hidden_size, act)
-        else:
-            self.rnn = RNN(hidden_size, hidden_size, hidden_size, act)
+        self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
         self.readout = nn.Linear(hidden_size, 1)
         self.initHidden = self.rnn.initHidden
         self.LReLU = nn.LeakyReLU(0.1)

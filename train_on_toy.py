@@ -459,32 +459,29 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, nonsymbolic):
     loader = DataLoader(dset, batch_size=BATCH_SIZE, shuffle=True)
     return loader
 
-def get_model(model_type, small_weights, train_on, outer, hidden_size, act, alt_rnn, no_symbol):
+def get_model(model_type, train_on, **mod_args):
+    no_symbol = mod_args['no_symbol']
+    hidden_size = mod_args['h_size']
     xy_sz = 2
     sh_sz = 9
-    in_sz = xy_sz if train_on=='xy' else sh_sz if train_on=='shape' else sh_sz + xy_sz
-    if train_on == 'both' and outer:
+    in_sz = xy_sz if train_on=='xy' else sh_sz if train_on =='shape' else sh_sz + xy_sz
+    if train_on == 'both' and mod_args['outer']:
         in_sz += xy_sz * sh_sz
     output_size = 5
     if model_type == 'num_as_mapsum':
         if no_symbol:
-            model = mod.NumAsMapsum_nosymbol(in_sz, hidden_size, output_size, act, alt_rnn).to(device)
+            model = mod.NumAsMapsum_nosymbol(in_sz, hidden_size, output_size, **mod_args).to(device)
         else:
-            model = mod.NumAsMapsum(in_sz, hidden_size, output_size, act, alt_rnn).to(device)
-    elif model_type == 'detached':
-        if no_symbol:
-            model = mod.DetachedReadout_nosymbol(in_sz, hidden_size, output_size, act, alt_rnn).to(device)
-        else:
-            model = mod.DetachedReadout(in_sz, hidden_size, output_size, act, alt_rnn).to(device)
+            model = mod.NumAsMapsum(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif model_type == 'rnn_classifier':
         if no_symbol:
-            model = mod.RNNClassifier_nosymbol(in_sz, hidden_size, output_size, act, alt_rnn).to(device)
+            model = mod.RNNClassifier_nosymbol(in_sz, hidden_size, output_size, **mod_args).to(device)
         else:
-            model = mod.RNNClassifier(in_sz, hidden_size, output_size, act, alt_rnn).to(device)
+            model = mod.RNNClassifier(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif model_type == 'rnn_regression':
-        model = mod.RNNRegression(in_sz, hidden_size, output_size, act, alt_rnn).to(device)
+        model = mod.RNNRegression(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif model_type == 'mult':
-        model = mod.MultiplicativeModel(in_sz, hidden_size, output_size, small_weights).to(device)
+        model = mod.MultiplicativeModel(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif model_type == 'hyper':
         model = mod.HyperModel(in_sz, hidden_size, output_size).to(device)
     else:
@@ -516,6 +513,7 @@ def get_config():
     parser.add_argument('--no_symbol', action='store_true', default=False)
     parser.add_argument('--train_shapes', type=list, default=[0, 1, 2, 3, 5, 6, 7, 8])
     parser.add_argument('--test_shapes', nargs='*', type=list, default=[[0, 1, 2, 3, 5, 6, 7, 8], [4]])
+    parser.add_argument('--detach', action='store_true', default=False)
     # parser.add_argument('--no_cuda', action='store_true', default=False)
     # parser.add_argument('--preglimpsed', type=str, default=None)
     # parser.add_argument('--use_schedule', action='store_true', default=False)
@@ -552,9 +550,10 @@ def main():
     use_loss = config.use_loss
 
     kernel = '-kernel' if config.outer else ''
-    act = config.act if config.act is not None else ''
-    alt_rnn = '2' if config.alt_rnn else ''
-    model_desc = f'{model_type}{alt_rnn}-{act}_hsize-{config.h_size}'
+    act = '-' + config.act if config.act is not None else ''
+    alt_rnn = '2'
+    detach = '-detach' if config.detach else ''
+    model_desc = f'{model_type}{alt_rnn}{detach}{act}_hsize-{config.h_size}'
     data_desc = f'input-{train_on}{kernel}_nl-{noise_level}_diff-{min_pass}-{max_pass}_trainshapes-{config.train_shapes}_{train_size}'
     # train_desc = f'loss-{use_loss}_niters-{n_iters}_{n_epochs}eps'
     train_desc = f'loss-{use_loss}_{n_epochs}eps'
@@ -571,7 +570,11 @@ def main():
     loaders = [train_loader, test_loaders]
 
     # Prepare model and optimizer
-    model = get_model(model_type, config.small_weights, train_on, config.outer, config.h_size, config.act, config.alt_rnn, config.no_symbol)
+    mod_args = {'h_size': config.h_size, 'act': config.act,
+                'no_symbol': config.no_symbol,
+                'small_weights': config.small_weights, 'outer':config.outer,
+                'detach': config.detach}
+    model = get_model(model_type, train_on, **mod_args)
     opt = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
     scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)
 
