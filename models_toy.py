@@ -66,7 +66,7 @@ class RNNClassifier_nosymbol(nn.Module):
         else:
             map_to_pass_on = sig
         num = self.num_readout(map_to_pass_on)
-        return num, map, hidden
+        return num, map, shape_emb, hidden
 
 class NumAsMapsum(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, **kwargs):
@@ -124,7 +124,7 @@ class NumAsMapsum_nosymbol(nn.Module):
         num = torch.sum(sig, 1)
         # num = torch.round(torch.sum(x, 1))
         # num_onehot = nn.functional.one_hot(num, 9)
-        return num, map, hidden
+        return num, map, shape_emb, hidden
 
 #
 # class RNNClassifier_nosymbol(nn.Module):
