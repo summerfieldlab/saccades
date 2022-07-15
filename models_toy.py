@@ -42,7 +42,8 @@ class RNNClassifier_nosymbol(nn.Module):
         self.n_shapes = 9
         self.embedding = nn.Linear(input_size, hidden_size)
         self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
-        self.baby_rnn = RNN2(3, 9, 9, self.act)
+        self.baby_rnn = RNN2(3, 27, 27, self.act)
+        self.shape_readout = nn.Linear(27, 9)
         self.map_readout = nn.Linear(hidden_size, map_size)
         self.num_readout = nn.Linear(map_size, output_size)
         self.initHidden = self.rnn.initHidden
@@ -56,6 +57,7 @@ class RNNClassifier_nosymbol(nn.Module):
         baby_hidden = baby_hidden.to(shape.device)
         for i in range(self.n_shapes):
             shape_emb, baby_hidden = self.baby_rnn(shape[:, i, :], baby_hidden)
+        shape_emb = self.shape_readout(shape_emb)
         combined = torch.cat((xy, shape_emb), 1)
         x = self.LReLU(self.embedding(combined))
         x, hidden = self.rnn(x, hidden)
@@ -101,7 +103,8 @@ class NumAsMapsum_nosymbol(nn.Module):
         self.act = kwargs['act'] if 'act' in kwargs.keys() else None
         self.n_shapes = 9
         self.embedding = nn.Linear(input_size, hidden_size)
-        self.baby_rnn = RNN2(3, 9, 9, self.act)
+        self.baby_rnn = RNN2(3, 27, 27, self.act)
+        self.shape_readout = nn.Linear(27, 9)
         self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
         self.readout = nn.Linear(hidden_size, map_size)
         self.initHidden = self.rnn.initHidden
@@ -115,6 +118,7 @@ class NumAsMapsum_nosymbol(nn.Module):
         baby_hidden = baby_hidden.to(shape.device)
         for i in range(self.n_shapes):
             shape_emb, baby_hidden = self.baby_rnn(shape[:, i, :], baby_hidden)
+        shape_emb = self.shape_readout(shape_emb)
         combined = torch.cat((xy, shape_emb), 1)
         x = self.LReLU(self.embedding(combined))
         x, hidden = self.rnn(x, hidden)

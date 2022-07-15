@@ -74,7 +74,7 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
                 for t in range(n_glimpses):
                     pred_num, map, pred_shape, hidden = rnn(xy[:, t, :], shape[:, t, :, :], hidden)
                     if learn_shape:
-                        shape_loss = criterion_mse(pred_shape, shape_label[:, t, :])
+                        shape_loss = criterion_mse(pred_shape, shape_label[:, t, :])*10
                         shape_loss.backward(retain_graph=True)
                         shape_epoch_loss += shape_loss.item()
             # Calculate lossees
@@ -386,9 +386,9 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
         epoch_timer.stop_timer()
         # import pdb;pdb.set_trace()
         if isinstance(test_loss, list):
-            print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]} \t (Train/Val/Test) Loss={train_loss[ep]:.4}/{test_loss[0][ep]:.4}/{test_loss[1][ep]:.4} \t Accuracy={train_acc[ep]}%/{test_acc[0][ep]}%/{test_acc[1][ep]}% \t Shape loss: {train_shape_loss[ep]}')
+            print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]} \t (Train/Val/Test) Loss={train_loss[ep]:.4}/{test_loss[0][ep]:.4}/{test_loss[1][ep]:.4} \t Accuracy={train_acc[ep]}%/{test_acc[0][ep]}%/{test_acc[1][ep]}% \t Shape loss: {train_shape_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
         else:
-            print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]} \t (Train/Test) Loss={train_loss[ep]:.4}/{test_loss[ep]:.4}/ \t Accuracy={train_acc[ep]}%/{test_acc[ep]}% \t Shape loss: {train_shape_loss[ep]}')
+            print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]} \t (Train/Test) Loss={train_loss[ep]:.4}/{test_loss[ep]:.4}/ \t Accuracy={train_acc[ep]}%/{test_acc[ep]}% \t Shape loss: {train_shape_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
     results_list = [train_loss, train_acc, train_map_loss, train_shape_loss, test_loss, test_acc, test_map_loss, test_results]
     return rnn, results_list
 
