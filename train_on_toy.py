@@ -600,7 +600,7 @@ def main():
         df_test_list[ts]['dataset'] = f'test {test_shapes}'
         df_test_list[ts]['epoch'] = np.arange(n_epochs)
 
-    df_test = pf.concat(df_test_list)
+    df_test = pd.concat(df_test_list)
     df_test['rnn iterations'] = n_iters
     df = pd.concat((df_train, df_test))
     df.to_pickle(f'results/toy/toy_results_{base_name}.pkl')
