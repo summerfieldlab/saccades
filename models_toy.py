@@ -12,8 +12,10 @@ class RNNClassifier(nn.Module):
         map_size = 9
         self.act = kwargs['act'] if 'act' in kwargs.keys() else None
         self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
         self.embedding = nn.Linear(input_size, hidden_size)
         self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
+        self.drop_layer = nn.Dropout(p=drop)
         self.map_readout = nn.Linear(hidden_size, map_size)
         self.num_readout = nn.Linear(map_size, output_size)
         self.initHidden = self.rnn.initHidden
@@ -23,6 +25,7 @@ class RNNClassifier(nn.Module):
     def forward(self, x, hidden):
         x = self.LReLU(self.embedding(x))
         x, hidden = self.rnn(x, hidden)
+        x = self.drop_layer(x)
         map = self.map_readout(x)
         sig = self.sigmoid(map)
         if self.detach:

@@ -387,6 +387,7 @@ def generate_one_example(noise_level, min_pass_count=0, max_pass_count=6, shapes
     example_dict = {'xy': xy_coords, 'shape': shape_coords, 'numerosity': num,
                     'predicted num': example.pred_num, 'count': example.count,
                     'locations': filled_locations,
+                    'shape_map': shape_map,
                     'pass count': pass_count, 'unresolved ambiguity': not done,
                     'special xy': example.special_case_xy,
                     'special shape': example.special_case_shape,

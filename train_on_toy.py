@@ -373,6 +373,7 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
 
                 accuracy = data.groupby(['epoch', 'pass count']).mean()
                 sns.lineplot(data=accuracy, x='epoch', hue='pass count', y='accuracy')
+                plt.plot(train_acc[:ep + 1], '--', color='black', label='training accuracy')
                 plt.grid()
                 plt.title(title)
                 plt.ylim([0, 102])
@@ -384,7 +385,6 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
 
 
         epoch_timer.stop_timer()
-        # import pdb;pdb.set_trace()
         if isinstance(test_loss, list):
             print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]} \t (Train/Val/Test) Loss={train_loss[ep]:.4}/{test_loss[0][ep]:.4}/{test_loss[1][ep]:.4} \t Accuracy={train_acc[ep]}%/{test_acc[0][ep]}%/{test_acc[1][ep]}% \t Shape loss: {train_shape_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
         else:
@@ -397,8 +397,9 @@ def save_dataset(fname, noise_level, size, min_pass_count, max_pass_count, shape
     data.to_pickle(fname)
     return data
 
-def get_dataset(noise_level, size, min_pass_count=0, max_pass_count=6, shapes_set=np.arange(9)):
-    fname = f'toysets/toy_dataset_nl-{noise_level}_diff-{min_pass_count}-{max_pass_count}_{shapes_set}_{size}.pkl'
+def get_dataset(noise_level, size, min_pass_count=0, max_pass_count=6, shapes_set=np.arange(9), tetris=None):
+    tet = '_tetris' if tetris else ''
+    fname = f'toysets/toy_dataset_nl-{noise_level}_diff-{min_pass_count}-{max_pass_count}_{shapes_set}_{size}{tet}.pkl'
     if os.path.exists(fname):
         print(f'Loading saved dataset {fname}')
         data = pd.read_pickle(fname)
@@ -407,7 +408,7 @@ def get_dataset(noise_level, size, min_pass_count=0, max_pass_count=6, shapes_se
         data = save_dataset(fname, noise_level, size, min_pass_count, max_pass_count, shapes_set)
     return data
 
-def get_loader(dataset, train_on, cross_entropy_loss, outer, nonsymbolic):
+def get_loader(dataset, train_on, cross_entropy_loss, outer, nonsymbolic, tetris):
     """Prepare a torch DataLoader for the provided dataset.
 
     Other input arguments control what the input features should be and what
@@ -437,9 +438,14 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, nonsymbolic):
             shape_input = torch.tensor(converted).float().to(device)
             shape_label = torch.tensor(dataset['shape']).float().to(device)
             # shape = [torch.tensor(glimpse).float().to(device) for glimpse in converted]
+        elif tetris:
+            print('Tetris pixel inputs.')
+            shape_label = torch.tensor(dataset['shape']).float().to(device)
+            shape_input = torch.tensor(dataset['tetris glimpse pixels']).float().to(device)
         else:
             shape_input = torch.tensor(dataset['shape']).float().to(device)
     if train_on == 'both' or train_on == 'xy':
+
         xy = torch.tensor(dataset['xy']).float().to(device)
 
     # Create merged input (or not)
@@ -477,8 +483,9 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, nonsymbolic):
 def get_model(model_type, train_on, **mod_args):
     no_symbol = mod_args['no_symbol']
     hidden_size = mod_args['h_size']
+    tetris = mod_args['tetris']
     xy_sz = 2
-    sh_sz = 9
+    sh_sz = 4*4 if tetris else 9
     in_sz = xy_sz if train_on=='xy' else sh_sz if train_on =='shape' else sh_sz + xy_sz
     if train_on == 'both' and mod_args['outer']:
         in_sz += xy_sz * sh_sz
@@ -529,11 +536,12 @@ def get_config():
     parser.add_argument('--train_shapes', type=list, default=[0, 1, 2, 3, 5, 6, 7, 8])
     parser.add_argument('--test_shapes', nargs='*', type=list, default=[[0, 1, 2, 3, 5, 6, 7, 8], [4]])
     parser.add_argument('--detach', action='store_true', default=False)
-    parser.add_argument('--learn_shape', action='store_true', default=False)
+    parser.add_argument('--learn_shape', action='store_true', default=False, help='for the parametric shape rep, whether to additional train to produce symbolic shape labels')
+    parser.add_argument('--tetris', action='store_true', default=False)
     # parser.add_argument('--no_cuda', action='store_true', default=False)
     # parser.add_argument('--preglimpsed', type=str, default=None)
     # parser.add_argument('--use_schedule', action='store_true', default=False)
-    # parser.add_argument('--drop_readout', type=float, default=0.5)
+    parser.add_argument('--dropout', type=float, default=0.0)
     # parser.add_argument('--drop_rnn', type=float, default=0.1)
     # parser.add_argument('--wd', type=float, default=0) # 1e-6
     # parser.add_argument('--lr', type=float, default=0.01)
@@ -564,6 +572,7 @@ def main():
     min_pass = config.min_pass
     max_pass = config.max_pass
     use_loss = config.use_loss
+    drop = config.dropout
 
     kernel = '-kernel' if config.outer else ''
     act = '-' + config.act if config.act is not None else ''
@@ -573,24 +582,24 @@ def main():
     data_desc = f'input-{train_on}{kernel}_nl-{noise_level}_diff-{min_pass}-{max_pass}_trainshapes-{config.train_shapes}_{train_size}'
     # train_desc = f'loss-{use_loss}_niters-{n_iters}_{n_epochs}eps'
     withshape = '+shape' if config.learn_shape else ''
-    train_desc = f'loss-{use_loss}{withshape}_{n_epochs}eps'
+    train_desc = f'loss-{use_loss}{withshape}_drop{drop}_{n_epochs}eps'
     base_name = f'{model_desc}_{data_desc}_{train_desc}'
     if config.small_weights:
         base_name += '_small'
     if config.no_symbol:
         base_name += '_nonsymbol'
     # Prepare datasets and torch dataloaders
-    trainset = get_dataset(noise_level, train_size, min_pass, max_pass, config.train_shapes)
-    testsets = [get_dataset(noise_level, test_size, shapes_set=test_shapes) for test_shapes in config.test_shapes]
-    train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer, config.no_symbol)
-    test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.no_symbol) for testset in testsets]
+    trainset = get_dataset(noise_level, train_size, min_pass, max_pass, config.train_shapes, config.tetris)
+    testsets = [get_dataset(noise_level, test_size, shapes_set=test_shapes, tetris=config.tetris) for test_shapes in config.test_shapes]
+    train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer, config.no_symbol, config.tetris)
+    test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.no_symbol, config.tetris) for testset in testsets]
     loaders = [train_loader, test_loaders]
 
     # Prepare model and optimizer
     mod_args = {'h_size': config.h_size, 'act': config.act,
                 'no_symbol': config.no_symbol,
                 'small_weights': config.small_weights, 'outer':config.outer,
-                'detach': config.detach}
+                'detach': config.detach, 'tetris':config.tetris}
     model = get_model(model_type, train_on, **mod_args)
     opt = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
     scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)
