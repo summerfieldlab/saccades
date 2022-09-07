@@ -14,6 +14,8 @@ from torch.optim.lr_scheduler import StepLR
 import models_toy as mod
 import toy_model_data as toy
 from count_unique import Timer
+import tetris as pseudo
+import numeric
 # from labml_nn.hypernetworks.hyper_lstm import HyperLSTM
 # from hypernet import HyperLSTM
 # torch.set_num_threads(15)
@@ -22,24 +24,30 @@ mom = 0.9
 wd = 0
 start_lr = 0.1
 BATCH_SIZE = 1024
-n_glimpses = 4
+
 device = torch.device("cuda")
 # device = torch.device("cpu")
 criterion = nn.CrossEntropyLoss()
 criterion_noreduce = nn.CrossEntropyLoss(reduction='none')
 criterion_mse = nn.MSELoss()
 criterion_mse_noreduce = nn.MSELoss(reduction='none')
-pos_weight = torch.ones([9], device=device) * 2
-criterion_bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-criterion_bce_noreduce = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='none')
 
 
 def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
+    avg_num_objects = config.max_num - ((config.max_num-config.min_num)/2)
+    weight = (9 - avg_num_objects)/ avg_num_objects # 9 for 9 locations
+    pos_weight = torch.ones([9], device=device) * weight
+    criterion_bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    criterion_bce_noreduce = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='none')
+    n_glimpses = config.max_num
+
     n_epochs = config.n_epochs
     recurrent_iterations = config.n_iters
     cross_entropy = config.cross_entropy
-    nonsymbolic = config.no_symbol
+    nonsymbolic = True if config.shape_input == 'parametric' else False
     learn_shape = config.learn_shape
+    ticks = list(range(config.min_num, config.max_num + 1))
+    ticklabels = [str(tick) for tick in ticks]
     train_loader, test_loaders = loaders
     train_loss = np.zeros((n_epochs,))
     train_map_loss = np.zeros((n_epochs,))
@@ -245,6 +253,8 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
         epoch_loss = 0
         num_epoch_loss = 0
         map_epoch_loss = 0
+        nclasses = rnn.output_size
+        confusion_matrix = np.zeros((nclasses-2, nclasses-2))
         test_results = pd.DataFrame(columns=columns)
         for i, (input, target, locations, pass_count) in enumerate(loader):
             if nonsymbolic:
@@ -308,12 +318,17 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             epoch_loss += loss.mean().item()
             num_epoch_loss += num_loss.mean().item()
             map_epoch_loss += map_loss_to_add
+            # class-specific analysis and confusion matrix
+            # c = (pred.squeeze() == target)
+            for j in range(target.shape[0]):
+                label = target[j]
+                confusion_matrix[label-2, pred[j]-2] += 1
 
         accuracy = 100. * n_correct/len(loader.dataset)
         epoch_loss /= len(loader)
         num_epoch_loss /= len(loader)
         map_epoch_loss /= len(loader)
-        return epoch_loss, num_epoch_loss, accuracy, map_epoch_loss, test_results
+        return epoch_loss, num_epoch_loss, accuracy, map_epoch_loss, test_results, confusion_matrix
 
     test_results = pd.DataFrame(columns=columns)
     for ep in range(n_epochs):
@@ -333,7 +348,7 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
         train_shape_loss[ep] = ep_shape_loss
         # Test
         for ts, (test_loader, test_shapes) in enumerate(zip(test_loaders, config.test_shapes)):
-            epoch_te_loss, epoch_te_num_loss, te_accuracy, epoch_te_map_loss, epoch_df = test_f(test_loader, ep)
+            epoch_te_loss, epoch_te_num_loss, te_accuracy, epoch_te_map_loss, epoch_df, conf = test_f(test_loader, ep)
             epoch_df['train shapes'] = str(config.train_shapes)
             epoch_df['test shapes'] = str(test_shapes)
 
@@ -347,25 +362,33 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             if not ep % 10 or ep == n_epochs - 1:
                 test_results['accuracy'] = test_results['correct'].astype(int)*100
                 data = test_results[test_results['test shapes'] == str(test_shapes)]
-                data = data[data['pass count'] < 6]
-                sns.lineplot(data=data, x='epoch', y='num loss', hue='pass count')
-                plt.plot(train_num_loss[:ep + 1], '--', color='black', label='training loss')
+                max_pass = max(data['pass count'].max(), 6)
+                data = data[data['pass count'] < max_pass]
+                ## PLOT LOSS FOR BOTH OBJECTIVES
+                fig, (ax1, ax2) = plt.subplots(1, 2)
+                sns.lineplot(data=data, x='epoch', y='num loss', hue='pass count', ax=ax1)
+                ax1.plot(train_num_loss[:ep + 1], '--', color='black', label='training loss')
+                ax1.legend()
+                ax1.set_ylabel('Number Loss')
                 mt = config.model_type + '-nosymbol' if nonsymbolic else config.model_type
                 title = f'{mt} trainon-{config.train_on} train_shapes-{config.train_shapes} \n test_shapes-{test_shapes} useloss-{config.use_loss} noise-{config.noise_level}'
                 plt.title(title)
-                ylim = plt.ylim()
-                plt.ylim([-0.05, ylim[1]])
-                plt.grid()
-                plt.savefig(f'figures/toy/test_num-loss_{base_name_test}.png', dpi=300)
-                plt.close()
+                ylim = ax1.get_ylim()
+                ax1.set_ylim([-0.05, ylim[1]])
+                ax1.grid()
+                # plt.savefig(f'figures/toy/test_num-loss_{base_name_test}.png', dpi=300)
+                # plt.close()
 
-                sns.lineplot(data=data, x='epoch', y='map loss', hue='pass count')
-                plt.plot(train_map_loss[:ep + 1], '--', color='black', label='training loss')
-                plt.title(title)
-                ylim = plt.ylim()
-                plt.ylim([-0.05, ylim[1]])
-                plt.grid()
-                plt.savefig(f'figures/toy/test_map-loss_{base_name_test}.png', dpi=300)
+                sns.lineplot(data=data, x='epoch', y='map loss', hue='pass count', ax=ax2)
+                ax2.plot(train_map_loss[:ep + 1], '--', color='black', label='training loss')
+                ax2.set_ylabel('Map Loss')
+                # plt.title(title)
+                ylim = ax2.get_ylim()
+                ax2.set_ylim([-0.05, ylim[1]])
+                ax2.grid()
+                plt.tight_layout()
+                ax2.legend()
+                plt.savefig(f'figures/toy/test-loss_{base_name_test}.png', dpi=300)
                 plt.close()
                 # sns.countplot(data=test_results[test_results['correct']==True], x='epoch', hue='pass count')
                 # plt.savefig(f'figures/toy/test_correct_{base_name}.png', dpi=300)
@@ -374,6 +397,7 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
                 accuracy = data.groupby(['epoch', 'pass count']).mean()
                 sns.lineplot(data=accuracy, x='epoch', hue='pass count', y='accuracy')
                 plt.plot(train_acc[:ep + 1], '--', color='black', label='training accuracy')
+                plt.legend()
                 plt.grid()
                 plt.title(title)
                 plt.ylim([0, 102])
@@ -383,6 +407,15 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
                 acc_on_difficult = accuracy.loc[ep, 5.0]['accuracy']
                 print(f'Testset {ts}, Accuracy on level 5 difficulty: {acc_on_difficult}')
 
+                plt.matshow(conf)
+                plt.title(f'Number Confusion Matrix: input={config.train_on} test shapes={config.test_shapes}')
+                plt.xticks(ticks, ticklabels)
+                plt.xlabel('Predicted Class')
+                plt.ylabel('True Class')
+                plt.yticks(ticks, ticklabels)
+                plt.tight_layout()
+                plt.savefig(f'figures/toy/{base_name_test}_confusion.png', dpi=300)
+                plt.close()
 
         epoch_timer.stop_timer()
         if isinstance(test_loss, list):
@@ -392,23 +425,44 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
     results_list = [train_loss, train_acc, train_map_loss, train_shape_loss, test_loss, test_acc, test_map_loss, test_results]
     return rnn, results_list
 
-def save_dataset(fname, noise_level, size, min_pass_count, max_pass_count, shapes_set):
-    data = toy.generate_dataset(noise_level, size, min_pass_count, max_pass_count, shapes_set)
+def save_dataset(fname, noise_level, size, pass_count_range, num_range, shapes_set, same):
+    n_shapes = 10
+    data = toy.generate_dataset(noise_level, size, pass_count_range, num_range, shapes_set, n_shapes, same)
     data.to_pickle(fname)
     return data
 
-def get_dataset(noise_level, size, min_pass_count=0, max_pass_count=6, shapes_set=np.arange(9), tetris=None):
-    tet = '_tetris' if tetris else ''
-    fname = f'toysets/toy_dataset_nl-{noise_level}_diff-{min_pass_count}-{max_pass_count}_{shapes_set}_{size}{tet}.pkl'
-    if os.path.exists(fname):
-        print(f'Loading saved dataset {fname}')
-        data = pd.read_pickle(fname)
+def get_dataset(noise_level, size, pass_count_range, num_range, shapes_set, shape_input, same):
+    """If specified dataset already exists, load it. Otherwise, create it.
+
+    Datasets are always saved with the same time, irrespective of whether the
+    dataframe contains the tetris or numeric glimpses or neither.
+    """
+    min_pass_count, max_pass_count = pass_count_range
+    min_num, max_num = num_range
+    # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}{tet}.pkl'
+    # fname_notet = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}'
+    samee = 'same' if same else ''
+    fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}{samee}_{size}.pkl'
+    fname_gw = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}{samee}_gw6_{size}.pkl'
+    if os.path.exists(fname_gw):
+        print(f'Loading saved dataset {fname_gw}')
+        data = pd.read_pickle(fname_gw)
+    # elif os.path.exists(fname):
+    #     print(f'Loading saved dataset {fname}')
+    #     data = pd.read_pickle(fname)
     else:
         print('Generating new dataset')
-        data = save_dataset(fname, noise_level, size, min_pass_count, max_pass_count, shapes_set)
+        data = save_dataset(fname_gw, noise_level, size, pass_count_range, num_range, shapes_set, same)
+
+    # Add pseudoimage glimpses if needed but not present
+    if shape_input == 'tetris' and 'tetris glimpse pixels' not in data.columns:
+        data = pseudo.add_tetris(fname_gw)
+    elif shape_input == 'char' and 'char glimpse pixels' not in data.columns:
+        data = numeric.add_chars(fname_gw)
+
     return data
 
-def get_loader(dataset, train_on, cross_entropy_loss, outer, nonsymbolic, tetris):
+def get_loader(dataset, train_on, cross_entropy_loss, outer, shape_format):
     """Prepare a torch DataLoader for the provided dataset.
 
     Other input arguments control what the input features should be and what
@@ -433,16 +487,19 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, nonsymbolic, tetris
                 np.random.shuffle(indexes)
                 nonsymbolic[i] = [(glimpse[idx], coords[idx][0], coords[idx][1]) for idx in indexes]
             return nonsymbolic
-        if nonsymbolic:
+        if shape_format == 'parametric':
             converted = dataset['shape1'].apply(convert)
             shape_input = torch.tensor(converted).float().to(device)
             shape_label = torch.tensor(dataset['shape']).float().to(device)
             # shape = [torch.tensor(glimpse).float().to(device) for glimpse in converted]
-        elif tetris:
+        elif shape_format == 'tetris':
             print('Tetris pixel inputs.')
             shape_label = torch.tensor(dataset['shape']).float().to(device)
             shape_input = torch.tensor(dataset['tetris glimpse pixels']).float().to(device)
-        else:
+        elif shape_format == 'char':
+            shape_label = torch.tensor(dataset['shape']).float().to(device)
+            shape_input = torch.tensor(dataset['char glimpse pixels']).float().to(device)
+        else: # symbolic shape input
             shape_input = torch.tensor(dataset['shape']).float().to(device)
     if train_on == 'both' or train_on == 'xy':
 
@@ -455,7 +512,7 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, nonsymbolic, tetris
         input = shape_input
     elif train_on == 'both':
         if outer:
-            assert not nonsymbolic  # not implemented outer with nonsymbolic
+            assert shape_format != 'parametric'  # not implemented outer with nonsymbolic
             # dataset['shape.t'] = dataset['shape'].apply(lambda x: np.transpose(x))
             # kernel = np.outer(sh, xy) for sh, xy in zip
             def get_outer(xy, shape):
@@ -463,7 +520,7 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, nonsymbolic, tetris
             dataset['kernel'] = dataset.apply(lambda x: get_outer(x.xy, x.shape1), axis=1)
             kernel = torch.tensor(dataset['kernel']).float().to(device)
             input = torch.cat((xy, shape_input, kernel), dim=-1)
-        elif not nonsymbolic:
+        else:
             input = torch.cat((xy, shape_input), dim=-1)
 
     if cross_entropy_loss:
@@ -473,7 +530,7 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, nonsymbolic, tetris
     pass_count = torch.tensor(dataset['pass count']).float().to(device)
     true_loc = torch.tensor(dataset['locations']).float().to(device)
 
-    if nonsymbolic:
+    if shape_format == 'parametric':
         dset = TensorDataset(xy, shape_input, target, true_loc, shape_label, pass_count)
     else:
         dset = TensorDataset(input, target, true_loc, pass_count)
@@ -481,22 +538,28 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, nonsymbolic, tetris
     return loader
 
 def get_model(model_type, train_on, **mod_args):
-    no_symbol = mod_args['no_symbol']
     hidden_size = mod_args['h_size']
-    tetris = mod_args['tetris']
+    output_size = mod_args['n_classes'] + 1
+    shape_format = mod_args['format']
     xy_sz = 2
-    sh_sz = 4*4 if tetris else 9
+    if shape_format == 'tetris':
+        sh_sz = 4*4
+    elif shape_format == 'char':
+        # sh_sz = 64 # 8 * 8
+        sh_sz = 6 * 6
+    else:
+        sh_sz = 9
     in_sz = xy_sz if train_on=='xy' else sh_sz if train_on =='shape' else sh_sz + xy_sz
     if train_on == 'both' and mod_args['outer']:
         in_sz += xy_sz * sh_sz
-    output_size = 5
+
     if model_type == 'num_as_mapsum':
         if no_symbol:
             model = mod.NumAsMapsum_nosymbol(in_sz, hidden_size, output_size, **mod_args).to(device)
         else:
             model = mod.NumAsMapsum(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif model_type == 'rnn_classifier':
-        if no_symbol:
+        if shape_format == 'parametric':  #no_symbol:
             model = mod.RNNClassifier_nosymbol(in_sz, hidden_size, output_size, **mod_args).to(device)
         else:
             model = mod.RNNClassifier(in_sz, hidden_size, output_size, **mod_args).to(device)
@@ -530,14 +593,18 @@ def get_config():
     parser.add_argument('--h_size', type=int, default=25)
     parser.add_argument('--min_pass', type=int, default=0)
     parser.add_argument('--max_pass', type=int, default=6)
+    parser.add_argument('--min_num', type=int, default=2)
+    parser.add_argument('--max_num', type=int, default=7)
     parser.add_argument('--act', type=str, default=None)
     parser.add_argument('--alt_rnn', action='store_true', default=False)
-    parser.add_argument('--no_symbol', action='store_true', default=False)
+    # parser.add_argument('--no_symbol', action='store_true', default=False)
     parser.add_argument('--train_shapes', type=list, default=[0, 1, 2, 3, 5, 6, 7, 8])
     parser.add_argument('--test_shapes', nargs='*', type=list, default=[[0, 1, 2, 3, 5, 6, 7, 8], [4]])
     parser.add_argument('--detach', action='store_true', default=False)
     parser.add_argument('--learn_shape', action='store_true', default=False, help='for the parametric shape rep, whether to additional train to produce symbolic shape labels')
-    parser.add_argument('--tetris', action='store_true', default=False)
+    parser.add_argument('--shape_input', type=str, default='symbolic', help='Which format to use for what pathway (symbolic, parametric, tetris, or char)')
+    parser.add_argument('--same', action='store_true', default=False)
+    # parser.add_argument('--tetris', action='store_true', default=False)
     # parser.add_argument('--no_cuda', action='store_true', default=False)
     # parser.add_argument('--preglimpsed', type=str, default=None)
     # parser.add_argument('--use_schedule', action='store_true', default=False)
@@ -571,35 +638,41 @@ def main():
     n_epochs = config.n_epochs
     min_pass = config.min_pass
     max_pass = config.max_pass
+    pass_range = (min_pass, max_pass)
+    min_num = config.min_num
+    max_num = config.max_num
+    num_range = (min_num, max_num)
     use_loss = config.use_loss
     drop = config.dropout
 
+    # Prepare base file name for results files
     kernel = '-kernel' if config.outer else ''
     act = '-' + config.act if config.act is not None else ''
     alt_rnn = '2'
     detach = '-detach' if config.detach else ''
     model_desc = f'{model_type}{alt_rnn}{detach}{act}_hsize-{config.h_size}'
-    data_desc = f'input-{train_on}{kernel}_nl-{noise_level}_diff-{min_pass}-{max_pass}_trainshapes-{config.train_shapes}_{train_size}'
+    same = 'same' if config.same else ''
+    data_desc = f'num{min_num}-{max_num}_input-{train_on}{kernel}_{config.shape_input}_nl-{noise_level}_diff-{min_pass}-{max_pass}_trainshapes-{config.train_shapes}{same}_gw6_{train_size}'
     # train_desc = f'loss-{use_loss}_niters-{n_iters}_{n_epochs}eps'
     withshape = '+shape' if config.learn_shape else ''
     train_desc = f'loss-{use_loss}{withshape}_drop{drop}_{n_epochs}eps'
     base_name = f'{model_desc}_{data_desc}_{train_desc}'
     if config.small_weights:
         base_name += '_small'
-    if config.no_symbol:
-        base_name += '_nonsymbol'
+
     # Prepare datasets and torch dataloaders
-    trainset = get_dataset(noise_level, train_size, min_pass, max_pass, config.train_shapes, config.tetris)
-    testsets = [get_dataset(noise_level, test_size, shapes_set=test_shapes, tetris=config.tetris) for test_shapes in config.test_shapes]
-    train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer, config.no_symbol, config.tetris)
-    test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.no_symbol, config.tetris) for testset in testsets]
+    trainset = get_dataset(noise_level, train_size, pass_range, num_range, config.train_shapes, config.shape_input, config.same)
+    testsets = [get_dataset(noise_level, test_size, pass_range, num_range, test_shapes, config.shape_input, config.same) for test_shapes in config.test_shapes]
+    train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer, config.shape_input)
+    test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.shape_input) for testset in testsets]
     loaders = [train_loader, test_loaders]
 
     # Prepare model and optimizer
+    no_symbol = True if config.shape_input == 'parametric' else False
     mod_args = {'h_size': config.h_size, 'act': config.act,
-                'no_symbol': config.no_symbol,
                 'small_weights': config.small_weights, 'outer':config.outer,
-                'detach': config.detach, 'tetris':config.tetris}
+                'detach': config.detach, 'format':config.shape_input,
+                'n_classes':max_num}
     model = get_model(model_type, train_on, **mod_args)
     opt = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
     scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)

@@ -10,6 +10,7 @@ class RNNClassifier(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, **kwargs):
         super().__init__()
         map_size = 9
+        self.output_size = output_size
         self.act = kwargs['act'] if 'act' in kwargs.keys() else None
         self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
         drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0

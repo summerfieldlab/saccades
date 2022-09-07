@@ -23,7 +23,12 @@ shape3 = np.array([[1, 0],
                    [1, 1]])
 shape4 = np.array([[0, 1],
                    [1, 1]])
+shape_holder = np.zeros((4, 4))
 shapes = [shape1, shape2, shape3, shape4]
+# for shape in shapes:
+#     shape_holder[1:3,1:3] = shape
+#     plt.matshow(shape_holder)
+
 
 def add_tetris_glimpses(data):
     """Synthesize and glimpse small image of pixel corners.
@@ -47,6 +52,7 @@ def add_tetris_glimpses(data):
     experiments.
     """
     pixel_width = 4*3
+    i=0
     data['tetris glimpse coords'] = None
     data['tetris glimpse pixels'] = None
     data['tetris image'] = None
@@ -69,6 +75,11 @@ def add_tetris_glimpses(data):
 
         # Insert the specified shapes into the image at the specified locations
         image = np.zeros((pixel_width, pixel_width))
+        # plt.matshow(image, origin='lower')
+        # plt.plot([3.5, 3.5], [0, 11], color='cyan')
+        # plt.plot([7.5, 7.5], [0, 11], color='cyan')
+        # plt.plot([0, 11], [3.5, 3.5], color='cyan')
+        # plt.plot([0, 11], [7.5, 7.5], color='cyan')
         for shape_idx, (x,y) in zip(object_shapes, object_pixel_coords):
                 # print(f'{shape_idx} {x} {y}')
                 image[x:x+2:, y:y+2] = shapes[shape_idx]
@@ -91,15 +102,29 @@ def add_tetris_glimpses(data):
         data.at[i,'tetris glimpse pixels'] = glimpse_pixels
         data.at[i,'tetris glimpse coords'] = glimpse_coords
         data.at[i,'tetris image'] = image_wbord
+        # glimpse_pixels_to_plot = [image_wbord[x-2:x+2, y-2:y+2]for x,y in glimpse_coords]
         # bounding = [plt.Rectangle((x-2,y-2), 4, 4, fc='none',ec="red") for x,y in glimpse_coords]
-        # plt.matshow(glimpse_pixels[0].T, origin='lower')
-        # plt.matshow(glimpse_pixels[1].T, origin='lower')
-        # plt.matshow(glimpse_pixels[2].T, origin='lower')
-        # plt.matshow(glimpse_pixels[3].T, origin='lower')
+        # plt.matshow(glimpse_pixels_to_plot[0].T, origin='lower')
+        # plt.matshow(glimpse_pixels_to_plot[1].T, origin='lower')
+        # plt.matshow(glimpse_pixels_to_plot[2].T, origin='lower')
+        # plt.matshow(glimpse_pixels_to_plot[3].T, origin='lower')
         # plt.matshow(image_wbord.T, origin='lower')
         # plt.scatter(glimpse_coords[:,0], glimpse_coords[:,1], color='red')
         # for box in bounding:
         #     plt.gca().add_patch(box)
+    return data
+
+def add_tetris(fname):
+    if os.path.exists(fname+'.pkl'):
+        print(f'Loading saved dataset {fname}.pkl')
+        data = pd.read_pickle(fname+'.pkl')
+    else:
+        print('Dataset does not exist')
+        exit()
+    data = add_tetris_glimpses(data)
+    new_fname = f'{fname}_tetris.pkl'
+    print(f'Saving {new_fname}')
+    data.to_pickle(new_fname)
     return data
 
 def main():
