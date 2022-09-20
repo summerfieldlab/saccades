@@ -820,7 +820,6 @@ def main():
     df_train['epoch'] = np.arange(n_epochs)
     df_train['rnn iterations'] = n_iters
     df_train['dataset'] = 'train'
-    import pdb;pdb.set_trace()
     for ts, (test_shapes, test_lums) in enumerate(product(config.test_shapes, config.lum_sets)):
         df_test_list[ts]['loss'] = test_loss[ts]
         df_test_list[ts]['num loss'] = test_num_loss[ts]
