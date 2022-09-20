@@ -5,6 +5,7 @@ from torch import nn
 from scipy.stats import special_ortho_group
 
 
+# Pixel/shape only models
 class PixelPlusShapeModel(nn.Module):
     """RNN receives joint embedding of pixels and predicted shape label.
 
@@ -125,6 +126,7 @@ class ShapeModel(nn.Module):
 
 
 class Distinctive(nn.Module):
+    """Intended for case when all shapes are distinctive. """
     def __init__(self, hidden_size, **kwargs):
         super().__init__()
         drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
@@ -271,6 +273,43 @@ class ContentGated_cheat(nn.Module):
 
 
 # Models with integrated pixel and gaze streams
+class MapReadoutModel(nn.Module):
+    """Inpsired by RNNClassifier from models_toy.
+
+    Pixels and gaze coordinates merge into a joint embedding layer which feeds
+    into RNN. The output of the RNN is treated as a map of the image, from
+    which numerosity is read out.
+    """
+    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        self.map_size = map_size
+        self.hidden_size = hidden_size
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else lrelu
+        self.detach = kwargs['detached'] if 'detached' in kwargs.keys() else False
+        drop = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0
+        self.embedding = nn.Linear(input_size, hidden_size)
+        self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
+        self.drop_layer = nn.Dropout(p=drop)
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        self.num_readout = nn.Linear(map_size, output_size)
+        self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
+
+    def forward(self, x, hidden):
+        x = self.LReLU(self.embedding(x))
+        x, hidden = self.rnn(x, hidden)
+        x = self.drop_layer(x)
+        map_ = self.map_readout(x)
+        sig = self.sigmoid(map_)
+        if self.detach:
+            map_to_pass_on = sig.detach().clone()
+        else:
+            map_to_pass_on = sig
+        num = self.num_readout(map_to_pass_on)
+        return num, map_, hidden
+
+
 class IntegratedModel(nn.Module):
     def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
         """Integrate pixel and gaze location streams.
@@ -499,21 +538,29 @@ class ConvNet(nn.Module):
         # Larger version
         if big:
             self.kernel1_size = 3
-            self.cnn1_nchannels_out = 128
+            self.cnn1_nchannels_out = 56
             self.poolsize = 2
             self.kernel2_size = 2
-            self.cnn2_nchannels_out = 256
+            self.cnn2_nchannels_out = 56
             self.kernel3_size = 2
-            self.cnn3_nchannels_out = 32
+            self.cnn3_nchannels_out = 56
+
+            # self.kernel1_size = 3
+            # self.cnn1_nchannels_out = 128
+            # self.poolsize = 2
+            # self.kernel2_size = 2
+            # self.cnn2_nchannels_out = 256
+            # self.kernel3_size = 2
+            # self.cnn3_nchannels_out = 32
         else:  # Smaller version
             self.kernel1_size = 3
-            self.cnn1_nchannels_out = 16
+            self.cnn1_nchannels_out = 33
             self.poolsize = 2
             self.kernel2_size = 2
-            self.cnn2_nchannels_out = 12
+            self.cnn2_nchannels_out = 33
             self.kernel3_size = 2
-            self.cnn3_nchannels_out = 9
-
+            self.cnn3_nchannels_out = 33
+        self.output_size = output_size
         self.LReLU = nn.LeakyReLU(0.1)
 
         # Default initialization is init.kaiming_uniform_(self.weight, a=math.sqrt(5))
@@ -533,7 +580,8 @@ class ConvNet(nn.Module):
 
         # pass through FC layers
         # self.fc1 = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), 120)  # size input, size output
-        self.fc1_size = 120
+        # self.fc1_size = 120
+        self.fc1_size = 9
         # import pdb; pdb.set_trace()
         self.fc1 = nn.Linear(int(self.cnn3_nchannels_out * self.cnn3_width_out * self.cnn3_height_out), self.fc1_size)  # size input, size output
 
