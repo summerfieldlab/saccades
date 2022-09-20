@@ -14,11 +14,17 @@ class RNNClassifier(nn.Module):
         self.act = kwargs['act'] if 'act' in kwargs.keys() else None
         self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
         drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
         self.embedding = nn.Linear(input_size, hidden_size)
         self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
         self.drop_layer = nn.Dropout(p=drop)
         self.map_readout = nn.Linear(hidden_size, map_size)
-        self.num_readout = nn.Linear(map_size, output_size)
+        if self.par:
+            self.notmap = nn.Linear(hidden_size, map_size)
+            self.num_readout = nn.Linear(map_size * 2, output_size)
+        else:
+            self.num_readout = nn.Linear(map_size, output_size)
+
         self.initHidden = self.rnn.initHidden
         self.sigmoid = nn.Sigmoid()
         self.LReLU = nn.LeakyReLU(0.1)
@@ -27,13 +33,21 @@ class RNNClassifier(nn.Module):
         x = self.LReLU(self.embedding(x))
         x, hidden = self.rnn(x, hidden)
         x = self.drop_layer(x)
+
         map = self.map_readout(x)
         sig = self.sigmoid(map)
         if self.detach:
             map_to_pass_on = sig.detach().clone()
         else:
             map_to_pass_on = sig
-        num = self.num_readout(map_to_pass_on)
+        if self.par:
+            # Two parallel layers, one to be a map, the other not
+            notmap = self.notmap(x)
+            penult = torch.cat((map_to_pass_on, notmap), dim=1)
+        else:
+            penult = map_to_pass_on
+        # num = self.num_readout(map_to_pass_on)
+        num = self.num_readout(penult)
         return num, map, hidden
 
 
