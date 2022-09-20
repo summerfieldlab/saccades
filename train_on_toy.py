@@ -11,7 +11,9 @@ from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
 from torch.optim import SGD
 from torch.optim.lr_scheduler import StepLR
+from prettytable import PrettyTable
 import models_toy as mod
+from models import ConvNet
 import toy_model_data as toy
 from count_unique import Timer
 import tetris as pseudo
@@ -23,7 +25,7 @@ import numeric
 mom = 0.9
 wd = 0
 start_lr = 0.1
-BATCH_SIZE = 1024
+BATCH_SIZE = 500
 
 device = torch.device("cuda")
 # device = torch.device("cpu")
@@ -40,26 +42,25 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
     criterion_bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     criterion_bce_noreduce = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='none')
     n_glimpses = config.max_num
-
     n_epochs = config.n_epochs
     recurrent_iterations = config.n_iters
     cross_entropy = config.cross_entropy
     nonsymbolic = True if config.shape_input == 'parametric' else False
     learn_shape = config.learn_shape
-    ticks = list(range(config.min_num, config.max_num + 1))
-    ticklabels = [str(tick) for tick in ticks]
+    ticks = list(range(config.max_num - config.min_num + 1))
+    ticklabels = [str(tick + config.min_num) for tick in ticks]
     train_loader, test_loaders = loaders
     train_loss = np.zeros((n_epochs,))
     train_map_loss = np.zeros((n_epochs,))
     train_num_loss = np.zeros((n_epochs,))
     train_acc = np.zeros((n_epochs,))
     train_shape_loss = np.zeros((n_epochs,))
-
-    test_loss = [np.zeros((n_epochs,)) for _ in config.test_shapes]
-    test_map_loss = [np.zeros((n_epochs,)) for _ in config.test_shapes]
-    test_num_loss = [np.zeros((n_epochs,)) for _ in config.test_shapes]
-    test_acc = [np.zeros((n_epochs,)) for _ in config.test_shapes]
-    columns = ['pass count', 'correct', 'predicted', 'true', 'loss', 'num loss', 'map loss', 'epoch', 'train_shapes', 'test_shapes']
+    n_test_sets = len(config.test_shapes) * len(config.lum_sets)
+    test_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
+    test_map_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
+    test_num_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
+    test_acc = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
+    columns = ['pass count', 'correct', 'predicted', 'true', 'loss', 'num loss', 'map loss', 'epoch', 'train shapes', 'test shapes']
 
     def train_nosymbol(loader):
         rnn.train()
@@ -113,7 +114,7 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             num_epoch_loss += num_loss.item()
             map_epoch_loss += map_loss_to_add
         scheduler.step()
-        accuracy = 100. * correct/len(loader.dataset)
+        accuracy = 100. * (correct/len(loader.dataset))
         epoch_loss /= len(loader)
         num_epoch_loss /= len(loader)
         map_epoch_loss /= len(loader)
@@ -126,26 +127,34 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
         epoch_loss = 0
         num_epoch_loss = 0
         map_epoch_loss = 0
+        no_shuffle = ['recurrent_control', 'cnn']
         for i, (input, target, locations, _) in enumerate(loader):
-
-            seq_len = input.shape[1]
-            for i, row in enumerate(input):
-                input[i, :, :] = row[torch.randperm(seq_len), :]
+            if config.model_type not in no_shuffle:
+                seq_len = input.shape[1]
+                # Shuffle glimpse order on each batch
+                for i, row in enumerate(input):
+                    input[i, :, :] = row[torch.randperm(seq_len), :]
             input_dim = input.shape[0]
 
             rnn.zero_grad()
-
-            hidden = rnn.initHidden(input_dim)
-            if config.model_type is not 'hyper':
-                hidden = hidden.to(device)
+            if 'cnn' not in config.model_type:
+                hidden = rnn.initHidden(input_dim)
+                if config.model_type is not 'hyper':
+                    hidden = hidden.to(device)
             # data = toy.generate_dataset(BATCH_SIZE)
             # # data.loc[0]
             # xy = torch.tensor(data['xy']).float()
             # shape = torch.tensor(data['shape']).float()
             # target = torch.tensor(data['numerosity']).long()
-            for _ in range(recurrent_iterations):
-                for t in range(n_glimpses):
-                    pred_num, map, hidden = rnn(input[:, t, :], hidden)
+            if 'cnn' in config.model_type:
+                pred_num, map = rnn(input)
+            else:
+                for _ in range(recurrent_iterations):
+                    for t in range(n_glimpses):
+                        if config.model_type == 'recurrent_control':
+                            pred_num, map, hidden = rnn(input, hidden)
+                        else:
+                            pred_num, map, hidden = rnn(input[:, t, :], hidden)
 
             if cross_entropy:
                 num_loss = criterion(pred_num, target)
@@ -159,11 +168,11 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
                 map_loss_to_add = -1
             elif config.use_loss == 'map':
                 map_loss = criterion_bce(map, locations)
-                map_loss_to_add = map_loss.item()
+                map_loss_to_add = map_loss
                 loss = map_loss
-            elif config.use_loss == 'both':
+            elif 'both' in config.use_loss:
                 map_loss = criterion_bce(map, locations)
-                map_loss_to_add = map_loss.item()
+                map_loss_to_add = map_loss
                 loss = num_loss + map_loss
             loss.backward()
             nn.utils.clip_grad_norm_(rnn.parameters(), 2)
@@ -172,9 +181,11 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             correct += pred.eq(target.view_as(pred)).sum().item()
             epoch_loss += loss.item()
             num_epoch_loss += num_loss.item()
+            if not isinstance(map_loss_to_add, int):
+                map_loss_to_add = map_loss_to_add.item()
             map_epoch_loss += map_loss_to_add
         scheduler.step()
-        accuracy = 100. * correct/len(loader.dataset)
+        accuracy = 100. * (correct/len(loader.dataset))
         epoch_loss /= len(loader)
         num_epoch_loss /= len(loader)
         map_epoch_loss /= len(loader)
@@ -241,7 +252,7 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             num_epoch_loss += num_loss.mean().item()
             map_epoch_loss += map_loss_to_add
 
-        accuracy = 100. * n_correct/len(loader.dataset)
+        accuracy = 100. * (n_correct/len(loader.dataset))
         epoch_loss /= len(loader)
         num_epoch_loss /= len(loader)
         map_epoch_loss /= len(loader)
@@ -254,7 +265,7 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
         num_epoch_loss = 0
         map_epoch_loss = 0
         nclasses = rnn.output_size
-        confusion_matrix = np.zeros((nclasses-2, nclasses-2))
+        confusion_matrix = np.zeros((nclasses-config.min_num, nclasses-config.min_num))
         test_results = pd.DataFrame(columns=columns)
         for i, (input, target, locations, pass_count) in enumerate(loader):
             if nonsymbolic:
@@ -263,23 +274,29 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             else:
                 input_dim = input.shape[0]
             batch_results = pd.DataFrame(columns=columns)
-            hidden = rnn.initHidden(input_dim)
-            if config.model_type != 'hyper':
-                hidden = hidden.to(device)
+            if 'cnn' not in config.model_type:
+                hidden = rnn.initHidden(input_dim)
+                if config.model_type != 'hyper':
+                    hidden = hidden.to(device)
             # data = toy.generate_dataset(BATCH_SIZE)
             # # data.loc[0]
             # xy = torch.tensor(data['xy']).float()
             # shape = torch.tensor(data['shape']).float()
             # target = torch.tensor(data['numerosity']).long()
-            for _ in range(recurrent_iterations):
-                if config.model_type == 'hyper':
-                    pred_num, map, hidden = rnn(input, hidden)
-                else:
-                    for t in range(n_glimpses):
-                        if nonsymbolic:
-                            pred_num, map, hidden = rnn(xy[:, t, :], shape[:, t, :, :], hidden)
-                        else:
-                            pred_num, map, hidden = rnn(input[:, t, :], hidden)
+            if 'cnn' in config.model_type:
+                pred_num, map = rnn(input)
+            else:
+                for _ in range(recurrent_iterations):
+                    if config.model_type == 'hyper':
+                        pred_num, map, hidden = rnn(input, hidden)
+                    else:
+                        for t in range(n_glimpses):
+                            if nonsymbolic:
+                                pred_num, map, hidden = rnn(xy[:, t, :], shape[:, t, :, :], hidden)
+                            elif config.model_type == 'recurrent_control':
+                                pred_num, map, hidden = rnn(input, hidden)
+                            else:
+                                pred_num, map, hidden = rnn(input[:, t, :], hidden)
             if cross_entropy:
                 num_loss = criterion_noreduce(pred_num, target)
                 pred = pred_num.argmax(dim=1, keepdim=True)
@@ -292,13 +309,15 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
                 # map_loss = criterion_bce_noreduce(map, locations)
                 map_loss_to_add = -1
             elif config.use_loss == 'map':
+                # Average over map locations, sum over instances
                 map_loss = criterion_bce_noreduce(map, locations)
-                map_loss_to_add = map_loss.mean().item()
-                loss = map_loss
+                map_loss_to_add = map_loss.mean(axis=1).sum()
+                loss = map_loss.mean()
             elif config.use_loss == 'both':
                 map_loss = criterion_bce_noreduce(map, locations)
-                map_loss_to_add = map_loss.mean().item()
-                loss = num_loss + map_loss.mean()
+                # map_loss_reduce = criterion_bce(map, locations)
+                map_loss_to_add = map_loss.mean(axis=1).sum()
+                loss = num_loss + map_loss.mean(axis=1)
 
             correct = pred.eq(target.view_as(pred))
             batch_results['pass count'] = pass_count.detach().cpu().numpy()
@@ -307,7 +326,10 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             batch_results['true'] = target.detach().cpu().numpy()
             batch_results['loss'] = loss.detach().cpu().numpy()
             try:
-                batch_results['map loss'] = map_loss.detach().cpu().numpy()
+                # Somehow before it was like just the first column was going
+                # into batch_results, so just map loss for the first out of
+                # nine location, instead of the average over all locations.
+                batch_results['map loss'] = map_loss.mean(axis=1).detach().cpu().numpy()
             except:
                 batch_results['map loss'] = np.ones(loss.shape) * -1
             batch_results['num loss'] = num_loss.detach().cpu().numpy()
@@ -317,17 +339,27 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             n_correct += pred.eq(target.view_as(pred)).sum().item()
             epoch_loss += loss.mean().item()
             num_epoch_loss += num_loss.mean().item()
+            if not isinstance(map_loss_to_add, int):
+                map_loss_to_add = map_loss_to_add.item()
             map_epoch_loss += map_loss_to_add
             # class-specific analysis and confusion matrix
             # c = (pred.squeeze() == target)
             for j in range(target.shape[0]):
                 label = target[j]
-                confusion_matrix[label-2, pred[j]-2] += 1
+                confusion_matrix[label-config.min_num, pred[j]-config.min_num] += 1
+        # These two lines should be the same
+        # map_epoch_loss / len(loader.dataset)
+        # test_results['map loss'].mean()
 
-        accuracy = 100. * n_correct/len(loader.dataset)
+        accuracy = 100. * (n_correct/len(loader.dataset))
         epoch_loss /= len(loader)
         num_epoch_loss /= len(loader)
-        map_epoch_loss /= len(loader)
+        # map_epoch_loss /= len(loader)
+        if config.use_loss == 'num':
+            map_epoch_loss /= len(loader)
+        else:
+            map_epoch_loss /= len(loader.dataset)
+
         return epoch_loss, num_epoch_loss, accuracy, map_epoch_loss, test_results, confusion_matrix
 
     test_results = pd.DataFrame(columns=columns)
@@ -346,104 +378,136 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
         train_acc[ep] = tr_accuracy
         train_map_loss[ep] = ep_tr_map_loss
         train_shape_loss[ep] = ep_shape_loss
+        confs = [None for _ in test_loaders]
         # Test
-        for ts, (test_loader, test_shapes) in enumerate(zip(test_loaders, config.test_shapes)):
+        shape_lum = product(config.test_shapes, config.lum_sets)
+        for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(test_loaders, shape_lum)):
             epoch_te_loss, epoch_te_num_loss, te_accuracy, epoch_te_map_loss, epoch_df, conf = test_f(test_loader, ep)
             epoch_df['train shapes'] = str(config.train_shapes)
             epoch_df['test shapes'] = str(test_shapes)
+            epoch_df['test lums'] = str(lums)
+            epoch_df['repetition'] = config.rep
 
             test_results = pd.concat((test_results, epoch_df), ignore_index=True)
             test_loss[ts][ep] = epoch_te_loss
             test_num_loss[ts][ep] = epoch_te_num_loss
             test_acc[ts][ep] = te_accuracy
             test_map_loss[ts][ep] = epoch_te_map_loss
-            base_name_test = base_name + f'_test-shapes-{test_shapes}'
+            confs[ts] = conf
+            # base_name_test = base_name + f'_test-shapes-{test_shapes}_lums-{lums}'
+            base_name_test = base_name
 
-            if not ep % 10 or ep == n_epochs - 1:
-                test_results['accuracy'] = test_results['correct'].astype(int)*100
-                data = test_results[test_results['test shapes'] == str(test_shapes)]
-                max_pass = max(data['pass count'].max(), 6)
-                data = data[data['pass count'] < max_pass]
-                ## PLOT LOSS FOR BOTH OBJECTIVES
-                fig, (ax1, ax2) = plt.subplots(1, 2)
-                sns.lineplot(data=data, x='epoch', y='num loss', hue='pass count', ax=ax1)
-                ax1.plot(train_num_loss[:ep + 1], '--', color='black', label='training loss')
-                ax1.legend()
-                ax1.set_ylabel('Number Loss')
-                mt = config.model_type + '-nosymbol' if nonsymbolic else config.model_type
-                title = f'{mt} trainon-{config.train_on} train_shapes-{config.train_shapes} \n test_shapes-{test_shapes} useloss-{config.use_loss} noise-{config.noise_level}'
-                plt.title(title)
-                ylim = ax1.get_ylim()
-                ax1.set_ylim([-0.05, ylim[1]])
-                ax1.grid()
-                # plt.savefig(f'figures/toy/test_num-loss_{base_name_test}.png', dpi=300)
-                # plt.close()
+        if not ep % 50 or ep == n_epochs - 1:
+            test_results['accuracy'] = test_results['correct'].astype(int)*100
+            # data = test_results[test_results['test shapes'] == str(test_shapes) and test_results['test lums'] == str(lums)]
+            data = test_results
+            # max_pass = max(data['pass count'].max(), 6)
+            # data = data[data['pass count'] < max_pass]
+            ## PLOT LOSS FOR BOTH OBJECTIVES
+            fig, (ax1, ax2) = plt.subplots(1, 2)
+            # sns.lineplot(data=data, x='epoch', y='num loss', hue='pass count', ax=ax1)
+            ax1.plot(train_num_loss[:ep + 1], ':', color='green', label='training loss')
+            sns.lineplot(data=data, x='epoch', y='num loss', hue='test shapes', style='test lums', ax=ax1, legend=False)
 
-                sns.lineplot(data=data, x='epoch', y='map loss', hue='pass count', ax=ax2)
-                ax2.plot(train_map_loss[:ep + 1], '--', color='black', label='training loss')
-                ax2.set_ylabel('Map Loss')
-                # plt.title(title)
-                ylim = ax2.get_ylim()
-                ax2.set_ylim([-0.05, ylim[1]])
-                ax2.grid()
-                plt.tight_layout()
-                ax2.legend()
-                plt.savefig(f'figures/toy/test-loss_{base_name_test}.png', dpi=300)
-                plt.close()
-                # sns.countplot(data=test_results[test_results['correct']==True], x='epoch', hue='pass count')
-                # plt.savefig(f'figures/toy/test_correct_{base_name}.png', dpi=300)
-                # plt.close()
+            # ax1.legend(title='Integration Difficulty')
+            ax1.set_ylabel('Number Loss')
+            mt = config.model_type + '-nosymbol' if nonsymbolic else config.model_type
+            # title = f'{mt} trainon-{config.train_on} train_shapes-{config.train_shapes} \n test_shapes-{test_shapes} useloss-{config.use_loss} lums-{lums}'
+            title = f'{mt} trainon-{config.train_on} train_shapes-{config.train_shapes}'
+            ax1.set_title(title)
+            ylim = ax1.get_ylim()
+            ax1.set_ylim([-0.05, ylim[1]])
+            ax1.grid()
+            # plt.savefig(f'figures/toy/test_num-loss_{base_name_test}.png', dpi=300)
+            # plt.close()
 
-                accuracy = data.groupby(['epoch', 'pass count']).mean()
-                sns.lineplot(data=accuracy, x='epoch', hue='pass count', y='accuracy')
-                plt.plot(train_acc[:ep + 1], '--', color='black', label='training accuracy')
-                plt.legend()
-                plt.grid()
-                plt.title(title)
-                plt.ylim([0, 102])
-                plt.ylabel('Accuracy on number task')
-                plt.savefig(f'figures/toy/accuracy_{base_name_test}.png', dpi=300)
-                plt.close()
-                acc_on_difficult = accuracy.loc[ep, 5.0]['accuracy']
-                print(f'Testset {ts}, Accuracy on level 5 difficulty: {acc_on_difficult}')
+            # sns.lineplot(data=data, x='epoch', y='map loss', hue='pass count', ax=ax2, estimator='mean')
+            ax2.plot(train_map_loss[:ep + 1], ':', color='green', label='training loss')
+            sns.lineplot(data=data, x='epoch', y='map loss', hue='test shapes', style='test lums', ax=ax2, estimator='mean')
+            ax2.set_ylabel('Map Loss')
+            # plt.title(title)
+            ylim = ax2.get_ylim()
+            ax2.set_ylim([-0.05, ylim[1]])
+            ax2.grid()
+            fig.tight_layout()
+            # ax2.legend(title='Integration Difficulty')
+            ax2.legend()
+            plt.savefig(f'figures/toy/scaled/test-loss_{base_name_test}.png', dpi=300)
+            plt.close()
+            # sns.countplot(data=test_results[test_results['correct']==True], x='epoch', hue='pass count')
+            # plt.savefig(f'figures/toy/test_correct_{base_name}.png', dpi=300)
+            # plt.close()
 
-                plt.matshow(conf)
-                plt.title(f'Number Confusion Matrix: input={config.train_on} test shapes={config.test_shapes}')
-                plt.xticks(ticks, ticklabels)
-                plt.xlabel('Predicted Class')
-                plt.ylabel('True Class')
-                plt.yticks(ticks, ticklabels)
-                plt.tight_layout()
-                plt.savefig(f'figures/toy/{base_name_test}_confusion.png', dpi=300)
-                plt.close()
+            # accuracy = data.groupby(['epoch', 'pass count']).mean()
+            accuracy = data.groupby(['epoch', 'test shapes', 'test lums']).mean()
 
+            # sns.lineplot(data=accuracy, x='epoch', hue='pass count', y='accuracy')
+            plt.plot(train_acc[:ep + 1], ':', color='green', label='training accuracy')
+            sns.lineplot(data=accuracy, x='epoch', hue='test shapes', style='test lums', y='accuracy')
+            plt.legend()
+            plt.grid()
+            plt.title(title)
+            plt.ylim([0, 102])
+            plt.ylabel('Accuracy on number task')
+            plt.savefig(f'figures/toy/scaled/accuracy_{base_name_test}.png', dpi=300)
+            plt.close()
+            # acc_on_difficult = accuracy.loc[ep, 5.0]['accuracy']
+            # print(f'Testset {ts}, Accuracy on level 5 difficulty: {acc_on_difficult}')
+
+            fig, axs = plt.subplots(2, 2, figsize=(10, 10))
+            shape_lum = product(config.test_shapes, config.lum_sets)
+            axs = axs.flatten()
+            for i, (ax, (shape, lum)) in enumerate(zip(axs, shape_lum)):
+                ax.matshow(confs[i])
+                ax.set_aspect('equal', adjustable='box')
+                ax.set_title(f'test shapes={shape} lums={lum}')
+                ax.set_xticks(ticks, ticklabels)
+                ax.set_xlabel('Predicted Class')
+                ax.set_ylabel('True Class')
+                ax.set_yticks(ticks, ticklabels)
+                # ax2 = ax.twinx()
+                # ax2.set_yticks(ticks, np.sum(confs[i], axis=1))
+            fig.tight_layout()
+            plt.savefig(f'figures/toy/scaled/confusion_{base_name_test}.png', dpi=300)
+            plt.close()
         epoch_timer.stop_timer()
         if isinstance(test_loss, list):
-            print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]} \t (Train/Val/Test) Loss={train_loss[ep]:.4}/{test_loss[0][ep]:.4}/{test_loss[1][ep]:.4} \t Accuracy={train_acc[ep]}%/{test_acc[0][ep]}%/{test_acc[1][ep]}% \t Shape loss: {train_shape_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
+            print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]:.4} \t (Train/Val/TestLum/TestShape/TestBoth) Loss={train_loss[ep]:.4}/{test_loss[0][ep]:.4}/{test_loss[1][ep]:.4}/{test_loss[2][ep]:.4}/{test_loss[3][ep]:.4} \t Accuracy={train_acc[ep]:.3}%/{test_acc[0][ep]:.3}%/{test_acc[1][ep]:.3}%/{test_acc[2][ep]:.3}%/{test_acc[3][ep]:.3}% \t Shape loss: {train_shape_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}/{test_map_loss[0][ep]:.5}/{test_map_loss[1][ep]:.5}/{test_map_loss[2][ep]:.5}/{test_map_loss[3][ep]:.5}')
         else:
-            print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]} \t (Train/Test) Loss={train_loss[ep]:.4}/{test_loss[ep]:.4}/ \t Accuracy={train_acc[ep]}%/{test_acc[ep]}% \t Shape loss: {train_shape_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
-    results_list = [train_loss, train_acc, train_map_loss, train_shape_loss, test_loss, test_acc, test_map_loss, test_results]
+            print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]:.4} \t (Train/Test) Loss={train_loss[ep]:.4}/{test_loss[ep]:.4}/ \t Accuracy={train_acc[ep]:.3}%/{test_acc[ep]:.3}% \t Shape loss: {train_shape_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
+    results_list = [train_loss, train_acc, train_num_loss, train_map_loss, train_shape_loss, test_loss, test_acc, test_num_loss, test_map_loss, confs, test_results]
     return rnn, results_list
 
 def save_dataset(fname, noise_level, size, pass_count_range, num_range, shapes_set, same):
+    "Depreceated. Datasets should be generated in advance."
     n_shapes = 10
     data = toy.generate_dataset(noise_level, size, pass_count_range, num_range, shapes_set, n_shapes, same)
     data.to_pickle(fname)
     return data
 
-def get_dataset(noise_level, size, pass_count_range, num_range, shapes_set, shape_input, same):
+def get_dataset(size, shapes_set, config, lums, solarize):
     """If specified dataset already exists, load it. Otherwise, create it.
 
     Datasets are always saved with the same time, irrespective of whether the
     dataframe contains the tetris or numeric glimpses or neither.
     """
-    min_pass_count, max_pass_count = pass_count_range
-    min_num, max_num = num_range
+    noise_level = config.noise_level
+    min_pass_count = config.min_pass
+    max_pass_count = config.max_pass
+    pass_count_range = (min_pass_count, max_pass_count)
+    min_num = config.min_num
+    max_num = config.max_num
+    num_range = (min_num, max_num)
+    shape_input = config.shape_input
+    same = config.same
+    # solarize = config.solarize
+
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}{tet}.pkl'
     # fname_notet = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}'
     samee = 'same' if same else ''
-    fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}{samee}_{size}.pkl'
-    fname_gw = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}{samee}_gw6_{size}.pkl'
+    solar = 'solarized_' if solarize else ''
+    fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}{samee}_{solar}{size}.pkl'
+    fname_gw = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}{samee}_lum{lums}_gw6_{solar}{size}.pkl'
     if os.path.exists(fname_gw):
         print(f'Loading saved dataset {fname_gw}')
         data = pd.read_pickle(fname_gw)
@@ -451,8 +515,10 @@ def get_dataset(noise_level, size, pass_count_range, num_range, shapes_set, shap
     #     print(f'Loading saved dataset {fname}')
     #     data = pd.read_pickle(fname)
     else:
-        print('Generating new dataset')
-        data = save_dataset(fname_gw, noise_level, size, pass_count_range, num_range, shapes_set, same)
+        print(f'{fname_gw} does not exist. Exiting.')
+        exit()
+        # print('Generating new dataset')
+        # data = save_dataset(fname_gw, noise_level, size, pass_count_range, num_range, shapes_set, same)
 
     # Add pseudoimage glimpses if needed but not present
     if shape_input == 'tetris' and 'tetris glimpse pixels' not in data.columns:
@@ -462,7 +528,7 @@ def get_dataset(noise_level, size, pass_count_range, num_range, shapes_set, shap
 
     return data
 
-def get_loader(dataset, train_on, cross_entropy_loss, outer, shape_format):
+def get_loader(dataset, train_on, cross_entropy_loss, outer, shape_format, model_type):
     """Prepare a torch DataLoader for the provided dataset.
 
     Other input arguments control what the input features should be and what
@@ -497,13 +563,27 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, shape_format):
             shape_label = torch.tensor(dataset['shape']).float().to(device)
             shape_input = torch.tensor(dataset['tetris glimpse pixels']).float().to(device)
         elif shape_format == 'char':
-            shape_label = torch.tensor(dataset['shape']).float().to(device)
-            shape_input = torch.tensor(dataset['char glimpse pixels']).float().to(device)
+            if 'cnn' in model_type:
+                image_array = np.stack(dataset['char image'], axis=0)
+                shape_input = torch.tensor(image_array).float().to(device)
+                shape_input = torch.unsqueeze(shape_input, 1)  # 1 channel
+            elif model_type == 'recurrent_control':
+                image_array = np.stack(dataset['char image'], axis=0)
+                nex, w, h = image_array.shape
+                image_array = image_array.reshape(nex, -1)
+                shape_input = torch.tensor(image_array).float().to(device)
+            else:
+                glimpse_array = np.stack(dataset['char glimpse pixels'], axis=0)
+                shape_input = torch.tensor(glimpse_array).float().to(device)
+            shape_array = np.stack(dataset['shape'], axis=0)
+            shape_label = torch.tensor(shape_array).float().to(device)
         else: # symbolic shape input
             shape_input = torch.tensor(dataset['shape']).float().to(device)
     if train_on == 'both' or train_on == 'xy':
-
-        xy = torch.tensor(dataset['xy']).float().to(device)
+        xy_array = np.stack(dataset['xy'], axis=0)
+        norm_xy_array = xy_array/20
+        # xy = torch.tensor(dataset['xy']).float().to(device)
+        xy = torch.tensor(norm_xy_array).float().to(device)
 
     # Create merged input (or not)
     if train_on == 'xy':
@@ -554,31 +634,69 @@ def get_model(model_type, train_on, **mod_args):
         in_sz += xy_sz * sh_sz
 
     if model_type == 'num_as_mapsum':
-        if no_symbol:
+        if shape_format == 'parametric':  #no_symbol:
             model = mod.NumAsMapsum_nosymbol(in_sz, hidden_size, output_size, **mod_args).to(device)
         else:
             model = mod.NumAsMapsum(in_sz, hidden_size, output_size, **mod_args).to(device)
-    elif model_type == 'rnn_classifier':
+    elif 'rnn_classifier' in model_type:
+        if model_type == 'rnn_classifier_par':
+            # Model with two parallel streams at the level of the map. Only one
+            # stream is optimized to match the map. The other of the same size
+            # is free, only influenced by the num loss.
+            mod_args['parallel'] = True
         if shape_format == 'parametric':  #no_symbol:
             model = mod.RNNClassifier_nosymbol(in_sz, hidden_size, output_size, **mod_args).to(device)
         else:
             model = mod.RNNClassifier(in_sz, hidden_size, output_size, **mod_args).to(device)
+    elif model_type == 'recurrent_control':
+        in_sz = 21 * 27  # Size of the images
+        model = mod.RNNClassifier(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif model_type == 'rnn_regression':
         model = mod.RNNRegression(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif model_type == 'mult':
         model = mod.MultiplicativeModel(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif model_type == 'hyper':
         model = mod.HyperModel(in_sz, hidden_size, output_size).to(device)
+    elif 'cnn' in model_type:
+        width = 21
+        height = 27
+        dropout = mod_args['dropout']
+        if model_type == 'bigcnn':
+            model = ConvNet(width, height, output_size, dropout, big=True).to(device)
+        else:
+            model = ConvNet(width, height, output_size, dropout, big=False).to(device)
     else:
         print(f'Model type {model_type} not implemented. Exiting')
         exit()
     # if small_weights:
     #     model.init_small()  # not implemented yet
+    print('Params to learn:')
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"\t {name} {param.shape}")
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f'Total number of trainable model params: {total_params}')
+
+
+
+    def count_parameters(model):
+        table = PrettyTable(["Modules", "Parameters"])
+        total_params = 0
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad: continue
+            params = parameter.numel()
+            table.add_row([name, params])
+            total_params+=params
+        print(table)
+        print(f"Total Trainable Params: {total_params}")
+        return total_params
+
+    count_parameters(model)
     return model
 
 def get_config():
     parser = argparse.ArgumentParser(description='PyTorch network settings')
-    parser.add_argument('--model_type', type=str, default='num_as_mapsum')
+    parser.add_argument('--model_type', type=str, default='num_as_mapsum', help='rnn_classifier rnn_regression num_as_mapsum cnn')
     parser.add_argument('--train_on', type=str, default='xy', help='xy, shape, or both')
     parser.add_argument('--noise_level', type=float, default=1.6)
     parser.add_argument('--train_size', type=int, default=100000)
@@ -604,6 +722,8 @@ def get_config():
     parser.add_argument('--learn_shape', action='store_true', default=False, help='for the parametric shape rep, whether to additional train to produce symbolic shape labels')
     parser.add_argument('--shape_input', type=str, default='symbolic', help='Which format to use for what pathway (symbolic, parametric, tetris, or char)')
     parser.add_argument('--same', action='store_true', default=False)
+    parser.add_argument('--solarize', action='store_true', default=False)
+    parser.add_argument('--rep', type=int, default=0)
     # parser.add_argument('--tetris', action='store_true', default=False)
     # parser.add_argument('--no_cuda', action='store_true', default=False)
     # parser.add_argument('--preglimpsed', type=str, default=None)
@@ -612,7 +732,6 @@ def get_config():
     # parser.add_argument('--drop_rnn', type=float, default=0.1)
     # parser.add_argument('--wd', type=float, default=0) # 1e-6
     # parser.add_argument('--lr', type=float, default=0.01)
-
     # parser.add_argument('--debug', action='store_true', default=False)
     # parser.add_argument('--bce', action='store_true', default=False)
     config = parser.parse_args()
@@ -626,11 +745,15 @@ def main():
     # Process input arguments
     config = get_config()
     model_type = config.model_type
-    if 'classifier' in model_type or model_type == 'detached':
-        config.cross_entropy = True
-    else:
+    if model_type == 'num_as_mapsum' or model_type == 'rnn_regression':
         config.cross_entropy = False
+    else:
+        config.cross_entropy = True
+
     train_on = config.train_on
+    if model_type == 'recurrent_control' and train_on != 'shape':
+        print('Recurrent control requires --train_on=shape (pixel inputs only)')
+        exit()
     noise_level = config.noise_level
     train_size = config.train_size
     test_size = config.test_size
@@ -652,19 +775,21 @@ def main():
     detach = '-detach' if config.detach else ''
     model_desc = f'{model_type}{alt_rnn}{detach}{act}_hsize-{config.h_size}'
     same = 'same' if config.same else ''
-    data_desc = f'num{min_num}-{max_num}_input-{train_on}{kernel}_{config.shape_input}_nl-{noise_level}_diff-{min_pass}-{max_pass}_trainshapes-{config.train_shapes}{same}_gw6_{train_size}'
+    solar = 'solarized_' if config.solarize else ''
+    data_desc = f'num{min_num}-{max_num}_input-{train_on}{kernel}_{config.shape_input}_nl-{noise_level}_diff-{min_pass}-{max_pass}_trainshapes-{config.train_shapes}{same}_gw6_{solar}{train_size}'
     # train_desc = f'loss-{use_loss}_niters-{n_iters}_{n_epochs}eps'
     withshape = '+shape' if config.learn_shape else ''
-    train_desc = f'loss-{use_loss}{withshape}_drop{drop}_{n_epochs}eps'
+    train_desc = f'loss-{use_loss}{withshape}_drop{drop}_{n_epochs}eps_rep{config.rep}'
     base_name = f'{model_desc}_{data_desc}_{train_desc}'
     if config.small_weights:
         base_name += '_small'
 
     # Prepare datasets and torch dataloaders
-    trainset = get_dataset(noise_level, train_size, pass_range, num_range, config.train_shapes, config.shape_input, config.same)
-    testsets = [get_dataset(noise_level, test_size, pass_range, num_range, test_shapes, config.shape_input, config.same) for test_shapes in config.test_shapes]
-    train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer, config.shape_input)
-    test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.shape_input) for testset in testsets]
+    config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
+    trainset = get_dataset(train_size, config.train_shapes, config, [0.0, 0.5, 1.0], solarize=config.solarize)
+    testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.test_shapes, config.lum_sets)]
+    train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type)
+    test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type) for testset in testsets]
     loaders = [train_loader, test_loaders]
 
     # Prepare model and optimizer
@@ -672,38 +797,46 @@ def main():
     mod_args = {'h_size': config.h_size, 'act': config.act,
                 'small_weights': config.small_weights, 'outer':config.outer,
                 'detach': config.detach, 'format':config.shape_input,
-                'n_classes':max_num}
+                'n_classes':max_num, 'dropout': drop}
     model = get_model(model_type, train_on, **mod_args)
     opt = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
-    scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)
+    # scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)
+    scheduler = StepLR(opt, step_size=n_epochs/20, gamma=0.7)
 
     # Train model and save trained model
     model, results = train_model(model, opt, scheduler, loaders, base_name, config)
-    torch.save(model.state_dict(), f'models/toy/toy_model_{base_name}_ep-{n_epochs}.pt')
+    torch.save(model.state_dict(), f'models/toy/scaled/toy_model_{base_name}_ep-{n_epochs}.pt')
 
     # Organize and save results
-    train_loss, train_acc, train_map_loss, train_shape_loss, test_loss, test_acc, test_map_loss, test_results = results
-    test_results.to_pickle(f'results/toy/detailed_test_results_{base_name}.pkl')
+    train_loss, train_acc, train_num_loss, train_map_loss, train_shape_loss, test_loss, test_acc, test_num_loss, test_map_loss, conf, test_results = results
+    test_results.to_pickle(f'results/toy/scaled/detailed_test_results_{base_name}.pkl')
     df_train = pd.DataFrame()
     df_test_list = [pd.DataFrame() for _ in config.test_shapes]
     df_train['loss'] = train_loss
     df_train['map loss'] = train_map_loss
+    df_train['num loss'] = train_num_loss
     df_train['shape loss'] = train_shape_loss
     df_train['accuracy'] = train_acc
     df_train['epoch'] = np.arange(n_epochs)
     df_train['rnn iterations'] = n_iters
     df_train['dataset'] = 'train'
-    for ts, test_shapes in enumerate(config.test_shapes):
+
+    for ts, (test_shapes, test_lums) in enumerate(product(config.test_shapes, config.test_lums)):
         df_test_list[ts]['loss'] = test_loss[ts]
+        df_test_list[ts]['num loss'] = test_num_loss[ts]
         df_test_list[ts]['map loss'] = test_map_loss[ts]
         df_test_list[ts]['accuracy'] = test_acc[ts]
-        df_test_list[ts]['dataset'] = f'test {test_shapes}'
+        df_test_list[ts]['dataset'] = f'test {test_shapes} {test_lums}'
+        df_test_list[ts]['test shapes'] = test_shapes
+        df_test_list[ts]['test lums'] = test_lums
         df_test_list[ts]['epoch'] = np.arange(n_epochs)
+
+    np.save(f'results/toy/scaled/confusion_{base_name}', conf)
 
     df_test = pd.concat(df_test_list)
     df_test['rnn iterations'] = n_iters
     df = pd.concat((df_train, df_test))
-    df.to_pickle(f'results/toy/toy_results_{base_name}.pkl')
+    df.to_pickle(f'results/toy/scaled/toy_results_{base_name}.pkl')
 
 
 if __name__ == '__main__':

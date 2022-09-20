@@ -73,7 +73,16 @@ np.mean(pixel_counts[5:10])
 # for char in chars:
 #     # plt.matshow(char)
 #     print(np.sum(char))
+# test_luminances = [0.2, 0.4, 0.6, 0.8, 1]
+# train_luminances = [0.1, 0.3, 0.5, 0.7, 0.9]
+test_luminances = [0.1, 0.3, 0.7, 0.9]
+train_luminances = [0, 0.5, 1]
 
+def get_solarized(image, fg_lum, bg_lum):
+    """Solarize image."""
+    dict = {0: bg_lum, 1: fg_lum}
+    solarized = np.vectorize(dict.get)(image)
+    return solarized
 
 def get_overlap(char_set):
     overlaps = []
@@ -86,7 +95,7 @@ def get_overlap(char_set):
     return avg
 
 
-def add_char_glimpses(data, glim_wid=6):
+def add_char_glimpses(data, glim_wid=6, solarize=True, lums=[0, 1, 0.5]):
     """Synthesize and glimpse small image of pixel corners.
 
     The image is a 12 by 12 grid (+ a 2 pixel border). The 9 possible object
@@ -107,12 +116,13 @@ def add_char_glimpses(data, glim_wid=6):
     input instead of the existing xy and shape column, used in previous
     experiments.
     """
+    # lums = test_luminances if len(data) < 10000 else train_luminances
     char_width = 3
     char_height = 5
     pixel_height = 7*3
     pixel_width = 5*3
 
-    i=0
+    # i=0
     data['char glimpse coords'] = None
     data['char glimpse pixels'] = None
     data['char image'] = None
@@ -130,6 +140,7 @@ def add_char_glimpses(data, glim_wid=6):
 
         char_similarity = get_overlap(char_set)
         data.at[i, 'char overlap'] = char_similarity
+
         # Insert the specified shapes into the image at the specified locations
         image = np.zeros((pixel_height, pixel_width))
         # plt.matshow(image, origin='lower')
@@ -146,15 +157,15 @@ def add_char_glimpses(data, glim_wid=6):
 
         # Convert glimpse coordinates to pixel coordinates
         scaled_glimpse_coords = row.xy
-        scaled_glimpse_coords[:,0] = scaled_glimpse_coords[:,0]*pixel_width
-        scaled_glimpse_coords[:,1] = scaled_glimpse_coords[:,1]*pixel_height
+        scaled_glimpse_coords[:, 0] = scaled_glimpse_coords[:, 0]*pixel_width
+        scaled_glimpse_coords[:, 1] = scaled_glimpse_coords[:, 1]*pixel_height
         glimpse_coords = np.round(row.xy).astype(int)
 
         # plt.matshow(image, origin='upper')
         # plt.scatter(glimpse_coords[:,0], glimpse_coords[:,1], color='red')
         # plt.scatter(scaled_glimpse_coords[:,0], scaled_glimpse_coords[:,1], color='green')
 
-        # Add border of 2 pixels so all gimpses are the same size
+        # Add border of half_glim pixels so all gimpses are the same size
         # glim_wid = 6
         half_glim = glim_wid//2
         border = half_glim
@@ -162,15 +173,21 @@ def add_char_glimpses(data, glim_wid=6):
         image_wbord[half_glim:-half_glim,half_glim:-half_glim] = image
         # plt.matshow(image_wbord, origin='upper')
         glimpse_coords += half_glim
+
+        # Optionaly solarize the image
+        if solarize:
+            fg, bg = np.random.choice(lums, size=2, replace=False)
+            image_wbord = get_solarized(image_wbord, fg, bg)
+
         # Extract glimpse pixels
         glimpse_pixels = [image_wbord[y-half_glim:y+half_glim, x-half_glim:x+half_glim].flatten() for x,y in glimpse_coords]
         glimpse_pixels[0].shape
         # Store glimpse data and image in the original dataframe
-        data.at[i,'char glimpse pixels'] = glimpse_pixels
-        data.at[i,'char glimpse coords'] = glimpse_coords
-        data.at[i,'char image'] = image_wbord
+        data.at[i, 'char glimpse pixels'] = glimpse_pixels
+        data.at[i, 'char glimpse coords'] = glimpse_coords
+        data.at[i, 'char image'] = image_wbord
 
-        glimpse_pixels_to_plot = [image_wbord[y-half_glim:y+half_glim, x-half_glim:x+half_glim]for x,y in glimpse_coords]
+        # glimpse_pixels_to_plot = [image_wbord[y-half_glim:y+half_glim, x-half_glim:x+half_glim]for x,y in glimpse_coords]
 
         # bounding = [plt.Rectangle((x-half_glim-0.5, y-half_glim-0.5), glim_wid, glim_wid, fc='none',ec="red") for x,y in glimpse_coords]
         # plt.matshow(glimpse_pixels_to_plot[0], origin='upper')
@@ -204,25 +221,28 @@ def main():
     parser.add_argument('--min_num', type=int, default=2)
     parser.add_argument('--max_num', type=int, default=7)
     parser.add_argument('--shapes', type=list, default=[0, 1, 2, 3, 5, 6, 7, 8])
+    parser.add_argument('--luminances', nargs='*', type=float, default=[0, 0.5, 1], help='at least two values between 0 and 1')
     parser.add_argument('--noise_level', type=float, default=1.7)
     parser.add_argument('--size', type=int, default=100)
     parser.add_argument('--n_shapes', type=int, default=10, help='How many shapes to the relevant training and test sets span?')
     parser.add_argument('--glimpse_wid', type=int, default=6, help='How many pixels wide and tall should glimpses be?')
     parser.add_argument('--same', action='store_true', default=False)
+    parser.add_argument('--solarize', action='store_true', default=False)
     conf = parser.parse_args()
     conf.shapes = [int(i) for i in conf.shapes]
     same = 'same' if conf.same else ''
-    fname_gw = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{conf.shapes}{same}_gw{conf.glimpse_wid}_{conf.size}.pkl'
+    solar = 'solarized_' if conf.solarize else ''
+    fname_gw = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{conf.shapes}{same}_lum{conf.luminances}_gw{conf.glimpse_wid}_{solar}{conf.size}.pkl'
     fname = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{conf.shapes}{same}_{conf.size}.pkl'
     if os.path.exists(fname):
         print(f'Loading saved dataset {fname}')
         data = pd.read_pickle(fname)
     else:
         print('Generating new dataset')
-        data = toy.generate_dataset(conf.noise_level, conf.size, (conf.min_pass, conf.max_pass), (conf.min_num, conf.max_num), conf.shapes, conf.n_shapes, conf.same)
+        data = toy.generate_dataset(conf)
         data.to_pickle(fname)
 
-    data = add_char_glimpses(data, conf.glimpse_wid)
+    data = add_char_glimpses(data, conf.glimpse_wid, conf.solarize, conf.luminances)
     # fname = f'toysets/toy_dataset_nl-{noise_level}_diff-{min_pass_count}-{max_pass_count}_{shapes_set}_{size}_tetris.pkl'
     print(f'Saving {fname_gw}')
     data.to_pickle(fname_gw)

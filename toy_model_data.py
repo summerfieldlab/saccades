@@ -340,14 +340,26 @@ class GlimpsedImage():
         self.count = len(self.filled_locations)
 
 
-def generate_one_example(noise_level, pass_count_range, num_range, shapes_set, n_shapes, same):
+# def generate_one_example(num, noise_level, pass_count_range, num_range, shapes_set, n_shapes, same):
+def generate_one_example(num, config):
+    noise_level = config.noise_level
+    min_pass_count = config.min_pass
+    max_pass_count = config.max_pass
+    num_low = config.min_num
+    num_high = config.max_num
+    shapes_set = config.shapes
+    n_shapes = config.n_shapes
+    same = config.same
     """Synthesize a single sequence and determine numerosity."""
     # Synthesize glimpses - paired observations of xy and shape coordinates
     max_dist = np.sqrt((noise_level*0.1)**2 + (noise_level*0.1)**2)
-    min_pass_count, max_pass_count = pass_count_range
-    num_low, num_high = num_range
-    num = random.randrange(num_low, num_high + 1)
+    # min_pass_count, max_pass_count = pass_count_range
+    # num_low, num_high = num_range
+    # num = random.randrange(num_low, num_high + 1)
     final_pass_count = -1
+    # This loop will continue synthesizing examples until it finds one within
+    # the desired pass count range. The numerosity is determined before hand so
+    # that limiting the pass count doesn't bias the distribution of numerosities
     while final_pass_count < min_pass_count or final_pass_count > max_pass_count:
         xy_coords, objects, noiseless_coords = get_xy_coords(num, noise_level, num_high)
         shape_coords, shape_map, shape_hist = get_shape_coords(xy_coords, objects, noiseless_coords, max_dist, shapes_set, n_shapes, same)
@@ -401,10 +413,16 @@ def generate_one_example(noise_level, pass_count_range, num_range, shapes_set, n
     return example_dict
 
 
-def generate_dataset(noise_level, n_examples, pass_count_range, num_range, shapes_set, n_shapes, same):
+# def generate_dataset(noise_level, n_examples, pass_count_range, num_range, shapes_set, n_shapes, same):
+def generate_dataset(config):
     """Fill data frame with toy examples."""
-
-    data = [generate_one_example(noise_level, pass_count_range, num_range, shapes_set, n_shapes, same) for _ in range(n_examples)]
+    # numbers = np.arange(num_range[0], num_range[1] + 1)
+    numbers = np.arange(config.min_num, config.max_num + 1)
+    n_examples = config.size
+    n_repeat = np.ceil(n_examples/len(numbers)).astype(int)
+    nums = np.tile(numbers, n_repeat)
+    # data = [generate_one_example(nums[i], noise_level, pass_count_range, num_range, shapes_set, n_shapes, same) for i in range(n_examples)]
+    data = [generate_one_example(nums[i], config) for i in range(n_examples)]
     df = pd.DataFrame(data)
     # df['pass count'].hist()
     # df[df['unresolved ambiguity'] == True]
