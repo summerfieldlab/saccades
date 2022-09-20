@@ -811,7 +811,7 @@ def main():
     train_loss, train_acc, train_num_loss, train_map_loss, train_shape_loss, test_loss, test_acc, test_num_loss, test_map_loss, conf, test_results = results
     test_results.to_pickle(f'results/toy/scaled/detailed_test_results_{base_name}.pkl')
     df_train = pd.DataFrame()
-    df_test_list = [pd.DataFrame() for _ in config.test_shapes]
+    df_test_list = [pd.DataFrame() for _ in range(len(test_loss))]
     df_train['loss'] = train_loss
     df_train['map loss'] = train_map_loss
     df_train['num loss'] = train_num_loss
@@ -820,15 +820,15 @@ def main():
     df_train['epoch'] = np.arange(n_epochs)
     df_train['rnn iterations'] = n_iters
     df_train['dataset'] = 'train'
-
-    for ts, (test_shapes, test_lums) in enumerate(product(config.test_shapes, config.test_lums)):
+    import pdb;pdb.set_trace()
+    for ts, (test_shapes, test_lums) in enumerate(product(config.test_shapes, config.lum_sets)):
         df_test_list[ts]['loss'] = test_loss[ts]
         df_test_list[ts]['num loss'] = test_num_loss[ts]
         df_test_list[ts]['map loss'] = test_map_loss[ts]
         df_test_list[ts]['accuracy'] = test_acc[ts]
         df_test_list[ts]['dataset'] = f'test {test_shapes} {test_lums}'
-        df_test_list[ts]['test shapes'] = test_shapes
-        df_test_list[ts]['test lums'] = test_lums
+        df_test_list[ts]['test shapes'] = str(test_shapes)
+        df_test_list[ts]['test lums'] = str(test_lums)
         df_test_list[ts]['epoch'] = np.arange(n_epochs)
 
     np.save(f'results/toy/scaled/confusion_{base_name}', conf)
