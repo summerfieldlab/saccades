@@ -19,6 +19,7 @@ from functools import reduce
 from matplotlib import pyplot as plt
 import matplotlib as mpl
 from sklearn.metrics import roc_auc_score, f1_score, r2_score
+from skimage.measure import block_reduce
 # from torchmetrics import R2Score
 # import pandas as pd
 # import seaborn as sns
@@ -57,13 +58,13 @@ class Timer():
 
 def train_two_step_model(model, optimizer, config, scheduler=None):
     """Main train/test loop."""
-    if 'detached' in config.use_loss:
-        assert isinstance(optimizer, list)
-        opt_rnn, opt_readout = optimizer
-        scheduler_rnn, scheduler_readout = scheduler
+    # if 'detached' in config.use_loss:
+    #     assert isinstance(optimizer, list)
+    #     opt_rnn, opt_readout = optimizer
+    #     scheduler_rnn, scheduler_readout = scheduler
 
     print('Two step model...')
-
+    nclasses = 6
     n_epochs = config.n_epochs
     device = config.device
     differential = config.differential
@@ -131,12 +132,14 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
     valid_map_losses = np.zeros((n_epochs,))
     valid_map_auc = np.zeros((n_epochs,))
     valid_map_f1 = np.zeros((n_epochs,))
+    valid_conf_mats = np.zeros((n_epochs, nclasses, nclasses))
     test_optimised_losses = np.zeros((n_epochs,))
     test_numb_losses = np.zeros((n_epochs,))
     test_numb_accs = np.zeros((n_epochs,))
     test_map_losses = np.zeros((n_epochs,))
     test_map_auc = np.zeros((n_epochs,))
     test_map_f1 = np.zeros((n_epochs,))
+    test_conf_mats = np.zeros((n_epochs, nclasses, nclasses))
 
     # Where to save the results
     nonlinearity = config.rnn_act + '_' if config.rnn_act is not None else ''
@@ -146,9 +149,9 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
         filename = f'two_step_results_{control}'
     else:
         if use_loss == 'map_then_both':
-            filename = f'{model_version}{pretrained}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}-hardthresh{sched}_lr{config.lr}_wd{config.wd}_dr-rnn{drop_rnn}_dr-ro{drop_readout}_tanhrelu_rand_trainon-{config.train_on}'
+            filename = f'{model_version}{pretrained}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}-hardthresh{sched}_lr{config.lr}_wd{config.wd}_dr-rnn{drop_rnn}_dr-ro{drop_readout}_rand_trainon-{config.train_on}'
         else:
-            filename = f'{model_version}{pretrained}_{nonlinearity}results_mapsz{model.map_size}_loss-{use_loss}{sched}_lr{config.lr}_wd{config.wd}_dr-rnn{drop_rnn}_dr-ro{drop_readout}_tanhrelu_rand_trainon-{config.train_on}'
+            filename = f'{model_version}{pretrained}_{nonlinearity}results_mapsz{model.map_size}_hsize-{model.hidden_size}_loss-{use_loss}{sched}_lr{config.lr}_wd{config.wd}_dr-rnn{drop_rnn}_dr-ro{drop_readout}_trainon-{config.train_on}'
     if preglimpsed is not None:
         filename += '_' + preglimpsed
     if eye_weight:
@@ -203,7 +206,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 loss = map_loss
             elif 'number' in use_loss:
                 loss = number_loss
-            elif use_loss == 'both':
+            elif 'both' in use_loss:  # == 'both':
                 loss = map_loss + number_loss
             elif use_loss == 'map_then_both':
                 if ep > 0 and (map_f1[ep - 1] > 0.5 or ep > n_epochs / 2):
@@ -233,25 +236,25 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 else:
                     loss = map_loss
 
-            elif use_loss == 'both-detached':
-                # model.train_readout()
-
-                map_loss.backward(retain_graph=True)
-                # model.train_rnn()
-                # Verify that gradients are localized
-                # for n, p in model.named_parameters():
-                #     print(f'{n}:')
-                #     if p.requires_grad and p.grad is not None:
-                #         print(f'{p.grad.abs().mean()}')
-                number_loss.backward()
-                # Gradient clipping
-                nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
-                # Take a gradient step
-                opt_readout.step()
-                opt_rnn.step()
-                # loss = map_loss + number_loss
-                # model.train()
-                loss = map_loss + number_loss
+            # elif use_loss == 'both-detached':
+            #     # model.train_readout()
+            #
+            #     map_loss.backward(retain_graph=True)
+            #     # model.train_rnn()
+            #     # Verify that gradients are localized
+            #     # for n, p in model.named_parameters():
+            #     #     print(f'{n}:')
+            #     #     if p.requires_grad and p.grad is not None:
+            #     #         print(f'{p.grad.abs().mean()}')
+            #     number_loss.backward()
+            #     # Gradient clipping
+            #     nn.utils.clip_grad_norm_(model.parameters(), clip_grad_norm)
+            #     # Take a gradient step
+            #     opt_readout.step()
+            #     opt_rnn.step()
+            #     # loss = map_loss + number_loss
+            #     # model.train()
+            #     loss = map_loss + number_loss
             elif use_loss == 'number-detached':
                 number_loss.backward()
                 # Gradient clipping
@@ -289,14 +292,14 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
 
         if config.use_schedule:
-            if 'detached' in use_loss:
-                # decrease number loss twice as slow? not sure? basically guessing first 2000 for map next 2000 for map, don't want learning rate to be too small for number weights to learn
-                readout_scheduler_rate = 1 if config.pretrained_map else 2
-                if (add_number_loss or (use_loss == 'both') or (use_loss == 'both-detached') or ('number' in use_loss)):  #and ep % readout_scheduler_rate:
-                    scheduler_readout.step()
-                scheduler_rnn.step()
-            else:
-                scheduler.step()
+            # if 'detached' in use_loss:
+            #     # decrease number loss twice as slow? not sure? basically guessing first 2000 for map next 2000 for map, don't want learning rate to be too small for number weights to learn
+            #     readout_scheduler_rate = 1 if config.pretrained_map else 2
+            #     if (add_number_loss or (use_loss == 'both') or (use_loss == 'both-detached') or ('number' in use_loss)):  #and ep % readout_scheduler_rate:
+            #         scheduler_readout.step()
+            #     scheduler_rnn.step()
+            # else:
+            scheduler.step()
         # Evaluate performance
         train_loss /= len(loader)
         map_train_loss /= len(loader)
@@ -307,10 +310,11 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
 
         if use_loss != 'number' and not ep % 10:
             # Make figure
+
             fig, axs = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(10, 10))
-            im = axs[0, 0].imshow(inputs[-1, :, :config.map_size].sum(axis=0).detach().cpu().view(width, width), vmin=0)
-            axs[0, 0].set_title('Input Gaze (unsequenced)')
-            plt.colorbar(im, ax=axs[0,0], orientation='horizontal')
+            # im = axs[0, 0].imshow(inputs[-1, :, :config.map_size].sum(axis=0).detach().cpu().view(width, width), vmin=0)
+            # axs[0, 0].set_title('Input Gaze (unsequenced)')
+            # plt.colorbar(im, ax=axs[0,0], orientation='horizontal')
 
             im1 = axs[1, 0].imshow(map_local[-1, :].detach().cpu().view(width, width))
             axs[1, 0].set_title(f'Predicted Map (Predicted number: {pred[-1].item()}, Number acc: {numb_acc:.3})')
@@ -321,8 +325,9 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             # axs[0, 1].set_title(f'Sigmoid(Predicted Map) AUC={auc:.3} F1={f1:.3}')
             # plt.colorbar(im2, ax=axs[0,1], orientation='horizontal')
 
-            im2 = axs[0, 1].imshow(torch.tanh(torch.relu(map_local[-1, :])).detach().cpu().view(width, width))
-            axs[0, 1].set_title(f'Tanh(Relu(Predicted Map)) AUC={auc:.3} F1={f1:.3}')
+            # im2 = axs[0, 1].imshow(torch.tanh(torch.relu(map_local[-1, :])).detach().cpu().view(width, width))
+            im2 = axs[0, 1].imshow(torch.sigmoid(map_local[-1, :]).detach().cpu().view(width, width))
+            axs[0, 1].set_title(f'Sigmoid(Predicted Map) AUC={auc:.3} F1={f1:.3}')
             plt.colorbar(im2, ax=axs[0,1], orientation='horizontal')
 
             im3 = axs[1, 1].imshow(map_label_local[-1, :].detach().cpu().view(width, width), vmin=0, vmax=1)
@@ -342,6 +347,10 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
         train_loss = 0
         map_train_loss = 0
         number_train_loss = 0
+        class_correct = [0. for i in range(nclasses)]
+        class_total = [0. for i in range(nclasses)]
+        classes = [0. for i in range(nclasses)]
+        confusion_matrix = np.zeros((nclasses, nclasses))
         with torch.no_grad():
             for batch_idx, (inputs, map_label, numb_label) in enumerate(loader):
                 input_dim = inputs.shape[0]
@@ -401,6 +410,13 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 f1 += f1_score(map_label_flat, sigout.cpu().flatten())
                 pred = numb_local.argmax(dim=1, keepdim=True)
                 n_correct += pred.eq(numb_label.view_as(pred)).sum().item()
+                # class-specific analysis and confusion matrix
+                c = (pred.squeeze() == numb_label)
+                for i in range(c.shape[0]):
+                    label = numb_label[i]
+                    class_correct[label-2] += c[i].item()
+                    class_total[label-2] += 1
+                    confusion_matrix[label-2, pred[i]-2] += 1
             # Evaluate performance
             train_loss /= len(loader)
             map_train_loss /= len(loader)
@@ -412,9 +428,9 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             if use_loss != 'number' and not ep % 10:
                 # Make figure
                 fig, axs = plt.subplots(2, 2, sharex=True, sharey=True, figsize=(10, 10))
-                im = axs[0, 0].imshow(inputs[-1, :, :config.map_size].sum(axis=0).detach().cpu().view(width, width), vmin=0)
-                axs[0, 0].set_title('Input Gaze (unsequenced)')
-                plt.colorbar(im, ax=axs[0,0], orientation='horizontal')
+                # im = axs[0, 0].imshow(inputs[-1, :, :config.map_size].sum(axis=0).detach().cpu().view(width, width), vmin=0)
+                # axs[0, 0].set_title('Input Gaze (unsequenced)')
+                # plt.colorbar(im, ax=axs[0,0], orientation='horizontal')
 
                 im1 = axs[1, 0].imshow(map_local[-1, :].detach().cpu().view(width, width))
                 axs[1, 0].set_title(f'Predicted Map (Predicted number: {pred[-1].item()}, Number acc: {numb_acc:.3})')
@@ -425,8 +441,9 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 # axs[0, 1].set_title(f'Sigmoid(Predicted Map) AUC={auc:.3} F1={f1:.3}')
                 # plt.colorbar(im2, ax=axs[0,1], orientation='horizontal')
 
-                im2 = axs[0, 1].imshow(torch.tanh(torch.relu(map_local[-1, :])).detach().cpu().view(width, width))
-                axs[0, 1].set_title(f'Tanh(Relu(Predicted Map)) AUC={auc:.3} F1={f1:.3}')
+                # im2 = axs[0, 1].imshow(torch.tanh(torch.relu(map_local[-1, :])).detach().cpu().view(width, width))
+                im2 = axs[0, 1].imshow(torch.sigmoid(map_local[-1, :]).detach().cpu().view(width, width))
+                axs[0, 1].set_title(f'Sigmoid(Predicted Map) AUC={auc:.3} F1={f1:.3}')
                 plt.colorbar(im2, ax=axs[0,1], orientation='horizontal')
 
                 im3 = axs[1, 1].imshow(map_label_local[-1, :].detach().cpu().view(width, width), vmin=0, vmax=1)
@@ -435,7 +452,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 # plt.show()
                 plt.savefig(f'figures/predicted_maps/{filename}_ep{ep}_{which_set}.png', bbox_inches='tight', dpi=200)
                 plt.close()
-        return train_loss, number_train_loss, map_train_loss, numb_acc, auc, f1
+        return train_loss, number_train_loss, map_train_loss, numb_acc, auc, f1, confusion_matrix
 
     add_number_loss = False
     for ep in range(n_epochs):
@@ -445,8 +462,8 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             print(f'Epoch {ep}, Learning rate: {optimizer.param_groups[0]["lr"]}')
 
         train_loss, train_num_loss, train_map_loss, train_num_acc, train_auc, train_f1, add_number_loss = train(train_loader, ep, add_number_loss)
-        val_loss, val_num_loss, val_map_loss, val_num_acc, val_auc, val_f1 = test(valid_loader, add_number_loss, which_set='valid')
-        test_loss, test_num_loss, test_map_loss, test_num_acc, test_auc, test_f1 = test(test_loader, add_number_loss, which_set='test')
+        val_loss, val_num_loss, val_map_loss, val_num_acc, val_auc, val_f1, val_conf_mat = test(valid_loader, add_number_loss, which_set='valid')
+        test_loss, test_num_loss, test_map_loss, test_num_acc, test_auc, test_f1, te_conf_mat = test(test_loader, add_number_loss, which_set='test')
 
         optimised_losses[ep] = train_loss
         numb_losses[ep] = train_num_loss
@@ -460,12 +477,15 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
         valid_map_losses[ep] = val_map_loss
         valid_map_auc[ep] = val_auc
         valid_map_f1[ep] = val_f1
+        valid_conf_mats[ep, :, :] = val_conf_mat
         test_optimised_losses[ep] = test_loss
         test_numb_losses[ep] = test_num_loss
         test_numb_accs[ep] = test_num_acc
         test_map_losses[ep] = test_map_loss
         test_map_auc[ep] = test_auc
         test_map_f1[ep] = test_f1
+        test_conf_mats[ep, :, :] = te_conf_mat
+
 
         pct_done = round(100. * (ep / n_epochs))
         if not ep % 5:
@@ -494,7 +514,9 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                      test_numb_acc=test_numb_accs,
                      test_map_loss=test_map_losses,
                      test_map_auc=test_map_auc,
-                     test_map_f1=test_map_f1)
+                     test_map_f1=test_map_f1,
+                     valid_conf_mat=valid_conf_mats,
+                     test_conf_mat=test_conf_mats)
             torch.save(model, f'models/{filename}.pt')
             # Plot performance
             kwargs_train = {'alpha': 0.8, 'color': 'blue'}
@@ -502,7 +524,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             kwargs_test = {'alpha': 0.8, 'color': 'red'}
             row, col = 2, 3
             fig, ax = plt.subplots(row, col, figsize=(6*col, 6*row))
-            plt.suptitle(f'{config.model_version}, nonlin={config.rnn_act}, loss={config.use_loss}, dr-rnn={config.drop_rnn}, dr-ro={config.drop_readout} \n tanh(relu(map)), seq not shuffled, pos_weight=130-4.5/4.5 \n {preglimpsed}',fontsize=20)
+            plt.suptitle(f'{config.model_version}, nonlin={config.rnn_act}, loss={config.use_loss}, dr-rnn={config.drop_rnn}, dr-ro={config.drop_readout} \n seq not shuffled, pos_weight=130-4.5/4.5 \n {preglimpsed}',fontsize=20)
             ax[0,0].set_title('Number Loss')
             ax[0,0].plot(test_numb_losses[:ep+1], label='test number loss', **kwargs_test)
             ax[0,0].plot(valid_numb_losses[:ep+1], label='valid number loss', **kwargs_val)
@@ -516,6 +538,7 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
             ax[0,1].plot(test_numb_accs[:ep+1], label='test number acc', **kwargs_test)
             ax[0,1].plot(valid_numb_accs[:ep+1], label='valid number acc', **kwargs_val)
             ax[0,1].plot(numb_accs[:ep+1], label='train number acc', **kwargs_train)
+
             ax[1,1].set_title('Map AUC')
             ax[1,1].set_ylim([0.45, 1])
             ax[1,1].plot(test_map_auc[:ep+1], label='test map auc', **kwargs_test)
@@ -529,7 +552,14 @@ def train_two_step_model(model, optimizer, config, scheduler=None):
                 axes.legend()
                 axes.grid(linestyle='--')
                 axes.set_xlabel('Epochs')
-            ax[0, 2].axis('off')
+            # ax[0, 2].axis('off')
+            ax[0,2].set_title('Number Confusion Matrix (Test)')
+            ax[0,2].matshow(te_conf_mat)
+            ax[0,2].set_xticks([0, 1, 2, 3, 4, 5], ['2', '3', '4', '5', '6', '7'])
+            ax[0,2].set_xlabel('Predicted Class')
+            ax[0,2].set_ylabel('True Class')
+            ax[0,2].set_yticks([0, 1, 2, 3, 4, 5], ['2', '3', '4', '5', '6', '7'])
+            plt.tight_layout()
             plt.savefig(f'figures/{filename}_results.png', dpi=300)
             plt.close()
 
@@ -1593,23 +1623,36 @@ def get_min_data(preglimpsed, train_on, device=None):
         min_shape = torch.from_numpy(min_shape).long()
         min_shape = min_shape.to(device)
         if train_on == 'loc':
-            gaze = np.load(f'{dir}gazes_{preglimpsed}.npy')
+            # gaze = np.load(f'{dir}gazes_{preglimpsed}.npy')
+            gaze = np.load(f'{dir}xy_{preglimpsed}.npy')
             gaze = torch.from_numpy(gaze).float()
             gaze = gaze.to(device)
-            data = gaze
+            input = gaze
         elif train_on == 'pix':
             pix = np.load(f'{dir}pix_{preglimpsed}.npy')
             pix = torch.from_numpy(pix).float()
             pix = pix.to(device)
-            data = pix
+            input = pix
         elif train_on == 'both':
-            gaze = np.load(f'{dir}gazes_{preglimpsed}.npy')
+            # gaze = np.load(f'{dir}gazes_{preglimpsed}.npy')
+            gaze = np.load(f'{dir}xy_{preglimpsed}.npy')
             pix = np.load(f'{dir}pix_{preglimpsed}.npy')
-            data = np.concatenate((gaze, pix), axis=2)
-            data = torch.from_numpy(data).float()
-            data = data.to(device)
-
+            # Repeating the xy inputs didn't seem to help to get rid of it.
+            # ex, seq, npix = pix.shape
+            # nreps = npix//2
+            # gaze_repeat = np.repeat(gaze, nreps, axis=2)
+            # input = np.concatenate((gaze_repeat, pix), axis=2)
+            input = np.concatenate((gaze, pix), axis=2)
+            input = torch.from_numpy(input).float()
+            input = input.to(device)
         map_ = np.load(f'{dir}map_{preglimpsed}.npy')
+        ex, wxh = map_.shape
+        width = np.sqrt(wxh).astype(int)
+        map_2d = map_.reshape(ex, width, width)
+        # Downsample to the size of the grid on which objects were synthesized
+        # From (30*30)900 to (10*10)100
+        map_ = block_reduce(map_2d, block_size=(1, 3, 3), cval=0, func=np.max)
+        map_ = map_.reshape(ex, -1)
         map_ = torch.from_numpy(map_).float()
         map_ = map_.to(device)
 
@@ -1628,7 +1671,7 @@ def get_min_data(preglimpsed, train_on, device=None):
             # data = torch.from_numpy(data).float()
             # data = data.to(device)
 
-    return data, num, shape, map_, min_num, min_shape
+    return input, num, shape, map_, min_num, min_shape
 
 def get_data(seq_len=7, n_classes=7, map_size=1056, device=None, preglimpsed=None):
     """Synthesize data for unique task.
@@ -1889,12 +1932,21 @@ def main(config):
     kwargs = {'act': rnn_act, 'eye_weight': eye_weight, 'detached': detached,
               'drop_rnn': config.drop_rnn, 'drop_readout': config.drop_readout,
               'rotate': config.rotate, 'device': config.device}
+    pixel_w = config.glimpse_width
+    pixel_size = (2*pixel_w)*pixel_w
+
+
     if config.train_on == 'pix':
-        input_size = 1152
+        # input_size = 1152
+        input_size = pixel_size
     elif config.train_on == 'loc':
-        input_size = map_size
+        # input_size = map_size
+        input_size = 2
     elif config.train_on == 'both':
-        input_size = map_size + 1152
+        # input_size = map_size + 1152
+        # loc_size = (pixel_size//2)*2
+        loc_size = 2
+        input_size = pixel_size + loc_size
     hidden_size = int(np.round(input_size*1.1))
     # hidden_size = map_size*2
     if model_version == 'two_step':
@@ -1940,6 +1992,9 @@ def main(config):
     elif model_version == 'shape':
         hidden_size = int(120*1.1)
         model = models.ShapeModel(hidden_size, **kwargs)
+    elif model_version == 'map_readout':
+        hidden_size = int(1000)
+        model = models.MapReadoutModel(input_size, hidden_size, map_size, numb_size, **kwargs)
     else:
         print('Model version not implemented.')
         exit()
@@ -1974,23 +2029,23 @@ def main(config):
         # Can decay lr quicker when starting with the rnn weights pretrained
         scale = 0.9955 if config.pretrained_map else 0.9978
         # 0.8 ** 200
-        if 'detached' in use_loss:
-            opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=start_lr, momentum=mom, weight_decay=wd_rnn)
-            if 'two' in model_version or model_version == 'integrated':
-                opt_readout = torch.optim.SGD(model.readout.parameters(), lr=start_lr, momentum=mom, weight_decay=wd_readout)
-            elif 'three' in model_version:
-                readout_params = [{'params': model.readout1.parameters()}, {'params':model.readout2.parameters()}]
-                opt_readout = torch.optim.SGD(readout_params, lr=start_lr, momentum=mom, weight_decay=wd_readout)
-            lambda1 = lambda epoch: scale ** epoch
-            scheduler_rnn = torch.optim.lr_scheduler.LambdaLR(opt_rnn, lr_lambda=lambda1)
-            scheduler_readout = torch.optim.lr_scheduler.LambdaLR(opt_readout, lr_lambda=lambda1)
-            opt = [opt_rnn, opt_readout]
-            scheduler = [scheduler_rnn, scheduler_readout]
-        else:
-            opt = torch.optim.SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
-            lambda1 = lambda epoch: scale ** epoch
-            # scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lambda1)
-            scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=config.n_epochs/10, gamma=0.5)
+        # if 'detached' in use_loss:
+        #     opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=start_lr, momentum=mom, weight_decay=wd_rnn)
+        #     if 'two' in model_version or model_version == 'integrated':
+        #         opt_readout = torch.optim.SGD(model.readout.parameters(), lr=start_lr, momentum=mom, weight_decay=wd_readout)
+        #     elif 'three' in model_version:
+        #         readout_params = [{'params': model.readout1.parameters()}, {'params':model.readout2.parameters()}]
+        #         opt_readout = torch.optim.SGD(readout_params, lr=start_lr, momentum=mom, weight_decay=wd_readout)
+        #     lambda1 = lambda epoch: scale ** epoch
+        #     scheduler_rnn = torch.optim.lr_scheduler.LambdaLR(opt_rnn, lr_lambda=lambda1)
+        #     scheduler_readout = torch.optim.lr_scheduler.LambdaLR(opt_readout, lr_lambda=lambda1)
+        #     opt = [opt_rnn, opt_readout]
+        #     scheduler = [scheduler_rnn, scheduler_readout]
+        # else:
+        opt = torch.optim.SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
+        lambda1 = lambda epoch: scale ** epoch
+        # scheduler = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda=lambda1)
+        scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=config.n_epochs/10, gamma=0.5)
     else:
         if 'detached' in use_loss:
             opt_rnn = torch.optim.SGD(model.rnn.parameters(), lr=lr, momentum=mom, weight_decay=wd_rnn)
@@ -2026,11 +2081,11 @@ def main(config):
         # plt.plot(lrs_exp, label='exponential')
         # plt.legend()
 
-    if 'two' in model_version or 'three' in model_version or model_version=='integrated':
+    # if 'two' in model_version or 'three' in model_version or model_version=='integrated':
         # train_two_step_model(model, opt, n_epochs, device, differential,
         #                      use_loss, model_version, preglimpsed=preglimpsed, eye_weight=eye_weight)
-        train_two_step_model(model, opt, config, scheduler)
-    elif 'cheat' in model_version:
+
+    if 'cheat' in model_version:
         train_nomap_model(model, opt, config, scheduler)
     elif model_version == 'distinctive' or model_version == 'pixel+shape' or model_version == 'shape':
         train_shape_number(model, opt, config, scheduler)
@@ -2042,6 +2097,8 @@ def main(config):
     elif model_version == 'number_as_sum':
         # train_sum_model(model, opt, n_epochs, device, model_version, use_loss)
         train_sum_model(model, opt, config)
+    else:
+        train_two_step_model(model, opt, config, scheduler)
 
     # plt.plot(num_acc, label='number')
     # plt.plot(map_acc, label='')
@@ -2062,6 +2119,7 @@ def get_config():
     parser.add_argument('--model_version', type=str, default='two_step')
     parser.add_argument('--use_loss', type=str, default='both')
     parser.add_argument('--map_size', type=int, default=15)
+    parser.add_argument('--glimpse_width', type=int, default=16)
     parser.add_argument('--rnn_act', type=str, default=None)
     parser.add_argument('--no_cuda', action='store_true', default=False)
     parser.add_argument('--preglimpsed', type=str, default=None)
@@ -2077,6 +2135,7 @@ def get_config():
     parser.add_argument('--rotate', action='store_true', default=False)
     parser.add_argument('--debug', action='store_true', default=False)
     parser.add_argument('--bce', action='store_true', default=False)
+  ## loc, pix, or bot
     config = parser.parse_args()
     print(config)
     return config
