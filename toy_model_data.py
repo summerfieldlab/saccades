@@ -1,3 +1,4 @@
+"""Synthesize symbolic/toy version of (and solution to) counting problem."""
 import sys
 import argparse
 import numpy as np
@@ -13,11 +14,8 @@ import random
 
 # EPS = sys.float_info.epsilon
 EPS = 1e-7
-
-GRID = [0.2, 0.5, 0.8]
-POSSIBLE_CENTROIDS = [(x, y) for (x, y) in product(GRID, GRID)]
-CENTROID_ARRAY = np.array(POSSIBLE_CENTROIDS)
-
+CHAR_WIDTH = 4
+CHAR_HEIGHT = 5
 
 def get_xy_coords(numerosity, noise_level, n_glimpses):
     """Randomly select n spatial locations and take noisy observations of them.
@@ -25,15 +23,19 @@ def get_xy_coords(numerosity, noise_level, n_glimpses):
     Nine possible true locations corresponding to a 3x3 grid within a 1x1 space
     locations are : product([0.2, 0.5, 0.8], [0.2, 0.5, 0.8])
 
+    TODO: change how I parameterize noise level to be more intuitive. Make it
+    as fraction of distance between objects in the scaled 1x1 space. 0.57
+    creates good distribution over integration scores
+
     Arguments:
-    numerosity - how many obejcts to place
-    noise level - how noisy are the observations. 1 means add upto +/- 0.1. Any
-        noise level > 1.5 creates ambiguity since the objects are 0.3 apart
+        numerosity (int): how many obejcts to place
+        noise level (float): how noisy are the observations. nl*0.1/2 = scale. nl*0.1 = cutoff
+        n_glimpses: the length of the sequence to construct
 
     Returns:
-    x,y coordinates of the glimpses (noisy observations)
-    symbolic rep (index 0-8) of the glimpsed objects, which true locations
-    x,y coordinates of the above
+        array: x,y coordinates of the glimpses (noisy observations)
+        array: symbolic rep (index 0-8) of the glimpsed objects, which true locations
+        array: x,y coordinates of the above
     """
     # numerosity = 4
     # noise_level = 1.6
@@ -78,11 +80,11 @@ def get_xy_coords(numerosity, noise_level, n_glimpses):
     return np.array(glimpse_coords), np.array(glimpsed_objects), np.array(coords_glimpsed_objects)
 
 
-def get_shape_coords(glimpse_coords, objects, noiseless_coords, max_dist, shapes_set, n_shapes, same):
+def get_shape_coords(glimpse_coords, objects, noiseless_coords, max_dist,
+                     shapes_set, n_shapes, same, distract):
     """Generate glimpse shape feature vectors.
 
-    Just as there are 9 possible location in space there are 9 possible
-    'shapes'. Each object is randomly assigned one shape. The shape feature
+    Each object is randomly assigned one shape. The shape feature
     vector indicates the proximity of each glimpse to objects of each shape.
     If there are no objects of shape m within a radius of max_dist from the
     glimpse, the mth element of the shape vector will be 0. If the glimpse
@@ -90,15 +92,22 @@ def get_shape_coords(glimpse_coords, objects, noiseless_coords, max_dist, shapes
     element of the shape feature vector will be 1.
 
     Args:
-        glimpse_coords (type): xy coordinates of the glimpses
-        objects (list of int): Symbolic representation (0-8) of the object locations
-        noiseless_coords (list of tuples): xy coordinates of the above
-        max_dist (type): maximum distance to use when bounding proximity measure
+        glimpse_coords (array): xy coordinates of the glimpses
+        objects (array): Symbolic representation (0-8) of the object locations
+        noiseless_coords (array of tuples): xy coordinates of the above
+        max_dist (float): maximum distance to use when bounding proximity measure
+        shapes_set (list): The set of shape indexes from which shapes should be sampled
+        n_shapes (int): how many shapes exist in this world (including other
+                        datasets). Must be greater than the maximum entry in
+                        shapes_set.
+        same (bool): whether all shapes within one image should be identical
+        distract (bool): whether to include distractor shapes
 
     Returns:
-        array: nx9 array where n is number of glimpses.
+        array: nxn_shapes array where n is number of glimpses.
 
     """
+    #
     seq_len = glimpse_coords.shape[0]
     unique_objects = np.unique(objects)
     unique_object_coords = np.unique(noiseless_coords, axis=0)
@@ -111,7 +120,7 @@ def get_shape_coords(glimpse_coords, objects, noiseless_coords, max_dist, shapes
     else:
         shape_assign = np.random.choice(shapes_set, size=num, replace=True)
     shape_map = {object: shape for (object, shape) in zip(unique_objects, shape_assign)}
-    shape_map_vector = np.zeros((9,))
+    shape_map_vector = np.ones((GRID_SIZE,)) * -1 # 9 for the 9 locations?
     for object in shape_map.keys():
         shape_map_vector[object] = shape_map[object]
     shape_hist = [sum(shape_map_vector == shape) for shape in range(n_shapes)]
@@ -136,7 +145,8 @@ def get_shape_coords(glimpse_coords, objects, noiseless_coords, max_dist, shapes
 
 class GlimpsedImage():
     def __init__(self, xy_coords, shape_coords, shape_map, shape_hist, objects, max_dist, num_range):
-        self.empty_locations = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+        # self.empty_locations = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
+        self.empty_locations = set(range(GRID_SIZE))
         self.filled_locations = set()
         self.lower_bound, self.upper_bound = num_range
         self.count = 0
@@ -342,15 +352,17 @@ class GlimpsedImage():
 
 # def generate_one_example(num, noise_level, pass_count_range, num_range, shapes_set, n_shapes, same):
 def generate_one_example(num, config):
+    """Synthesize a single sequence and determine numerosity."""
     noise_level = config.noise_level
     min_pass_count = config.min_pass
     max_pass_count = config.max_pass
     num_low = config.min_num
     num_high = config.max_num
+    num_range = (num_low, num_high)
     shapes_set = config.shapes
     n_shapes = config.n_shapes
     same = config.same
-    """Synthesize a single sequence and determine numerosity."""
+
     # Synthesize glimpses - paired observations of xy and shape coordinates
     max_dist = np.sqrt((noise_level*0.1)**2 + (noise_level*0.1)**2)
     # min_pass_count, max_pass_count = pass_count_range
@@ -375,6 +387,8 @@ def generate_one_example(num, config):
             example.process_xy()
             pass_count += 1
             done = example.check_if_done(pass_count)
+        initial_candidates = example.candidates.copy()
+        initial_filled_locations = example.filled_locations.copy()
 
         while not done and pass_count < max_pass_count:
             pass_count += 1
@@ -399,23 +413,28 @@ def generate_one_example(num, config):
 
         final_pass_count = pass_count
     unique_objects = set(example.objects)
-    filled_locations = [1 if i in unique_objects else 0 for i in range(9)]
+    filled_locations = [1 if i in unique_objects else 0 for i in range(GRID_SIZE)]
     example_dict = {'xy': xy_coords, 'shape': shape_coords, 'numerosity': num,
                     'predicted num': example.pred_num, 'count': example.count,
                     'locations': filled_locations,
+                    'object_coords': noiseless_coords,
                     'shape_map': shape_map,
                     'pass count': pass_count, 'unresolved ambiguity': not done,
                     'special xy': example.special_case_xy,
                     'special shape': example.special_case_shape,
                     'lower bound': example.lower_bound,
                     'upper bound': example.upper_bound,
-                    'min shape': example.min_shape, 'min num': example.min_num}
+                    'min shape': example.min_shape, 'min num': example.min_num,
+                    'initial candidates': initial_candidates,
+                    'initial filled locations': initial_filled_locations,
+                    'shape_hist': shape_hist}
     return example_dict
 
 
 # def generate_dataset(noise_level, n_examples, pass_count_range, num_range, shapes_set, n_shapes, same):
 def generate_dataset(config):
     """Fill data frame with toy examples."""
+    config = process_args(config)
     # numbers = np.arange(num_range[0], num_range[1] + 1)
     numbers = np.arange(config.min_num, config.max_num + 1)
     n_examples = config.size
@@ -430,6 +449,38 @@ def generate_dataset(config):
     # df['pass count'].max()
     return df
 
+def process_args(conf):
+    """Set global variables and convert strings to ints."""
+    global GRID, POSSIBLE_CENTROIDS, GRID_SIZE, CENTROID_ARRAY
+    global PIXEL_HEIGHT, PIXEL_WIDTH, MAP_SCALE_PIXEL
+
+    if conf.grid == 3:
+        GRID = [0.2, 0.5, 0.8]
+    elif conf.grid == 9:
+        GRID = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    else:
+        # print('Grid size not implemented')
+        GRID = np.linspace(0.1, 0.9, conf.grid)
+    NCOLS = len(GRID)
+    PIXEL_HEIGHT = (CHAR_HEIGHT + 2) * NCOLS
+    PIXEL_WIDTH = (CHAR_WIDTH + 2) * NCOLS
+    PIXEL_X = [col*(CHAR_WIDTH + 2) + 1 for col in range(NCOLS)]   #[1, 6, 11] # col *5 + 1
+    PIXEL_Y = [row*(CHAR_HEIGHT + 2) + 1 for row in range(NCOLS)]
+    PIXEL_TOPLEFT = [(x, y) for (x, y) in product(PIXEL_X, PIXEL_Y)]
+    POSSIBLE_CENTROIDS = [(x, y) for (x, y) in product(GRID, GRID)]
+    MAP_SCALE_PIXEL = {scaled:pixel for scaled,pixel in zip(POSSIBLE_CENTROIDS, PIXEL_TOPLEFT)}
+    GRID_SIZE = len(POSSIBLE_CENTROIDS)
+    CENTROID_ARRAY = np.array(POSSIBLE_CENTROIDS)
+
+    if conf.shapes[0].isnumeric():
+        conf.shapes = [int(i) for i in conf.shapes]
+    elif conf.shapes[0].isalpha():
+        letter_map = {'A':0, 'B':1, 'C':2, 'D':3, 'E':4, 'F':5, 'G':6, 'H':7,
+                      'J':8, 'K':9, 'N':10, 'O':11, 'P':12, 'R':13, 'S':14,
+                      'U':15, 'Z':16}
+        conf.shapes = [letter_map[i] for i in conf.shapes]
+    return conf
+
 def main():
     parser = argparse.ArgumentParser(description='PyTorch network settings')
     parser.add_argument('--min_pass', type=int, default=0)
@@ -441,12 +492,14 @@ def main():
     parser.add_argument('--size', type=int, default=100)
     parser.add_argument('--n_shapes', type=int, default=10, help='How many shapes to the relevant training and test sets span?')
     parser.add_argument('--same', action='store_true', default=False)
+    parser.add_argument('--grid', type=int, default=9)
     conf = parser.parse_args()
-    conf.shapes = [int(i) for i in conf.shapes]
+
     same = 'same' if conf.same else ''
+    shapes = ''.join(conf.shapes)
     # adding gw6 to this file name even those there are no glimpses yet just to save trouble
-    fname = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{conf.shapes}{same}_gw6_{conf.size}.pkl'
-    data = generate_dataset(conf.noise_level, conf.size, (conf.min_pass, conf.max_pass), (conf.min_num, conf.max_num), conf.shapes, conf.n_shapes, conf.same)
+    fname = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}_grid{conf.grid}_{conf.size}.pkl'
+    data = generate_dataset(conf)
     data.to_pickle(fname)
 
 if __name__ == '__main__':
