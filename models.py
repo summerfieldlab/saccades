@@ -533,8 +533,11 @@ class ConvReadoutMapNet(nn.Module):
 
 
 class ConvNet(nn.Module):
-    def __init__(self, width, height, output_size, dropout, big=False):
+    def __init__(self, width, height, map_size, output_size, **kwargs):
         super().__init__()
+        grid = kwargs['grid'] if 'grid' in kwargs.keys() else 9
+        big = kwargs['big'] if 'big' in kwargs.keys() else False
+        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
         # Larger version
         if big:
             self.kernel1_size = 3
@@ -552,7 +555,7 @@ class ConvNet(nn.Module):
             # self.cnn2_nchannels_out = 256
             # self.kernel3_size = 2
             # self.cnn3_nchannels_out = 32
-        else:  # Smaller version
+        elif grid==3: # Smaller version
             self.kernel1_size = 3
             self.cnn1_nchannels_out = 33
             self.poolsize = 2
@@ -560,6 +563,22 @@ class ConvNet(nn.Module):
             self.cnn2_nchannels_out = 33
             self.kernel3_size = 2
             self.cnn3_nchannels_out = 33
+        elif grid==6: # Smaller version
+            self.kernel1_size = 3
+            self.cnn1_nchannels_out = 33
+            self.poolsize = 2
+            self.kernel2_size = 2
+            self.cnn2_nchannels_out = 30
+            self.kernel3_size = 2
+            self.cnn3_nchannels_out = 20
+        elif grid==9:
+            self.kernel1_size = 3
+            self.cnn1_nchannels_out = 33
+            self.poolsize = 2
+            self.kernel2_size = 2
+            self.cnn2_nchannels_out = 20
+            self.kernel3_size = 2
+            self.cnn3_nchannels_out = 20
         self.output_size = output_size
         self.LReLU = nn.LeakyReLU(0.1)
 
@@ -581,7 +600,7 @@ class ConvNet(nn.Module):
         # pass through FC layers
         # self.fc1 = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), 120)  # size input, size output
         # self.fc1_size = 120
-        self.fc1_size = 9
+        self.fc1_size = map_size
         # import pdb; pdb.set_trace()
         self.fc1 = nn.Linear(int(self.cnn3_nchannels_out * self.cnn3_width_out * self.cnn3_height_out), self.fc1_size)  # size input, size output
 

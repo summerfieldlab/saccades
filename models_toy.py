@@ -6,10 +6,63 @@ from scipy.stats import special_ortho_group
 from models import RNN, RNN2, MultRNN, MultiplicativeLayer
 
 
-class RNNClassifier(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, **kwargs):
+class RNNClassifier2stream(nn.Module):
+    def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
-        map_size = 9
+        # map_size = 9
+        self.output_size = output_size
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
+        self.pix_embedding = nn.Linear(pix_size, hidden_size//2)
+        self.xy_embedding = nn.Linear(2, hidden_size//2)
+        self.joint_embedding = nn.Linear(hidden_size, hidden_size)
+        self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
+        self.drop_layer = nn.Dropout(p=drop)
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        self.after_map = nn.Linear(map_size, map_size)
+        if self.par:
+            self.notmap = nn.Linear(hidden_size, map_size)
+            self.num_readout = nn.Linear(map_size * 2, output_size)
+        else:
+            self.num_readout = nn.Linear(map_size, output_size)
+
+        self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
+
+    def forward(self, x, hidden):
+        xy = x[:,:2]  # xy coords are first two input features
+        pix = x[:,2:]
+        xy = self.LReLU(self.xy_embedding(xy))
+        pix = self.LReLU(self.pix_embedding(pix))
+        combined = torch.cat((xy, pix), dim=-1)
+        x = self.LReLU(self.joint_embedding(combined))
+        x, hidden = self.rnn(x, hidden)
+        x = self.drop_layer(x)
+
+        map_ = self.map_readout(x)
+        sig = self.sigmoid(map_)
+        if self.detach:
+            map_to_pass_on = sig.detach().clone()
+        else:
+            map_to_pass_on = sig
+
+        penult = self.LReLU(self.after_map(map_to_pass_on))
+        if self.par:
+            # Two parallel layers, one to be a map, the other not
+            notmap = self.notmap(x)
+            penult = torch.cat((penult, notmap), dim=1)
+        # num = self.num_readout(map_to_pass_on)
+        num = self.num_readout(penult)
+        return num, map_, hidden
+
+
+class RNNClassifier(nn.Module):
+    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        # map_size = 9
         self.output_size = output_size
         self.act = kwargs['act'] if 'act' in kwargs.keys() else None
         self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
@@ -52,9 +105,9 @@ class RNNClassifier(nn.Module):
 
 
 class RNNClassifier_nosymbol(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, **kwargs):
+    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
-        map_size = 9
+        # map_size = 9
         self.act = kwargs['act'] if 'act' in kwargs.keys() else None
         self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
         self.n_shapes = 9
@@ -87,6 +140,45 @@ class RNNClassifier_nosymbol(nn.Module):
             map_to_pass_on = sig
         num = self.num_readout(map_to_pass_on)
         return num, map, shape_emb, hidden
+
+class NumAsMapsum2stream(nn.Module):
+    def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        self.output_size = output_size
+        self.pix_embedding = nn.Linear(pix_size, hidden_size//2)
+        self.xy_embedding = nn.Linear(2, hidden_size//2)
+        self.joint_embedding = nn.Linear(hidden_size, hidden_size)
+        self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
+        self.drop_layer = nn.Dropout(p=drop)
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        self.num_readout = nn.Linear(1, 7)
+        self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
+
+    def forward(self, x, hidden):
+        xy = x[:, :2]  # xy coords are first two input features
+        pix = x[:, 2:]
+        xy = self.LReLU(self.xy_embedding(xy))
+        pix = self.LReLU(self.pix_embedding(pix))
+        combined = torch.cat((xy, pix), dim=-1)
+        x, hidden = self.rnn(combined, hidden)
+        x = self.drop_layer(x)
+        map_ = self.map_readout(x)
+        sig = self.sigmoid(map_)
+        if self.detach:
+            map_to_pass_on = sig.detach().clone()
+        else:
+            map_to_pass_on = sig
+        # import pdb;pdb.set_trace()
+        mapsum = torch.sum(map_to_pass_on, 1, keepdim=True)
+        num = self.num_readout(mapsum)
+        # num = torch.round(torch.sum(x, 1))
+        # num_onehot = nn.functional.one_hot(num, 9)
+        return num, map_, hidden
 
 class NumAsMapsum(nn.Module):
     def __init__(self, input_size, hidden_size, output_size, **kwargs):
