@@ -877,7 +877,7 @@ def main():
 
     # make sure all results directories exist
     model_dir = 'models/toy/letters'
-    results_dir = 'reuslts/toy/letters'
+    results_dir = 'results/toy/letters'
     fig_dir = 'figures/toy/letters'
     dir_list = [model_dir, results_dir, fig_dir]
     for directory in dir_list:
