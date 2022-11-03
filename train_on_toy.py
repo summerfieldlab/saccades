@@ -37,8 +37,9 @@ criterion_mse_noreduce = nn.MSELoss(reduction='none')
 
 def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
     avg_num_objects = config.max_num - ((config.max_num-config.min_num)/2)
-    weight = (9 - avg_num_objects)/ avg_num_objects # 9 for 9 locations
-    pos_weight = torch.ones([9], device=device) * weight
+    n_locs = config.grid**2
+    weight = (n_locs - avg_num_objects)/ avg_num_objects # 9 for 9 locations
+    pos_weight = torch.ones([n_locs], device=device) * weight
     criterion_bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
     criterion_bce_noreduce = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='none')
     n_glimpses = config.max_num
@@ -105,6 +106,7 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
                 map_loss = criterion_bce(map, locations)
                 map_loss_to_add = map_loss.item()
                 loss = num_loss + map_loss
+
             loss.backward()
             nn.utils.clip_grad_norm_(rnn.parameters(), 2)
             optimizer.step()
@@ -121,7 +123,7 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
         shape_epoch_loss /= (len(loader) * n_glimpses)
         return epoch_loss, num_epoch_loss, accuracy, map_epoch_loss, shape_epoch_loss
 
-    def train(loader):
+    def train(loader, ep):
         rnn.train()
         correct = 0
         epoch_loss = 0
@@ -170,10 +172,18 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
                 map_loss = criterion_bce(map, locations)
                 map_loss_to_add = map_loss
                 loss = map_loss
-            elif 'both' in config.use_loss:
+            elif config.use_loss == 'both':
                 map_loss = criterion_bce(map, locations)
                 map_loss_to_add = map_loss
                 loss = num_loss + map_loss
+            elif config.use_loss == 'map_then_both':
+                map_loss = criterion_bce(map, locations)
+                map_loss_to_add = map_loss
+                if ep < 100:
+                    loss = map_loss
+                else:
+                    loss = num_loss + map_loss
+
             loss.backward()
             nn.utils.clip_grad_norm_(rnn.parameters(), 2)
             optimizer.step()
@@ -312,13 +322,19 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
                 # Average over map locations, sum over instances
                 map_loss = criterion_bce_noreduce(map, locations)
                 map_loss_to_add = map_loss.mean(axis=1).sum()
-                loss = map_loss.mean()
+                loss = map_loss.mean(axis=1)
             elif config.use_loss == 'both':
                 map_loss = criterion_bce_noreduce(map, locations)
                 # map_loss_reduce = criterion_bce(map, locations)
                 map_loss_to_add = map_loss.mean(axis=1).sum()
                 loss = num_loss + map_loss.mean(axis=1)
-
+            elif config.use_loss == 'map_then_both':
+                map_loss = criterion_bce_noreduce(map, locations)
+                map_loss_to_add = map_loss.mean(axis=1).sum()
+                if ep < 150:
+                    loss = map_loss.mean()
+                else:
+                    loss = num_loss + map_loss.mean(axis=1)
             correct = pred.eq(target.view_as(pred))
             batch_results['pass count'] = pass_count.detach().cpu().numpy()
             batch_results['correct'] = correct.cpu().numpy()
@@ -372,7 +388,7 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             train_f = train
             test_f = test
         # Train
-        ep_tr_loss, ep_tr_num_loss, tr_accuracy, ep_tr_map_loss, ep_shape_loss = train_f(train_loader)
+        ep_tr_loss, ep_tr_num_loss, tr_accuracy, ep_tr_map_loss, ep_shape_loss = train_f(train_loader, ep)
         train_loss[ep] = ep_tr_loss
         train_num_loss[ep] = ep_tr_num_loss
         train_acc[ep] = tr_accuracy
@@ -397,7 +413,7 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             # base_name_test = base_name + f'_test-shapes-{test_shapes}_lums-{lums}'
             base_name_test = base_name
 
-        if not ep % 50 or ep == n_epochs - 1:
+        if not ep % 50 or ep == n_epochs - 1 or ep==1:
             test_results['accuracy'] = test_results['correct'].astype(int)*100
             # data = test_results[test_results['test shapes'] == str(test_shapes) and test_results['test lums'] == str(lums)]
             data = test_results
@@ -407,7 +423,8 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             fig, (ax1, ax2) = plt.subplots(1, 2)
             # sns.lineplot(data=data, x='epoch', y='num loss', hue='pass count', ax=ax1)
             ax1.plot(train_num_loss[:ep + 1], ':', color='green', label='training loss')
-            sns.lineplot(data=data, x='epoch', y='num loss', hue='test shapes', style='test lums', ax=ax1, legend=False)
+            sns.lineplot(data=data, x='epoch', y='num loss', hue='test shapes',
+                         style='test lums', ax=ax1, legend=False, alpha=0.7)
 
             # ax1.legend(title='Integration Difficulty')
             ax1.set_ylabel('Number Loss')
@@ -423,7 +440,8 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
 
             # sns.lineplot(data=data, x='epoch', y='map loss', hue='pass count', ax=ax2, estimator='mean')
             ax2.plot(train_map_loss[:ep + 1], ':', color='green', label='training loss')
-            sns.lineplot(data=data, x='epoch', y='map loss', hue='test shapes', style='test lums', ax=ax2, estimator='mean')
+            sns.lineplot(data=data, x='epoch', y='map loss', hue='test shapes',
+                         style='test lums', ax=ax2, estimator='mean', alpha=0.7)
             ax2.set_ylabel('Map Loss')
             # plt.title(title)
             ylim = ax2.get_ylim()
@@ -432,25 +450,38 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
             fig.tight_layout()
             # ax2.legend(title='Integration Difficulty')
             ax2.legend()
-            plt.savefig(f'figures/toy/scaled/test-loss_{base_name_test}.png', dpi=300)
+            plt.savefig(f'figures/toy/letters/test-loss_{base_name_test}.png', dpi=300)
             plt.close()
             # sns.countplot(data=test_results[test_results['correct']==True], x='epoch', hue='pass count')
             # plt.savefig(f'figures/toy/test_correct_{base_name}.png', dpi=300)
             # plt.close()
 
             # accuracy = data.groupby(['epoch', 'pass count']).mean()
-            accuracy = data.groupby(['epoch', 'test shapes', 'test lums']).mean()
+            accuracy = data.groupby(['epoch', 'test shapes', 'test lums', 'pass count']).mean()
 
-            # sns.lineplot(data=accuracy, x='epoch', hue='pass count', y='accuracy')
+
             plt.plot(train_acc[:ep + 1], ':', color='green', label='training accuracy')
-            sns.lineplot(data=accuracy, x='epoch', hue='test shapes', style='test lums', y='accuracy')
+            sns.lineplot(data=accuracy, x='epoch', hue='test shapes',
+                         style='test lums', y='accuracy', alpha=0.7)
             plt.legend()
             plt.grid()
             plt.title(title)
             plt.ylim([0, 102])
             plt.ylabel('Accuracy on number task')
-            plt.savefig(f'figures/toy/scaled/accuracy_{base_name_test}.png', dpi=300)
+            plt.savefig(f'figures/toy/letters/accuracy_{base_name_test}.png', dpi=300)
             plt.close()
+
+            plt.plot(train_acc[:ep + 1], ':', color='green', label='training accuracy')
+            sns.lineplot(data=accuracy, x='epoch', hue='pass count',
+                         y='accuracy', alpha=0.7)
+            plt.legend()
+            plt.grid()
+            plt.title(title)
+            plt.ylim([0, 102])
+            plt.ylabel('Accuracy on number task')
+            plt.savefig(f'figures/toy/letters/accuracy_byintegration_{base_name_test}.png', dpi=300)
+            plt.close()
+
             # acc_on_difficult = accuracy.loc[ep, 5.0]['accuracy']
             # print(f'Testset {ts}, Accuracy on level 5 difficulty: {acc_on_difficult}')
 
@@ -468,13 +499,13 @@ def train_model(rnn, optimizer, scheduler, loaders, base_name, config):
                 # ax2 = ax.twinx()
                 # ax2.set_yticks(ticks, np.sum(confs[i], axis=1))
             fig.tight_layout()
-            plt.savefig(f'figures/toy/scaled/confusion_{base_name_test}.png', dpi=300)
+            plt.savefig(f'figures/toy/letters/confusion_{base_name_test}.png', dpi=300)
             plt.close()
         epoch_timer.stop_timer()
         if isinstance(test_loss, list):
-            print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]:.4} \t (Train/Val/TestLum/TestShape/TestBoth) Loss={train_loss[ep]:.4}/{test_loss[0][ep]:.4}/{test_loss[1][ep]:.4}/{test_loss[2][ep]:.4}/{test_loss[3][ep]:.4} \t Accuracy={train_acc[ep]:.3}%/{test_acc[0][ep]:.3}%/{test_acc[1][ep]:.3}%/{test_acc[2][ep]:.3}%/{test_acc[3][ep]:.3}% \t Shape loss: {train_shape_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}/{test_map_loss[0][ep]:.5}/{test_map_loss[1][ep]:.5}/{test_map_loss[2][ep]:.5}/{test_map_loss[3][ep]:.5}')
+            print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]:.4} \t (Train/Val/TestLum/TestShape/TestBoth) Num Loss={train_num_loss[ep]:.4}/{test_num_loss[0][ep]:.4}/{test_num_loss[1][ep]:.4}/{test_num_loss[2][ep]:.4}/{test_num_loss[3][ep]:.4} \t Accuracy={train_acc[ep]:.3}%/{test_acc[0][ep]:.3}%/{test_acc[1][ep]:.3}%/{test_acc[2][ep]:.3}%/{test_acc[3][ep]:.3}% \t Shape loss: {train_shape_loss[ep]:.4} \t Map loss: {train_map_loss[ep]:.4}/{test_map_loss[0][ep]:.4}/{test_map_loss[1][ep]:.4}/{test_map_loss[2][ep]:.4}/{test_map_loss[3][ep]:.4}')
         else:
-            print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]:.4} \t (Train/Test) Loss={train_loss[ep]:.4}/{test_loss[ep]:.4}/ \t Accuracy={train_acc[ep]:.3}%/{test_acc[ep]:.3}% \t Shape loss: {train_shape_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
+            print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]:.4} \t (Train/Test) Num Loss={train_num_loss[ep]:.4}/{test_num_loss[ep]:.4}/ \t Accuracy={train_acc[ep]:.3}%/{test_acc[ep]:.3}% \t Shape loss: {train_shape_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
     results_list = [train_loss, train_acc, train_num_loss, train_map_loss, train_shape_loss, test_loss, test_acc, test_num_loss, test_map_loss, confs, test_results]
     return rnn, results_list
 
@@ -500,14 +531,15 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     num_range = (min_num, max_num)
     shape_input = config.shape_input
     same = config.same
+    shapes = ''.join([str(i) for i in shapes_set])
     # solarize = config.solarize
 
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}{tet}.pkl'
     # fname_notet = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}'
     samee = 'same' if same else ''
     solar = 'solarized_' if solarize else ''
-    fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}{samee}_{solar}{size}.pkl'
-    fname_gw = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}{samee}_lum{lums}_gw6_{solar}{size}.pkl'
+    fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}_grid{config.grid}_{solar}{size}.pkl'
+    fname_gw = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}_grid{config.grid}_lum{lums}_gw6_{solar}{size}.pkl'
     if os.path.exists(fname_gw):
         print(f'Loading saved dataset {fname_gw}')
         data = pd.read_pickle(fname_gw)
@@ -562,26 +594,59 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, shape_format, model
             print('Tetris pixel inputs.')
             shape_label = torch.tensor(dataset['shape']).float().to(device)
             shape_input = torch.tensor(dataset['tetris glimpse pixels']).float().to(device)
-        elif shape_format == 'char':
+        elif shape_format == 'solarized':
             if 'cnn' in model_type:
-                image_array = np.stack(dataset['char image'], axis=0)
+                image_array = np.stack(dataset['solarized image'], axis=0)
                 shape_input = torch.tensor(image_array).float().to(device)
                 shape_input = torch.unsqueeze(shape_input, 1)  # 1 channel
             elif model_type == 'recurrent_control':
-                image_array = np.stack(dataset['char image'], axis=0)
+                image_array = np.stack(dataset['solarized image'], axis=0)
                 nex, w, h = image_array.shape
                 image_array = image_array.reshape(nex, -1)
                 shape_input = torch.tensor(image_array).float().to(device)
             else:
-                glimpse_array = np.stack(dataset['char glimpse pixels'], axis=0)
+                glimpse_array = np.stack(dataset['sol glimpse pixels'], axis=0)
                 shape_input = torch.tensor(glimpse_array).float().to(device)
             shape_array = np.stack(dataset['shape'], axis=0)
             shape_label = torch.tensor(shape_array).float().to(device)
+        elif shape_format == 'noise':
+            if 'cnn' in model_type:
+                image_array = np.stack(dataset['noised image'], axis=0)
+                shape_input = torch.tensor(image_array).float().to(device)
+                shape_input = torch.unsqueeze(shape_input, 1)  # 1 channel
+            elif model_type == 'recurrent_control':
+                image_array = np.stack(dataset['noised image'], axis=0)
+                nex, w, h = image_array.shape
+                image_array = image_array.reshape(nex, -1)
+                shape_input = torch.tensor(image_array).float().to(device)
+            else:
+                glimpse_array = np.stack(dataset['noi glimpse pixels'], axis=0)
+                shape_input = torch.tensor(glimpse_array).float().to(device)
+            shape_array = np.stack(dataset['shape'], axis=0)
+            shape_label = torch.tensor(shape_array).float().to(device)
+        elif shape_format == 'pixel_std':
+            glimpse_array = np.stack(dataset['char glimpse pixels'], axis=0)
+            glimpse_array = np.std(glimpse_array, axis=-1) / 0.4992277987669841  # max std in training
+            shape_input = torch.tensor(glimpse_array).unsqueeze(-1).float().to(device)
+        elif shape_format == 'pixel_count':
+            glimpse_array = np.stack(dataset['char glimpse pixels'], axis=0)
+            n, s, _ = glimpse_array.shape
+            all_counts = np.zeros((n, s, 1))
+            for i, seq in enumerate(glimpse_array):
+                for j, glimpse in enumerate(seq):
+                    unique, counts = np.unique(glimpse, return_counts=True)
+                    all_counts[i, j, 0] = counts.min()/36
+            # unique, counts = np.unique(glimpse_array[0], return_counts=True, axis=0)
+            shape_input = torch.tensor(all_counts).float().to(device)
         else: # symbolic shape input
             shape_input = torch.tensor(dataset['shape']).float().to(device)
     if train_on == 'both' or train_on == 'xy':
         xy_array = np.stack(dataset['xy'], axis=0)
-        norm_xy_array = xy_array/20
+        # xy_array = np.stack(dataset['glimpse coords'], axis=0)
+        # norm_xy_array = xy_array/20
+        # xy should now already be the original scaled xy between 0 and 1. No need to rescale (since alphabetic)
+        norm_xy_array = xy_array * 1.2
+        # norm_xy_array = xy_array / 21
         # xy = torch.tensor(dataset['xy']).float().to(device)
         xy = torch.tensor(norm_xy_array).float().to(device)
 
@@ -621,21 +686,28 @@ def get_model(model_type, train_on, **mod_args):
     hidden_size = mod_args['h_size']
     output_size = mod_args['n_classes'] + 1
     shape_format = mod_args['format']
+    grid = mod_args['grid']
+    grid_to_im_shape = {3:[27, 24], 6:[48, 42], 9:[69, 60]}
+    height, width = grid_to_im_shape[grid]
+    map_size = grid**2
     xy_sz = 2
     if shape_format == 'tetris':
         sh_sz = 4*4
-    elif shape_format == 'char':
+    elif shape_format == 'symbolic':
         # sh_sz = 64 # 8 * 8
-        sh_sz = 6 * 6
-    else:
         sh_sz = 9
+    elif 'pixel' in shape_format:
+        sh_sz = 1
+    else:
+        sh_sz = 6 * 6
     in_sz = xy_sz if train_on=='xy' else sh_sz if train_on =='shape' else sh_sz + xy_sz
     if train_on == 'both' and mod_args['outer']:
         in_sz += xy_sz * sh_sz
-
-    if model_type == 'num_as_mapsum':
+    if 'num_as_mapsum' in model_type:
         if shape_format == 'parametric':  #no_symbol:
-            model = mod.NumAsMapsum_nosymbol(in_sz, hidden_size, output_size, **mod_args).to(device)
+            model = mod.NumAsMapsum_nosymbol(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+        elif '2stream' in model_type:
+            model = mod.NumAsMapsum2stream(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
         else:
             model = mod.NumAsMapsum(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif 'rnn_classifier' in model_type:
@@ -644,27 +716,31 @@ def get_model(model_type, train_on, **mod_args):
             # stream is optimized to match the map. The other of the same size
             # is free, only influenced by the num loss.
             mod_args['parallel'] = True
-        if shape_format == 'parametric':  #no_symbol:
+        elif '2stream' in model_type:
+            model = mod.RNNClassifier2stream(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+        elif shape_format == 'parametric':  #no_symbol:
             model = mod.RNNClassifier_nosymbol(in_sz, hidden_size, output_size, **mod_args).to(device)
         else:
-            model = mod.RNNClassifier(in_sz, hidden_size, output_size, **mod_args).to(device)
+            model = mod.RNNClassifier(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     elif model_type == 'recurrent_control':
-        in_sz = 21 * 27  # Size of the images
+        # in_sz = 21 * 27  # Size of the images
+        in_size = height * width
         model = mod.RNNClassifier(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif model_type == 'rnn_regression':
-        model = mod.RNNRegression(in_sz, hidden_size, output_size, **mod_args).to(device)
+        model = mod.RNNRegression(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     elif model_type == 'mult':
         model = mod.MultiplicativeModel(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif model_type == 'hyper':
         model = mod.HyperModel(in_sz, hidden_size, output_size).to(device)
     elif 'cnn' in model_type:
-        width = 21
-        height = 27
+        # width = 24 #21
+        # height = 27
         dropout = mod_args['dropout']
         if model_type == 'bigcnn':
-            model = ConvNet(width, height, output_size, dropout, big=True).to(device)
+            mod_args['big'] = True
+            model = ConvNet(width, height, map_size, output_size, **mod_args).to(device)
         else:
-            model = ConvNet(width, height, output_size, dropout, big=False).to(device)
+            model = ConvNet(width, height, map_size, output_size, **mod_args).to(device)
     else:
         print(f'Model type {model_type} not implemented. Exiting')
         exit()
@@ -692,6 +768,7 @@ def get_model(model_type, train_on, **mod_args):
         return total_params
 
     count_parameters(model)
+    # import pdb;pdb.set_trace()
     return model
 
 def get_config():
@@ -701,6 +778,7 @@ def get_config():
     parser.add_argument('--noise_level', type=float, default=1.6)
     parser.add_argument('--train_size', type=int, default=100000)
     parser.add_argument('--test_size', type=int, default=5000)
+    parser.add_argument('--grid', type=int, default=9)
     parser.add_argument('--n_iters', type=int, default=1, help='how many times the rnn should loop through sequence')
     parser.add_argument('--rotate', action='store_true', default=False)  # not implemented
     parser.add_argument('--small_weights', action='store_true', default=False)  # not implemented
@@ -716,7 +794,7 @@ def get_config():
     parser.add_argument('--act', type=str, default=None)
     parser.add_argument('--alt_rnn', action='store_true', default=False)
     # parser.add_argument('--no_symbol', action='store_true', default=False)
-    parser.add_argument('--train_shapes', type=list, default=[0, 1, 2, 3, 5, 6, 7, 8])
+    parser.add_argument('--train_shapes', type=list, default=[0, 1, 2, 3, 5, 6, 7, 8], help='Can either be a string of numerals 0123 or letters ABCD.')
     parser.add_argument('--test_shapes', nargs='*', type=list, default=[[0, 1, 2, 3, 5, 6, 7, 8], [4]])
     parser.add_argument('--detach', action='store_true', default=False)
     parser.add_argument('--learn_shape', action='store_true', default=False, help='for the parametric shape rep, whether to additional train to produce symbolic shape labels')
@@ -735,9 +813,20 @@ def get_config():
     # parser.add_argument('--debug', action='store_true', default=False)
     # parser.add_argument('--bce', action='store_true', default=False)
     config = parser.parse_args()
-    config.train_shapes = [int(i) for i in config.train_shapes]
-    for j, test_set in enumerate(config.test_shapes):
-        config.test_shapes[j] = [int(i) for i in test_set]
+    # Convert string input argument into a list of indices
+    if config.train_shapes[0].isnumeric():
+        config.train_shapes = [int(i) for i in config.train_shapes]
+        for j, test_set in enumerate(config.test_shapes):
+            config.test_shapes[j] = [int(i) for i in test_set]
+    elif config.train_shapes[0].isalpha():
+        letter_map = {'A':0, 'B':1, 'C':2, 'D':3, 'E':4, 'F':5, 'G':6, 'H':7,
+                      'J':8, 'K':9, 'N':10, 'O':11, 'P':12, 'R':13, 'S':14,
+                      'U':15, 'Z':16}
+        config.shapestr = config.train_shapes.copy()
+        config.testshapestr = config.test_shapes.copy()
+        config.train_shapes = [letter_map[i] for i in config.train_shapes]
+        for j, test_set in enumerate(config.test_shapes):
+            config.test_shapes[j] = [letter_map[i] for i in test_set]
     print(config)
     return config
 
@@ -745,7 +834,8 @@ def main():
     # Process input arguments
     config = get_config()
     model_type = config.model_type
-    if model_type == 'num_as_mapsum' or model_type == 'rnn_regression':
+    # if model_type == 'num_as_mapsum' or model_type == 'rnn_regression':
+    if model_type == 'rnn_regression':
         config.cross_entropy = False
     else:
         config.cross_entropy = True
@@ -776,7 +866,8 @@ def main():
     model_desc = f'{model_type}{alt_rnn}{detach}{act}_hsize-{config.h_size}'
     same = 'same' if config.same else ''
     solar = 'solarized_' if config.solarize else ''
-    data_desc = f'num{min_num}-{max_num}_input-{train_on}{kernel}_{config.shape_input}_nl-{noise_level}_diff-{min_pass}-{max_pass}_trainshapes-{config.train_shapes}{same}_gw6_{solar}{train_size}'
+    shapes = ''.join([str(i) for i in config.shapestr])
+    data_desc = f'num{min_num}-{max_num}_input-{train_on}{kernel}_{config.shape_input}_nl-{noise_level}_diff-{min_pass}-{max_pass}_grid{config.grid}_trainshapes-{shapes}{same}_gw6_{solar}{train_size}'
     # train_desc = f'loss-{use_loss}_niters-{n_iters}_{n_epochs}eps'
     withshape = '+shape' if config.learn_shape else ''
     train_desc = f'loss-{use_loss}{withshape}_drop{drop}_{n_epochs}eps_rep{config.rep}'
@@ -784,10 +875,19 @@ def main():
     if config.small_weights:
         base_name += '_small'
 
+    # make sure all results directories exist
+    model_dir = 'models/toy/letters'
+    results_dir = 'reuslts/toy/letters'
+    fig_dir = 'figures/toy/letters'
+    dir_list = [model_dir, results_dir, fig_dir]
+    for directory in dir_list:
+        if not os.path.exists(directory):
+            os.makedirs(directory)
+
     # Prepare datasets and torch dataloaders
     config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
-    trainset = get_dataset(train_size, config.train_shapes, config, [0.0, 0.5, 1.0], solarize=config.solarize)
-    testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.test_shapes, config.lum_sets)]
+    trainset = get_dataset(train_size, config.shapestr, config, [0.0, 0.5, 1.0], solarize=config.solarize)
+    testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
     train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type)
     test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type) for testset in testsets]
     loaders = [train_loader, test_loaders]
@@ -797,19 +897,21 @@ def main():
     mod_args = {'h_size': config.h_size, 'act': config.act,
                 'small_weights': config.small_weights, 'outer':config.outer,
                 'detach': config.detach, 'format':config.shape_input,
-                'n_classes':max_num, 'dropout': drop}
+                'n_classes':max_num, 'dropout': drop, 'grid': config.grid}
     model = get_model(model_type, train_on, **mod_args)
     opt = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
     # scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)
     scheduler = StepLR(opt, step_size=n_epochs/20, gamma=0.7)
 
+
     # Train model and save trained model
     model, results = train_model(model, opt, scheduler, loaders, base_name, config)
-    torch.save(model.state_dict(), f'models/toy/scaled/toy_model_{base_name}_ep-{n_epochs}.pt')
+    print('Saving trained model and results files...')
+    torch.save(model.state_dict(), f'{model_dir}/toy_model_{base_name}_ep-{n_epochs}.pt')
 
     # Organize and save results
     train_loss, train_acc, train_num_loss, train_map_loss, train_shape_loss, test_loss, test_acc, test_num_loss, test_map_loss, conf, test_results = results
-    test_results.to_pickle(f'results/toy/scaled/detailed_test_results_{base_name}.pkl')
+    test_results.to_pickle(f'{results_dir}/detailed_test_results_{base_name}.pkl')
     df_train = pd.DataFrame()
     df_test_list = [pd.DataFrame() for _ in range(len(test_loss))]
     df_train['loss'] = train_loss
@@ -830,12 +932,12 @@ def main():
         df_test_list[ts]['test lums'] = str(test_lums)
         df_test_list[ts]['epoch'] = np.arange(n_epochs)
 
-    np.save(f'results/toy/scaled/confusion_{base_name}', conf)
+    np.save(f'{results_dir}/confusion_{base_name}', conf)
 
     df_test = pd.concat(df_test_list)
     df_test['rnn iterations'] = n_iters
     df = pd.concat((df_train, df_test))
-    df.to_pickle(f'results/toy/scaled/toy_results_{base_name}.pkl')
+    df.to_pickle(f'{results_dir}/toy_results_{base_name}.pkl')
 
 
 if __name__ == '__main__':
