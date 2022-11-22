@@ -264,13 +264,21 @@ def main():
     parser.add_argument('--same', action='store_true', default=False)
     parser.add_argument('--solarize', action='store_true', default=False)
     parser.add_argument('--grid', type=int, default=9)
+    parser.add_argument('--distract', action='store_true', default=False)
+    parser.add_argument('--random', action='store_true', default=False)
     conf = parser.parse_args()
 
     same = 'same' if conf.same else ''
+    if conf.distract:
+        challenge = '_distract'
+    elif conf.random:
+        challenge = '_random'
+    else:
+        challenge = ''
     solar = 'solarized_' if conf.solarize else ''
     shapes = ''.join(conf.shapes)
-    fname_gw = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}_grid{conf.grid}_lum{conf.luminances}_gw{conf.glimpse_wid}_{solar}{conf.size}.pkl'
-    fname = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}_grid{conf.grid}_{conf.size}.pkl'
+    fname_gw = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_lum{conf.luminances}_gw{conf.glimpse_wid}_{solar}{conf.size}.pkl'
+    fname = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_{conf.size}.pkl'
     # if os.path.exists(fname):
     #     print(f'Loading saved dataset {fname}')
     #     data = pd.read_pickle(fname)
