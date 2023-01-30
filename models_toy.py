@@ -4,7 +4,171 @@ import torch
 from torch import nn
 from scipy.stats import special_ortho_group
 from models import RNN, RNN2, MultRNN, MultiplicativeLayer
+import ventral_models as vmod
+TRAIN_SHAPES = [0,  2,  4,  5,  8,  9, 14, 15, 16]
 
+class FeedForward(nn.Module):
+    def __init__(self, in_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        self.output_size = output_size
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        self.layer1 = nn.Linear(in_size, hidden_size)
+        self.layer2 = nn.Linear(hidden_size, hidden_size)
+        self.layer3 = nn.Linear(hidden_size, hidden_size)
+        self.layer4 = nn.Linear(hidden_size, hidden_size)
+        self.layer5 = nn.Linear(hidden_size, map_size)
+        self.layer6 = nn.Linear(map_size, output_size)
+        self.drop_layer = nn.Dropout(p=drop)
+        self.LReLU = nn.LeakyReLU(0.1)
+
+    def forward(self, x):
+        x = self.LReLU(self.layer1(x))
+        x = self.LReLU(self.layer2(x))
+        x = self.LReLU(self.layer3(x))
+        x = self.LReLU(self.layer4(x))
+        x = self.drop_layer(x)
+        map = self.LReLU(self.layer5(x))
+        out = self.layer6(map)
+        return out, map
+
+
+class PretrainedVentral(nn.Module):
+    def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        self.output_size = output_size
+        self.train_on = kwargs['train_on']
+        to_load = kwargs['pretrained']
+        if self.train_on == 'xy':
+            shape_rep_len = 0
+        else:
+            # shape_rep_len = 2
+            shape_rep_len = len(TRAIN_SHAPES)
+        self.ventral = vmod.MLP(pix_size, 1024, 3, 25)
+        self.ventral.load_state_dict(torch.load(to_load))
+        self.ventral.eval()
+        self.rnn = RNNClassifier2stream(shape_rep_len+100, hidden_size, map_size, output_size, **kwargs)
+        self.initHidden = self.rnn.initHidden
+
+    def forward(self, x, hidden):
+        if self.train_on == 'shape':
+            pix = x
+        elif self.train_on == 'xy':
+            xy = x
+        else:
+            xy = x[:, :2]  # xy coords are first two input features
+            pix = x[:, 2:]
+        if self.train_on != 'xy':
+            with torch.no_grad():
+                # shape_rep = self.ventral(pix)[:, 1:3] # ignore 0th, take 1st and 2nd column
+                shape_rep, penult = self.ventral(pix) # for BCE experiment
+                shape_rep = torch.sigmoid(shape_rep[:, TRAIN_SHAPES])
+                # the 0th output was trained with  BCEWithLogitsLoss so need to apply sigmoid
+                # shape_rep[:, 0] = torch.sigmoid(shape_rep[:, 0])
+                shape_rep = torch.concat((shape_rep, penult), dim=1)
+            if self.train_on == 'both':
+                # x = torch.concat((xy, shape_rep.detach().clone()), dim=1)
+                x = torch.concat((xy, shape_rep), dim=1)
+            elif self.train_on == 'shape':
+                x = shape_rep
+        elif self.train_on == 'xy':
+            x = xy
+
+        num, shape, map_, hidden = self.rnn(x, hidden)
+        return num, shape, map_, hidden
+
+
+class RNNClassifier2stream2map(nn.Module):
+    def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        # map_size = 9
+        self.train_on = kwargs['train_on']
+        self.n_out = 6
+        self.output_size = output_size
+        n_shapes = kwargs['n_shapes'] if 'n_shapes' in kwargs.keys() else 20
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
+
+        self.pix_embedding = nn.Linear(pix_size, hidden_size//2)
+        self.shape_readout = nn.Linear(hidden_size//2, n_shapes)
+
+        self.xy_embedding = nn.Linear(2, hidden_size//2)
+        self.joint_embedding = nn.Linear(hidden_size + n_shapes, hidden_size)
+        self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
+        self.drop_layer = nn.Dropout(p=drop)
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        self.map_dist_readout = nn.Linear(hidden_size, map_size)
+        self.after_map_count = nn.Linear(map_size, map_size)
+        self.after_map_dist = nn.Linear(map_size, map_size)
+        self.after_map_all = nn.Linear(map_size, map_size)
+        if self.par:
+            self.notmap = nn.Linear(hidden_size, map_size)
+            self.num_readout_count = nn.Linear(map_size * 2, output_size)
+            self.num_readout_dist = nn.Linear(map_size * 2, 3)
+            self.num_readout_all = nn.Linear(map_size * 2, output_size +2 )
+        else:
+            self.num_readout_count = nn.Linear(map_size, output_size)
+            self.num_readout_dist = nn.Linear(map_size, 3)
+            self.num_readout_all = nn.Linear(map_size, output_size + 2)
+
+        self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
+
+    def forward(self, x, hidden):
+        if self.train_on == 'both':
+            xy = x[:,:2]  # xy coords are first two input features
+            pix = x[:,2:]
+            xy = self.LReLU(self.xy_embedding(xy))
+            pix = self.LReLU(self.pix_embedding(pix))
+            shape = self.shape_readout(pix)
+            combined = torch.cat((shape, xy, pix), dim=-1)
+        elif self.train_on == 'xy':
+            xy = x
+            xy = self.LReLU(self.xy_embedding(xy))
+            combined = xy
+        elif self.train_on == 'shape':
+            pix = x
+            pix = self.LReLU(self.pix_embedding(pix))
+            shape = self.shape_readout(pix)
+            combined = pix
+
+        x = self.LReLU(self.joint_embedding(combined))
+        x, hidden = self.rnn(x, hidden)
+        x = self.drop_layer(x)
+
+        map_count = self.map_readout(x)
+        map_dist = self.map_dist_readout(x)
+        # full map is sum of the two submaps
+        map_all = torch.add(map_count, map_dist)
+
+        sig_count = self.sigmoid(map_count)
+        sig_dist = self.sigmoid(map_dist)
+        sig_all = self.sigmoid(map_all)
+        if self.detach:
+            map_to_pass_on_count = sig_count.detach().clone()
+            map_to_pass_on_dist = sig_dist.detach().clone()
+            map_to_pass_on_all = sig_all.detach().clone()
+        else:
+            map_to_pass_on_count = sig_count
+            map_to_pass_on_dist = sig_dist
+            map_to_pass_on_all = sig_all
+
+        penult_count = self.LReLU(self.after_map_count(map_to_pass_on_count))
+        penult_dist = self.LReLU(self.after_map_dist(map_to_pass_on_dist))
+        penult_all = self.LReLU(self.after_map_all(map_to_pass_on_all))
+        # if self.par:
+        #     # Two parallel layers, one to be a map, the other not
+        #     notmap = self.notmap(x)
+        #     penult = torch.cat((penult, notmap), dim=1)
+        # num = self.num_readout(map_to_pass_on)
+        num_count = self.num_readout_count(penult_count)
+        num_dist = self.num_readout_dist(penult_dist)
+        num_all = self.num_readout_all(penult_all)
+        all_num = (num_count, num_dist, num_all)
+        all_maps = (map_count, map_dist, map_all)
+        return all_num, shape, all_maps, hidden
 
 class MapGated2RNN(nn.Module):
     def __init__(self, sh_size, hidden_size, map_size, output_size, **kwargs):
@@ -194,6 +358,7 @@ class RNNClassifier2stream(nn.Module):
     def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
         # map_size = 9
+        self.train_on = kwargs['train_on']
         self.output_size = output_size
         n_shapes = kwargs['n_shapes'] if 'n_shapes' in kwargs.keys() else 20
         self.act = kwargs['act'] if 'act' in kwargs.keys() else None
@@ -201,9 +366,14 @@ class RNNClassifier2stream(nn.Module):
         drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
         self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
         self.pix_embedding = nn.Linear(pix_size, hidden_size//2)
-        self.shape_readout = nn.Linear(hidden_size//2, n_shapes)
+        self.pix_embedding2 = nn.Linear(hidden_size//2, hidden_size//2)
+        # self.shape_readout = nn.Linear(hidden_size, n_shapes)
         self.xy_embedding = nn.Linear(2, hidden_size//2)
-        self.joint_embedding = nn.Linear(hidden_size + n_shapes, hidden_size)
+        # self.joint_embedding = nn.Linear(hidden_size//2 + n_shapes, hidden_size)
+        if self.train_on == 'both':
+            self.joint_embedding = nn.Linear(hidden_size, hidden_size)
+        else:
+            self.joint_embedding = nn.Linear(hidden_size//2, hidden_size)
         self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
         self.drop_layer = nn.Dropout(p=drop)
         self.map_readout = nn.Linear(hidden_size, map_size)
@@ -219,12 +389,26 @@ class RNNClassifier2stream(nn.Module):
         self.LReLU = nn.LeakyReLU(0.1)
 
     def forward(self, x, hidden):
-        xy = x[:,:2]  # xy coords are first two input features
-        pix = x[:,2:]
-        xy = self.LReLU(self.xy_embedding(xy))
-        pix = self.LReLU(self.pix_embedding(pix))
-        shape = self.shape_readout(pix)
-        combined = torch.cat((shape, xy, pix), dim=-1)
+        if self.train_on == 'both':
+            xy = x[:, :2]  # xy coords are first two input features
+            pix = x[:, 2:]
+            xy = self.LReLU(self.xy_embedding(xy))
+            pix = self.LReLU(self.pix_embedding(pix))
+            pix = self.LReLU(self.pix_embedding2(pix))
+            # shape = self.shape_readout(pix)
+            # shape_detached = shape.detach().clone()
+            # combined = torch.cat((shape, xy, pix), dim=-1)
+            # combined = torch.cat((shape_detached, xy), dim=-1)
+            combined = torch.cat((xy, pix), dim=-1)
+        elif self.train_on == 'xy':
+            xy = x
+            xy = self.LReLU(self.xy_embedding(xy))
+            combined = xy
+            pix = torch.zeros_like(xy)
+        elif self.train_on == 'shape':
+            pix = x
+            pix = self.LReLU(self.pix_embedding(pix))
+            combined = pix
         x = self.LReLU(self.joint_embedding(combined))
         x, hidden = self.rnn(x, hidden)
         x = self.drop_layer(x)
@@ -243,7 +427,7 @@ class RNNClassifier2stream(nn.Module):
             penult = torch.cat((penult, notmap), dim=1)
         # num = self.num_readout(map_to_pass_on)
         num = self.num_readout(penult)
-        return num, shape, map_, hidden
+        return num, pix, map_, hidden
 
 
 class RNNClassifier(nn.Module):
@@ -268,6 +452,8 @@ class RNNClassifier(nn.Module):
         self.initHidden = self.rnn.initHidden
         self.sigmoid = nn.Sigmoid()
         self.LReLU = nn.LeakyReLU(0.1)
+        device = torch.device("cuda")
+        self.mock_shape_pred = torch.zeros((10,)).to(device)
 
     def forward(self, x, hidden):
         x = self.LReLU(self.embedding(x))
@@ -288,7 +474,8 @@ class RNNClassifier(nn.Module):
             penult = map_to_pass_on
         # num = self.num_readout(map_to_pass_on)
         num = self.num_readout(penult)
-        return num, map, hidden
+        shape = self.mock_shape_pred
+        return num, shape, map, hidden
 
 
 class RNNClassifier_nosymbol(nn.Module):
