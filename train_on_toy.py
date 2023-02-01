@@ -1258,7 +1258,7 @@ def get_dataset(size, shapes_set, config, lums, solarize):
         if '2channel' in config.shape_input:
             challenge = '_distract2ch'
         else:
-            challenge = '_distract2ch'
+            challenge = '_distract'
     elif config.distract_corner:
         challenge = '_distract_corner'
     elif config.random:
