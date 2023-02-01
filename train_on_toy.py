@@ -157,7 +157,7 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
         count_map_epoch_loss = 0
         shape_epoch_loss = 0
         no_shuffle = ['recurrent_control', 'cnn', 'feedforward']
-        for i, (input, target, locations, shape_label, _) in enumerate(loader):
+        for i, (input, target, num_dist, locations, shape_label, _) in enumerate(loader):
             assert all(locations.sum(dim=1) == target)
             n_glimpses = input.shape[1]
 
@@ -482,10 +482,10 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
         # count_map_epoch_loss = 0
         shape_epoch_loss = 0
         nclasses = rnn.output_size
-        confusion_matrix = np.zeros((nclasses-config.min_num, nclasses-config.min_num))
+        confusion_matrix = np.zeros((3, nclasses-config.min_num, nclasses-config.min_num))
         test_results = pd.DataFrame()
         # for i, (input, target, locations, shape_label, pass_count) in enumerate(loader):
-        for i, (input, target, all_loc, shape_label, pass_count) in enumerate(loader):
+        for i, (input, target, num_dist, all_loc, shape_label, pass_count) in enumerate(loader):
             n_glimpses = input.shape[1]
             if nonsymbolic:
                 xy, shape = input
@@ -602,9 +602,13 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
             count_map_epoch_loss += map_loss_to_add
             # class-specific analysis and confusion matrix
             # c = (pred.squeeze() == target)
-            for j in range(target.shape[0]):
-                label = target[j]
-                confusion_matrix[label-config.min_num, pred[j]-config.min_num] += 1
+            for dist in [0, 1, 2]:
+                ind = num_dist == dist
+                target_subset = target[ind]
+                pred_subset = pred[ind]
+                for j in range(target_subset.shape[0]):
+                    label = target_subset[j]
+                    confusion_matrix[dist, label-config.min_num, pred_subset[j]-config.min_num] += 1
         # These two lines should be the same
         # map_epoch_loss / len(loader.dataset)
         # test_results['map loss'].mean()
@@ -988,17 +992,22 @@ def plot_performance(test_results, train_losses, train_acc, confs, ep, config):
     # acc_on_difficult = accuracy.loc[ep, 5.0]['accuracy']
     # print(f'Testset {ts}, Accuracy on level 5 difficulty: {acc_on_difficult}')
 
-    fig, axs = plt.subplots(2, 2, figsize=(10, 10))
-    shape_lum = product(config.test_shapes, config.lum_sets)
-    axs = axs.flatten()
-    for i, (ax, (shape, lum)) in enumerate(zip(axs, shape_lum)):
-        ax.matshow(confs[i])
-        ax.set_aspect('equal', adjustable='box')
-        ax.set_title(f'test shapes={shape} lums={lum}')
-        ax.set_xticks(ticks, ticklabels)
-        ax.set_xlabel('Predicted Class')
-        ax.set_ylabel('True Class')
-        ax.set_yticks(ticks, ticklabels)
+    fig, axs = plt.subplots(3, 4, figsize=(19, 16))
+    
+    maxes = [mat.max() for mat in confs]
+    vmax = max(maxes)
+    # axs = axs.flatten()
+    for dist in [0, 1, 2]:
+        shape_lum = product(config.test_shapes, config.lum_sets)
+        for i, (shape, lum) in enumerate(shape_lum):
+    # for i, (ax, (shape, lum)) in enumerate(zip(axs, shape_lum)):
+            axs[dist, i].matshow(confs[i][dist, :, :], cmap='Greys', vmin=0, vmax=vmax)
+            axs[dist, i].set_aspect('equal', adjustable='box')
+            axs[dist, i].set_title(f'dist={dist} shapes={shape} lums={lum}')
+            axs[dist, i].set_xticks(ticks, ticklabels)
+            axs[dist, i].set_xlabel('Predicted Class')
+            axs[dist, i].set_ylabel('True Class')
+            axs[dist, i].set_yticks(ticks, ticklabels)
         # ax2 = ax.twinx()
         # ax2.set_yticks(ticks, np.sum(confs[i], axis=1))
     fig.tight_layout()
@@ -1239,6 +1248,7 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     shape_input = config.shape_input
     same = config.same
     shapes = ''.join([str(i) for i in shapes_set])
+    n_glimpses = f'{config.n_glimpses}_' if config.n_glimpses is not None else ''
     # solarize = config.solarize
 
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}{tet}.pkl'
@@ -1248,7 +1258,7 @@ def get_dataset(size, shapes_set, config, lums, solarize):
         if '2channel' in config.shape_input:
             challenge = '_distract2ch'
         else:
-            challenge = '_distract'
+            challenge = '_distract2ch'
     elif config.distract_corner:
         challenge = '_distract_corner'
     elif config.random:
@@ -1257,8 +1267,8 @@ def get_dataset(size, shapes_set, config, lums, solarize):
         challenge = ''
     # distract = '_distract' if config.distract else ''
     solar = 'solarized_' if solarize else ''
-    fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_{solar}{size}.pkl'
-    fname_gw = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_lum{lums}_gw6_{solar}{size}.pkl'
+    # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_{solar}{n_glimpses}{size}.pkl'
+    fname_gw = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_lum{lums}_gw6_{solar}{n_glimpses}{size}.pkl'
     if os.path.exists(fname_gw):
         print(f'Loading saved dataset {fname_gw}')
         data = pd.read_pickle(fname_gw)
@@ -1289,7 +1299,6 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, shape_format, model
     enable the network to rely on an integration of the two streams
     """
     # Create shape and or xy tensors
-    import pdb; pdb.set_trace()
     dataset['shape1'] = dataset['shape']
     shape_array = np.stack(dataset['shape'], axis=0)
     permute=True
@@ -1456,7 +1465,7 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, shape_format, model
     elif 'ghost' in shape_format:
         dset = TensorDataset(input, count_num, count_loc, shape_label, pass_count)
     else:
-        dset = TensorDataset(input, count_num, count_loc, shape_label, pass_count)
+        dset = TensorDataset(input, count_num, dist_num, count_loc, shape_label, pass_count)
         # dset = TensorDataset(input, count_num, dist_num, count_loc, shape_label, pass_count)
         # dset = TensorDataset(input, target, all_loc, shape_label, pass_count)
         # dset = TensorDataset(input, target, true_loc, None, shape_label, pass_count)
@@ -1610,6 +1619,7 @@ def get_config():
     parser.add_argument('--distract_corner', action='store_true', default=False)
     parser.add_argument('--random', action='store_true', default=False)
     parser.add_argument('--solarize', action='store_true', default=False)
+    parser.add_argument('--n_glimpses', type=int, default=None)
     parser.add_argument('--rep', type=int, default=0)
     parser.add_argument('--opt', type=str, default='SGD')
     # parser.add_argument('--tetris', action='store_true', default=False)
@@ -1675,6 +1685,7 @@ def main():
     kernel = '-kernel' if config.outer else ''
     act = '-' + config.act if config.act is not None else ''
     alt_rnn = '2'
+    n_glimpses = f'{config.n_glimpses}_' if config.n_glimpses is not None else ''
     detach = '-detach' if config.detach else ''
     model_desc = f'{model_type}{alt_rnn}{detach}{act}_hsize-{config.h_size}_input-{train_on}{kernel}_{config.shape_input}'
     same = 'same' if config.same else ''
@@ -1692,7 +1703,7 @@ def main():
     # distract = '_distract' if config.distract else ''
     solar = 'solarized_' if config.solarize else ''
     shapes = ''.join([str(i) for i in config.shapestr])
-    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_diff-{min_pass}-{max_pass}_grid{config.grid}_trainshapes-{shapes}{same}{challenge}_gw6_{solar}{train_size}'
+    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_diff-{min_pass}-{max_pass}_grid{config.grid}_trainshapes-{shapes}{same}{challenge}_gw6_{solar}{n_glimpses}{train_size}'
     # train_desc = f'loss-{use_loss}_niters-{n_iters}_{n_epochs}eps'
     withshape = '+shape' if config.learn_shape else ''
     train_desc = f'loss-{use_loss}{withshape}_opt-{config.opt}_drop{drop}_count-{target_type}_{n_epochs}eps_rep{config.rep}'
@@ -1712,15 +1723,15 @@ def main():
 
     # Prepare datasets and torch dataloaders
     #
-    try:
+    # try:
         # config.lum_sets = [[0.1, 0.5, 0.9], [0.2, 0.4, 0.6, 0.8]]
-        config.lum_sets = [[0.1, 0.4, 0.7], [0.3, 0.6, 0.9]]
-        trainset = get_dataset(train_size, config.shapestr, config, [0.1, 0.4, 0.7], solarize=config.solarize)
-        testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
-    except:
-        config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
-        trainset = get_dataset(train_size, config.shapestr, config, [0.0, 0.5, 1.0], solarize=config.solarize)
-        testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
+    config.lum_sets = [[0.1, 0.4, 0.7], [0.3, 0.6, 0.9]]
+    trainset = get_dataset(train_size, config.shapestr, config, [0.1, 0.4, 0.7], solarize=config.solarize)
+    testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
+    # except:
+    #     config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
+    #     trainset = get_dataset(train_size, config.shapestr, config, [0.0, 0.5, 1.0], solarize=config.solarize)
+    #     testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
     train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type, target_type)
     test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type, target_type) for testset in testsets]
     loaders = [train_loader, test_loaders]
@@ -1733,11 +1744,13 @@ def main():
     n_classes = max_num
     n_shapes = 25 # 20 or 25
     pretrained = model_dir + '/ventral/' + config.trained_ventral
+    finetune = True if 'finetune' in model_type else False
     mod_args = {'h_size': config.h_size, 'act': config.act,
                 'small_weights': config.small_weights, 'outer':config.outer,
                 'detach': config.detach, 'format':config.shape_input,
                 'n_classes':n_classes, 'dropout': drop, 'grid': config.grid,
-                'n_shapes':n_shapes, 'pretrained':pretrained, 'train_on':train_on}
+                'n_shapes':n_shapes, 'pretrained':pretrained, 'train_on':train_on,
+                'finetune': finetune}
     model = get_model(model_type, **mod_args)
     # opt = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
     if config.opt == 'SGD':
