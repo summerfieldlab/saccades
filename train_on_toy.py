@@ -50,7 +50,8 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
     criterion_bce_full_noreduce = nn.BCEWithLogitsLoss(pos_weight=pos_weight_full, reduction='none')
     criterion_bce_count_noreduce = nn.BCEWithLogitsLoss(pos_weight=pos_weight_count, reduction='none')
     n_glimpses = config.max_num
-    if config.distract or config.distract_corner or config.random:
+    # if config.distract or config.distract_corner or config.random:
+    if config.challenge != '':
         n_glimpses += 2
     n_epochs = config.n_epochs
     recurrent_iterations = config.n_iters
@@ -1254,17 +1255,19 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}{tet}.pkl'
     # fname_notet = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}'
     samee = 'same' if same else ''
-    if config.distract:
-        if '2channel' in config.shape_input:
-            challenge = '_distract2ch'
-        else:
-            challenge = '_distract'
-    elif config.distract_corner:
-        challenge = '_distract_corner'
-    elif config.random:
-        challenge = '_random'
-    else:
-        challenge = ''
+    # if config.distract:
+    #     if '2channel' in config.shape_input:
+    #         challenge = '_distract2ch'
+    #     else:
+    #         challenge = '_distract'
+    # elif config.distract_corner:
+    #     challenge = '_distract_corner'
+    # elif config.random:
+    #     challenge = '_random'
+    # else:
+    #     challenge = ''
+    if config.challenge:
+        challenge = '_' + config.challenge
     # distract = '_distract' if config.distract else ''
     solar = 'solarized_' if solarize else ''
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_{solar}{n_glimpses}{size}.pkl'
@@ -1615,9 +1618,10 @@ def get_config():
     parser.add_argument('--learn_shape', action='store_true', default=False, help='for the parametric shape rep, whether to additional train to produce symbolic shape labels')
     parser.add_argument('--shape_input', type=str, default='symbolic', help='Which format to use for what pathway (symbolic, parametric, tetris, or char)')
     parser.add_argument('--same', action='store_true', default=False)
-    parser.add_argument('--distract', action='store_true', default=False)
-    parser.add_argument('--distract_corner', action='store_true', default=False)
-    parser.add_argument('--random', action='store_true', default=False)
+    # parser.add_argument('--distract', action='store_true', default=False)
+    # parser.add_argument('--distract_corner', action='store_true', default=False)
+    # parser.add_argument('--random', action='store_true', default=False)
+    parser.add_argument('--challenge', type=str, default='')
     parser.add_argument('--solarize', action='store_true', default=False)
     parser.add_argument('--n_glimpses', type=int, default=None)
     parser.add_argument('--rep', type=int, default=0)
@@ -1689,21 +1693,22 @@ def main():
     detach = '-detach' if config.detach else ''
     model_desc = f'{model_type}{alt_rnn}{detach}{act}_hsize-{config.h_size}_input-{train_on}{kernel}_{config.shape_input}'
     same = 'same' if config.same else ''
-    if config.distract:
-        if '2channel' in config.shape_input:
-            challenge = '_distract2ch'
-        else:
-            challenge = '_distract'
-    elif config.distract_corner:
-        challenge = '_distract_corner'
-    elif config.random:
-        challenge = '_random'
-    else:
-        challenge = ''
+    # if config.distract:
+    #     if '2channel' in config.shape_input:
+    #         challenge = '_distract2ch'
+    #     else:
+    #         challenge = '_distract'
+    # elif config.distract_corner:
+    #     challenge = '_distract_corner'
+    # elif config.random:
+    #     challenge = '_random'
+    # else:
+    #     challenge = ''
     # distract = '_distract' if config.distract else ''
+    challenge = config.challenge
     solar = 'solarized_' if config.solarize else ''
     shapes = ''.join([str(i) for i in config.shapestr])
-    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_diff-{min_pass}-{max_pass}_grid{config.grid}_trainshapes-{shapes}{same}{challenge}_gw6_{solar}{n_glimpses}{train_size}'
+    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_diff-{min_pass}-{max_pass}_grid{config.grid}_trainshapes-{shapes}{same}_{challenge}_gw6_{solar}{n_glimpses}{train_size}'
     # train_desc = f'loss-{use_loss}_niters-{n_iters}_{n_epochs}eps'
     withshape = '+shape' if config.learn_shape else ''
     train_desc = f'loss-{use_loss}{withshape}_opt-{config.opt}_drop{drop}_count-{target_type}_{n_epochs}eps_rep{config.rep}'
@@ -1735,7 +1740,8 @@ def main():
     train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type, target_type)
     test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type, target_type) for testset in testsets]
     loaders = [train_loader, test_loaders]
-    if config.distract and target_type == 'all':
+    # if config.distract and target_type == 'all':
+    if 'distract' in challenge and target_type == 'all':
         max_num += 2
         config.max_num += 2
 
