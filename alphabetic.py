@@ -230,10 +230,12 @@ def add_char_glimpses_2channel(data, glim_wid=6, solarize=True, lums=[0, 1, 0.5]
     data['solarized image'] = None
     data['noised image'] = None
     data['dist noised image'] = None
+    data['target noised image'] = None
     data['bw glimpse pixels'] = None
     data['sol glimpse pixels'] = None
     data['noi glimpse pixels'] = None
     data['dist noi glimpse pixels'] = None
+    data['target noi glimpse pixels'] = None
     data['char overlap'] = None
     # i=0
     for i in range(len(data)):
@@ -253,6 +255,7 @@ def add_char_glimpses_2channel(data, glim_wid=6, solarize=True, lums=[0, 1, 0.5]
         # Insert the specified shapes into the image at the specified locations
         image = np.zeros((PIXEL_HEIGHT, PIXEL_WIDTH))
         dist_image = np.zeros((PIXEL_HEIGHT, PIXEL_WIDTH))
+        target_image = np.zeros((PIXEL_HEIGHT, PIXEL_WIDTH))
         # plt.matshow(image, origin='lower')
         # plt.plot([3.5, 3.5], [0, 11], color='cyan')
         # plt.plot([7.5, 7.5], [0, 11], color='cyan')
@@ -265,10 +268,11 @@ def add_char_glimpses_2channel(data, glim_wid=6, solarize=True, lums=[0, 1, 0.5]
                 # xx = pixel_width - x - 3
                 # image[yy:yy+char_height:, xx:xx+char_width] = chars[shape_idx]
                 # Add distractors to one channel, everything else to the other
+                image[y:y+CHAR_HEIGHT:, x:x+CHAR_WIDTH] = chars[shape_idx]
                 if shape_idx == 0:
                     dist_image[y:y+CHAR_HEIGHT:, x:x+CHAR_WIDTH] = chars[shape_idx]
                 else:
-                    image[y:y+CHAR_HEIGHT:, x:x+CHAR_WIDTH] = chars[shape_idx]
+                    target_image[y:y+CHAR_HEIGHT:, x:x+CHAR_WIDTH] = chars[shape_idx]
 
         # Convert glimpse coordinates to pixel coordinates
         scaled_glimpse_coords = row.xy.copy()
@@ -286,10 +290,12 @@ def add_char_glimpses_2channel(data, glim_wid=6, solarize=True, lums=[0, 1, 0.5]
         border = half_glim
         image_wbord = np.zeros((PIXEL_HEIGHT+glim_wid, PIXEL_WIDTH+glim_wid))
         dist_image_wbord = np.zeros((PIXEL_HEIGHT+glim_wid, PIXEL_WIDTH+glim_wid))
+        target_image_wbord = np.zeros((PIXEL_HEIGHT+glim_wid, PIXEL_WIDTH+glim_wid))
         image_wbord[half_glim:-half_glim,half_glim:-half_glim] = image
         dist_image_wbord[half_glim:-half_glim,half_glim:-half_glim] = dist_image
+        target_image_wbord[half_glim:-half_glim,half_glim:-half_glim] = target_image
         glimpse_pixels = [image_wbord[y-half_glim:y+half_glim, x-half_glim:x+half_glim].flatten() for x,y in glimpse_coords]
-        dist_glimpse_pixels = [dist_image_wbord[y-half_glim:y+half_glim, x-half_glim:x+half_glim].flatten() for x,y in glimpse_coords]
+        # dist_glimpse_pixels = [dist_image_wbord[y-half_glim:y+half_glim, x-half_glim:x+half_glim].flatten() for x,y in glimpse_coords]
 
         data.at[i, 'bw image'] = image_wbord
         data.at[i, 'bw glimpse pixels'] = glimpse_pixels
@@ -312,13 +318,17 @@ def add_char_glimpses_2channel(data, glim_wid=6, solarize=True, lums=[0, 1, 0.5]
             data.at[i, 'sol glimpse pixels'] = glimpse_pixels_sol
             noised = get_solarized_noise(image_wbord, fg, bg)
             dist_noised = get_solarized_noise(dist_image_wbord, fg, bg)
+            target_noised = get_solarized_noise(target_image_wbord, fg, bg)
             glimpse_pixels_noi = [noised[y-half_glim:y+half_glim, x-half_glim:x+half_glim].flatten() for x,y in glimpse_coords]
             dist_glimpse_pixels_noi = [dist_noised[y-half_glim:y+half_glim, x-half_glim:x+half_glim].flatten() for x,y in glimpse_coords]
+            target_glimpse_pixels_noi = [target_noised[y-half_glim:y+half_glim, x-half_glim:x+half_glim].flatten() for x,y in glimpse_coords]
 
             data.at[i, 'noised image'] = noised
             data.at[i, 'dist noised image'] = dist_noised
+            data.at[i, 'target noised image'] = dist_noised
             data.at[i, 'noi glimpse pixels'] = glimpse_pixels_noi
             data.at[i, 'dist noi glimpse pixels'] = dist_glimpse_pixels_noi
+            data.at[i, 'target noi glimpse pixels'] = target_glimpse_pixels_noi
 
         # Extract glimpse pixels
         # glimpse_pixels[0].shape
@@ -405,31 +415,27 @@ def main():
     parser.add_argument('--same', action='store_true', default=False)
     parser.add_argument('--solarize', action='store_true', default=False)
     parser.add_argument('--grid', type=int, default=9)
-    parser.add_argument('--distract', action='store_true', default=False)
-    parser.add_argument('--distract_corner', action='store_true', default=False)
-    parser.add_argument('--random', action='store_true', default=False)
+    parser.add_argument('--challenge', type=str, default=None)
+    # parser.add_argument('--distract', action='store_true', default=False)
+    # parser.add_argument('--distract_corner', action='store_true', default=False)
+    # parser.add_argument('--random', action='store_true', default=False)
+    parser.add_argument('--n_glimpses', type=int, default=None, help='how many glimpses to generate per image')
     conf = parser.parse_args()
 
     same = 'same' if conf.same else ''
-    if conf.distract:
-        challenge = '_distract2ch'
-    elif conf.distract_corner:
-        challenge = '_distract_corner'
-    elif conf.random:
-        challenge = '_random'
-    else:
-        challenge = ''
+    challenge = f'_{conf.challenge}' if conf.challenge is not None else ''
     solar = 'solarized_' if conf.solarize else ''
     shapes = ''.join(conf.shapes)
-    fname_gw = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_lum{conf.luminances}_gw{conf.glimpse_wid}_{solar}{conf.size}.pkl'
-    fname = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_{conf.size}.pkl'
+    n_glimpses = f'{conf.n_glimpses}_' if conf.n_glimpses is not None else ''
+    fname_gw = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_lum{conf.luminances}_gw{conf.glimpse_wid}_{solar}{n_glimpses}{conf.size}.pkl'
+    fname = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_{n_glimpses}{conf.size}.pkl'
     # if os.path.exists(fname):
     #     print(f'Loading saved dataset {fname}')
     #     data = pd.read_pickle(fname)
     # else:
     print('Generating new dataset')
     data = toy.generate_dataset(conf)
-    data.to_pickle(fname)
+    data.to_pickle(fname) # a bit silly that I save this dataset and then load it in the next step only to then save another version with the images filled in, just the way the development went but could be refactored to not do this
     conf = process_args(conf)  # this get's called in generate_dataset, does it need to be called twize? there's got to be a better way
     # data = add_char_glimpses(data, conf.glimpse_wid, conf.solarize, conf.luminances)
     data = add_char_glimpses_2channel(data, conf.glimpse_wid, conf.solarize, conf.luminances)

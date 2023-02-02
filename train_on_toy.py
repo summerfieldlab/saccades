@@ -979,16 +979,16 @@ def plot_performance(test_results, train_losses, train_acc, confs, ep, config):
 
     # by integration score plot
     # accuracy = accuracy[]
-    plt.plot(train_acc_count[:ep + 1], ':', color='green', label='training accuracy')
-    sns.lineplot(data=accuracy, x='epoch', hue='pass count',
-                 y='accuracy', alpha=0.7)
-    plt.legend()
-    plt.grid()
-    plt.title(title)
-    plt.ylim([0, 102])
-    plt.ylabel('Accuracy on number task')
-    plt.savefig(f'figures/toy/letters/accuracy_byintegration_{base_name}.png', dpi=300)
-    plt.close()
+    # plt.plot(train_acc_count[:ep + 1], ':', color='green', label='training accuracy')
+    # sns.lineplot(data=accuracy, x='epoch', hue='pass count',
+    #              y='accuracy', alpha=0.7)
+    # plt.legend()
+    # plt.grid()
+    # plt.title(title)
+    # plt.ylim([0, 102])
+    # plt.ylabel('Accuracy on number task')
+    # plt.savefig(f'figures/toy/letters/accuracy_byintegration_{base_name}.png', dpi=300)
+    # plt.close()
 
     # acc_on_difficult = accuracy.loc[ep, 5.0]['accuracy']
     # print(f'Testset {ts}, Accuracy on level 5 difficulty: {acc_on_difficult}')
@@ -1360,10 +1360,13 @@ def get_loader(dataset, train_on, cross_entropy_loss, outer, shape_format, model
                 image_array = image_array.reshape(nex, -1)
                 shape_input = torch.tensor(image_array).float().to(device)
             else:
-                glimpse_array = np.stack(dataset['noi glimpse pixels'], axis=0)
-                if ('2channel' in shape_format) and ('dist noi glimpse pixels' in dataset.columns):
+                if ('2channel' in shape_format):
+                    assert 'dist noi glimpse pixels' in dataset.columns
+                    tar_glimpse_array = np.stack(dataset['target noi glimpse pixels'], axis=0)
                     dist_glimpse_array = np.stack(dataset['dist noi glimpse pixels'], axis=0)
-                    glimpse_array = np.concatenate((glimpse_array, dist_glimpse_array), axis=-1)
+                    glimpse_array = np.concatenate((tar_glimpse_array, dist_glimpse_array), axis=-1)
+                else:
+                    glimpse_array = np.stack(dataset['noi glimpse pixels'], axis=0)
                 glimpse_array -= glimpse_array.min()
                 glimpse_array /= glimpse_array.max()
                 print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
