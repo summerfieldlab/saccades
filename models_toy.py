@@ -38,15 +38,21 @@ class PretrainedVentral(nn.Module):
         self.output_size = output_size
         self.train_on = kwargs['train_on']
         to_load = kwargs['pretrained']
+        self.finetune = kwargs['finetune']
         if self.train_on == 'xy':
             shape_rep_len = 0
         else:
-            # shape_rep_len = 2
-            shape_rep_len = len(TRAIN_SHAPES)
-        self.ventral = vmod.MLP(pix_size, 1024, 3, 25)
+            shape_rep_len = 2
+            # shape_rep_len = len(TRAIN_SHAPES)
+        if self.finetune:
+            drop = 0.25
+        else:
+            drop = 0
+        self.ventral = vmod.MLP(pix_size, 1024, 3, 25, drop=drop)
         self.ventral.load_state_dict(torch.load(to_load))
         self.ventral.eval()
-        self.rnn = RNNClassifier2stream(shape_rep_len+100, hidden_size, map_size, output_size, **kwargs)
+        # self.rnn = RNNClassifier2stream(shape_rep_len+100, hidden_size, map_size, output_size, **kwargs)
+        self.rnn = RNNClassifier2stream(shape_rep_len, hidden_size, map_size, output_size, **kwargs)
         self.initHidden = self.rnn.initHidden
 
     def forward(self, x, hidden):
@@ -61,10 +67,13 @@ class PretrainedVentral(nn.Module):
             with torch.no_grad():
                 # shape_rep = self.ventral(pix)[:, 1:3] # ignore 0th, take 1st and 2nd column
                 shape_rep, penult = self.ventral(pix) # for BCE experiment
-                shape_rep = torch.sigmoid(shape_rep[:, TRAIN_SHAPES])
+                # shape_rep = torch.sigmoid(shape_rep[:, TRAIN_SHAPES])
                 # the 0th output was trained with  BCEWithLogitsLoss so need to apply sigmoid
                 # shape_rep[:, 0] = torch.sigmoid(shape_rep[:, 0])
-                shape_rep = torch.concat((shape_rep, penult), dim=1)
+                # shape_rep = torch.concat((shape_rep[:, :2], penult), dim=1)
+                shape_rep = shape_rep[:, :2]
+                if not self.finetune:
+                    shape_rep = shape_rep.detach().clone()
             if self.train_on == 'both':
                 # x = torch.concat((xy, shape_rep.detach().clone()), dim=1)
                 x = torch.concat((xy, shape_rep), dim=1)
