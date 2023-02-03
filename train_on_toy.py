@@ -212,8 +212,10 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
 
             if config.use_loss == 'num':
                 loss = num_loss
-                count_map_loss_to_add = -1
-                all_map_loss_to_add  = -1
+                # count_map_loss_to_add = -1
+                # all_map_loss_to_add  = -1
+                # map_loss = -1
+                map_loss_to_add = -1
             elif config.use_loss == 'map':
                 # map_loss, map_loss_to_add = get_map_loss()
                 map_loss, map_loss_to_add = get_map_loss()
@@ -542,8 +544,10 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
                 loss = num_loss
                 # map_loss = criterion_bce_noreduce(map, locations)
                 map_loss_to_add = -1
-                full_map_loss_to_add = -1
-                count_map_loss_to_add = -1
+                # full_map_loss_to_add = -1
+                # count_map_loss_to_add = -1
+                # map_loss = -1
+                map_loss_to_add = -1
             elif config.use_loss == 'map':
                 # Average over map locations, sum over instances
                 # map_loss = criterion_bce_noreduce(map, locations)
