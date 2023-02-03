@@ -64,16 +64,20 @@ class PretrainedVentral(nn.Module):
             xy = x[:, :2]  # xy coords are first two input features
             pix = x[:, 2:]
         if self.train_on != 'xy':
-            with torch.no_grad():
-                # shape_rep = self.ventral(pix)[:, 1:3] # ignore 0th, take 1st and 2nd column
-                shape_rep, penult = self.ventral(pix) # for BCE experiment
-                # shape_rep = torch.sigmoid(shape_rep[:, TRAIN_SHAPES])
-                # the 0th output was trained with  BCEWithLogitsLoss so need to apply sigmoid
-                # shape_rep[:, 0] = torch.sigmoid(shape_rep[:, 0])
-                # shape_rep = torch.concat((shape_rep[:, :2], penult), dim=1)
+            if not self.finetune:
+                with torch.no_grad():
+                    # shape_rep = self.ventral(pix)[:, 1:3] # ignore 0th, take 1st and 2nd column
+                    shape_rep, penult = self.ventral(pix) # for BCE experiment
+                    # shape_rep = torch.sigmoid(shape_rep[:, TRAIN_SHAPES])
+                    # the 0th output was trained with  BCEWithLogitsLoss so need to apply sigmoid
+                    # shape_rep[:, 0] = torch.sigmoid(shape_rep[:, 0])
+                    # shape_rep = torch.concat((shape_rep[:, :2], penult), dim=1)
+                    shape_rep = shape_rep[:, :2].detach().clone()
+            else:
+                # shape_rep, penult = self.ventral(pix)
+                shape_rep, _ = self.ventral(pix)
                 shape_rep = shape_rep[:, :2]
-                if not self.finetune:
-                    shape_rep = shape_rep.detach().clone()
+
             if self.train_on == 'both':
                 # x = torch.concat((xy, shape_rep.detach().clone()), dim=1)
                 x = torch.concat((xy, shape_rep), dim=1)
