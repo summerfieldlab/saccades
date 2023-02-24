@@ -1,11 +1,93 @@
+# %%
 import numpy as np
 import math
 import torch
 from torch import nn
-from scipy.stats import special_ortho_group
+from scipy.stats import special_ortho_group, multivariate_normal
 from models import RNN, RNN2, MultRNN, MultiplicativeLayer
 import ventral_models as vmod
 TRAIN_SHAPES = [0,  2,  4,  5,  8,  9, 14, 15, 16]
+imsize = (48, 42)
+image_template = np.zeros((48, 42))
+GRID = np.linspace(0.1, 0.9, 6)
+
+def soft_argmax(voxels, device):
+	"""
+    Copied from https://github.com/Fdevmsy/PyTorch-Soft-Argmax
+	Arguments: voxel patch in shape (batch_size, channel, H, W, depth)
+	Return: 3D coordinates in shape (batch_size, channel, 3)
+	"""
+	assert voxels.dim()==5
+	# alpha is here to make the largest element really big, so it
+	# would become very close to 1 after softmax
+	alpha = 1000.0 
+	N,C,H,W,D = voxels.shape
+	soft_max = nn.functional.softmax(voxels.view(N,C,-1)*alpha,dim=2)
+	soft_max = soft_max.view(voxels.shape)
+	indices_kernel = torch.arange(start=0,end=H*W*D, device=device).unsqueeze(0)
+	indices_kernel = indices_kernel.view((H,W,D))
+	conv = soft_max*indices_kernel
+	indices = conv.sum(2).sum(2).sum(2)
+	z = indices%D
+	y = (indices/D).floor()%W
+	x = (((indices/D).floor())/W).floor()%H
+	coords = torch.stack([x,y,z],dim=2)
+	return coords
+
+# %%
+class Glimpsing(nn.Module):
+    def __init__(self, salience_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        self.device = kwargs['device']
+        self.height, self.width = salience_size
+        self.glimpse_width = 6
+        self.half_glim = self.glimpse_width // 2
+        pix_size = self.glimpse_width**2
+        self.where_look_x = nn.Linear(hidden_size + self.height*self.width, self.width)
+        self.where_look_y = nn.Linear(hidden_size + self.height*self.width, self.height)
+        
+        self.Softmax = nn.LogSoftmax(dim=1)
+        self.pretrained_ventral = PretrainedVentral(pix_size, hidden_size, map_size, output_size, **kwargs)
+        self.initHidden = self.pretrained_ventral.initHidden
+    
+    def forward(self, image, saliency, hidden):
+        pre_glimpse = torch.cat((hidden, saliency.view(hidden.shape[0], -1)), dim=1)
+        x = self.where_look_x(pre_glimpse)
+        N, H = x.shape
+        import pdb; pdb.set_trace()
+        x = soft_argmax(x.view(N, 1, H, 1, 1), self.device)[:,:,0]  # Take first dim because 1D argmax
+        y = self.where_look_y(pre_glimpse)
+        N, H = y.shape
+        y = soft_argmax(y.view(N, 1, H, 1, 1), self.device)[:,:,0] # Take first dim because 1D argmax
+        glimpse_contents = self.extract_glimpse(x, y, image)
+        input_ = torch.cat((x, y, glimpse_contents), dim=1)
+        num, shape, map_, hidden = self.pretrained_ventral(input_, hidden)
+        return num, shape, map_, hidden
+    
+    def extract_glimpse(self, x, y, image):
+        """
+        In the spatial (4-D) case, for input with shape (N,C,Hin,Win) and grid with shape (N,Hout,Wout,2)
+        """
+
+        hg = self.half_glim
+        import pdb;pdb.set_trace()
+        N, nch, Hin, Win = image.shape
+        x = torch.stack((x-2.5, x-1.5, x-0.5, x+0.5, x+1.5, x+2.5), dim=-1)
+        x -= self.width/2
+        x /= self.width/2
+        y = torch.stack((y-2.5, y-1.5, y-0.5, y+0.5, y+1.5, y+2.5), dim=-1)
+        y -= self.height/2
+        y /= self.height/2
+        grid = torch.stack((x, y)).view(N, 6, 6, 2)
+
+        # theta = 
+        # size = (N, 1, self.glimpse_width, self.glimpse_width)
+        # grid = nn.functional.affine_grid(theta, size)
+        glimpse_pixels = nn.functional.grid_sample(image.view(N, 1, Hin, Win), grid)
+        # glimpse_pixels = image[y - hg: y + hg, x - hg: x + hg].flatten()
+        return glimpse_pixels.flatten()
+
+
 
 class FeedForward(nn.Module):
     def __init__(self, in_size, hidden_size, map_size, output_size, **kwargs):
@@ -37,23 +119,41 @@ class PretrainedVentral(nn.Module):
         super().__init__()
         self.output_size = output_size
         self.train_on = kwargs['train_on']
-        to_load = kwargs['pretrained']
+        ventral_file = kwargs['ventral']
+        if 'loss-ce' in ventral_file:
+            self.ce = True
         self.finetune = kwargs['finetune']
+        self.sort = kwargs['sort']
+        no_pretrain = kwargs['no_pretrain']
         if self.train_on == 'xy':
             shape_rep_len = 0
-        else:
+        elif self.sort:
             shape_rep_len = 2
+        else:
+            # shape_rep_len = 8
+            shape_rep_len = 4
             # shape_rep_len = len(TRAIN_SHAPES)
         if self.finetune:
             drop = 0.25
         else:
             drop = 0
-        self.ventral = vmod.MLP(pix_size, 1024, 3, 25, drop=drop)
-        self.ventral.load_state_dict(torch.load(to_load))
-        self.ventral.eval()
+        ventral_output_size = 25
+        output_size = 6
+        if 'mlp' in ventral_file:
+            self.ventral = vmod.MLP(pix_size, 1024, 3, output_size, drop=drop)
+        elif 'cnn' in ventral_file:
+            self.cnn = True
+            width = 6; height = 6
+            penult_size = 4
+            self.ventral = vmod.ConvNet(width, height, penult_size, ventral_output_size, dropout=drop)
+        if not no_pretrain:
+            print('Loading saved ventral model parameters...')
+            self.ventral.load_state_dict(torch.load(ventral_file))
+        # self.ventral.eval()
         # self.rnn = RNNClassifier2stream(shape_rep_len+100, hidden_size, map_size, output_size, **kwargs)
         self.rnn = RNNClassifier2stream(shape_rep_len, hidden_size, map_size, output_size, **kwargs)
         self.initHidden = self.rnn.initHidden
+        self.Softmax = nn.LogSoftmax(dim=1)
 
     def forward(self, x, hidden):
         if self.train_on == 'shape':
@@ -63,6 +163,9 @@ class PretrainedVentral(nn.Module):
         else:
             xy = x[:, :2]  # xy coords are first two input features
             pix = x[:, 2:]
+        if self.cnn:
+            n, p = pix.shape
+            pix = pix.view(n, 1, 6, 6)
         if self.train_on != 'xy':
             if not self.finetune:
                 with torch.no_grad():
@@ -72,11 +175,22 @@ class PretrainedVentral(nn.Module):
                     # the 0th output was trained with  BCEWithLogitsLoss so need to apply sigmoid
                     # shape_rep[:, 0] = torch.sigmoid(shape_rep[:, 0])
                     # shape_rep = torch.concat((shape_rep[:, :2], penult), dim=1)
-                    shape_rep = shape_rep[:, :2].detach().clone()
+                    if self.sort:
+                        shape_rep = shape_rep[:, :2].detach().clone()
+                        if self.ce:
+                            shape_rep = self.Softmax(shape_rep)
+                    else:
+                        shape_rep = penult.detach().clone()
+
             else:
-                # shape_rep, penult = self.ventral(pix)
-                shape_rep, _ = self.ventral(pix)
-                shape_rep = shape_rep[:, :2]
+                shape_rep, penult = self.ventral(pix)
+                # shape_rep, _ = self.ventral(pix)
+                if self.sort:
+                    shape_rep = shape_rep[:, :2]
+                    if self.ce:
+                            shape_rep = self.Softmax(shape_rep)
+                else:
+                    shape_rep = penult
 
             if self.train_on == 'both':
                 # x = torch.concat((xy, shape_rep.detach().clone()), dim=1)
@@ -86,8 +200,8 @@ class PretrainedVentral(nn.Module):
         elif self.train_on == 'xy':
             x = xy
 
-        num, shape, map_, hidden = self.rnn(x, hidden)
-        return num, shape, map_, hidden
+        num, shape, map_, hidden, premap, penult = self.rnn(x, hidden)
+        return num, shape, map_, hidden, premap, penult
 
 
 class RNNClassifier2stream2map(nn.Module):
@@ -440,7 +554,7 @@ class RNNClassifier2stream(nn.Module):
             penult = torch.cat((penult, notmap), dim=1)
         # num = self.num_readout(map_to_pass_on)
         num = self.num_readout(penult)
-        return num, pix, map_, hidden
+        return num, pix, map_, hidden, x, penult
 
 
 class RNNClassifier(nn.Module):
