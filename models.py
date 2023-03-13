@@ -284,7 +284,7 @@ class MapReadoutModel(nn.Module):
         super().__init__()
         self.map_size = map_size
         self.hidden_size = hidden_size
-        self.act = kwargs['act'] if 'act' in kwargs.keys() else lrelu
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else 'lrelu'
         self.detach = kwargs['detached'] if 'detached' in kwargs.keys() else False
         drop = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0
         self.embedding = nn.Linear(input_size, hidden_size)
