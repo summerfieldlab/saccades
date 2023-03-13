@@ -54,7 +54,6 @@ class Glimpsing(nn.Module):
         pre_glimpse = torch.cat((hidden, saliency.view(hidden.shape[0], -1)), dim=1)
         x = self.where_look_x(pre_glimpse)
         N, H = x.shape
-        import pdb; pdb.set_trace()
         x = soft_argmax(x.view(N, 1, H, 1, 1), self.device)[:,:,0]  # Take first dim because 1D argmax
         y = self.where_look_y(pre_glimpse)
         N, H = y.shape
@@ -70,7 +69,6 @@ class Glimpsing(nn.Module):
         """
 
         hg = self.half_glim
-        import pdb;pdb.set_trace()
         N, nch, Hin, Win = image.shape
         x = torch.stack((x-2.5, x-1.5, x-0.5, x+0.5, x+1.5, x+2.5), dim=-1)
         x -= self.width/2
@@ -120,6 +118,7 @@ class PretrainedVentral(nn.Module):
         self.output_size = output_size
         self.train_on = kwargs['train_on']
         ventral_file = kwargs['ventral']
+        self.whole_im = kwargs['whole']
         if 'loss-ce' in ventral_file:
             self.ce = True
         self.finetune = kwargs['finetune']
@@ -138,14 +137,17 @@ class PretrainedVentral(nn.Module):
         else:
             drop = 0
         ventral_output_size = 25
-        output_size = 6
+        # output_size = 6
         if 'mlp' in ventral_file:
-            self.ventral = vmod.MLP(pix_size, 1024, 3, output_size, drop=drop)
+            self.ventral = vmod.MLP(pix_size, 1024, 3, ventral_output_size, drop=drop)
         elif 'cnn' in ventral_file:
             self.cnn = True
-            width = 6; height = 6
+            if self.whole_im:
+                self.width = 42; self.height = 48
+            else:
+                self.width = 6; self.height = 6
             penult_size = 4
-            self.ventral = vmod.ConvNet(width, height, penult_size, ventral_output_size, dropout=drop)
+            self.ventral = vmod.ConvNet(self.width, self.height, penult_size, ventral_output_size, dropout=drop)
         if not no_pretrain:
             print('Loading saved ventral model parameters...')
             self.ventral.load_state_dict(torch.load(ventral_file))
@@ -153,7 +155,7 @@ class PretrainedVentral(nn.Module):
         # self.rnn = RNNClassifier2stream(shape_rep_len+100, hidden_size, map_size, output_size, **kwargs)
         self.rnn = RNNClassifier2stream(shape_rep_len, hidden_size, map_size, output_size, **kwargs)
         self.initHidden = self.rnn.initHidden
-        self.Softmax = nn.LogSoftmax(dim=1)
+        self.Softmax = nn.Softmax(dim=1)
 
     def forward(self, x, hidden):
         if self.train_on == 'shape':
@@ -163,9 +165,9 @@ class PretrainedVentral(nn.Module):
         else:
             xy = x[:, :2]  # xy coords are first two input features
             pix = x[:, 2:]
-        if self.cnn:
+        if self.cnn and not self.whole_im and self.train_on != 'xy':
             n, p = pix.shape
-            pix = pix.view(n, 1, 6, 6)
+            pix = pix.view(n, 1, self.width, self.height)
         if self.train_on != 'xy':
             if not self.finetune:
                 with torch.no_grad():
@@ -194,7 +196,7 @@ class PretrainedVentral(nn.Module):
 
             if self.train_on == 'both':
                 # x = torch.concat((xy, shape_rep.detach().clone()), dim=1)
-                x = torch.concat((xy, shape_rep), dim=1)
+                x = torch.cat((xy, shape_rep), dim=1)
             elif self.train_on == 'shape':
                 x = shape_rep
         elif self.train_on == 'xy':
@@ -493,7 +495,7 @@ class RNNClassifier2stream(nn.Module):
         drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
         self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
         self.pix_embedding = nn.Linear(pix_size, hidden_size//2)
-        self.pix_embedding2 = nn.Linear(hidden_size//2, hidden_size//2)
+        # self.pix_embedding2 = nn.Linear(hidden_size//2, hidden_size//2)
         # self.shape_readout = nn.Linear(hidden_size, n_shapes)
         self.xy_embedding = nn.Linear(2, hidden_size//2)
         # self.joint_embedding = nn.Linear(hidden_size//2 + n_shapes, hidden_size)
@@ -521,7 +523,7 @@ class RNNClassifier2stream(nn.Module):
             pix = x[:, 2:]
             xy = self.LReLU(self.xy_embedding(xy))
             pix = self.LReLU(self.pix_embedding(pix))
-            pix = self.LReLU(self.pix_embedding2(pix))
+            # pix = self.LReLU(self.pix_embedding2(pix))
             # shape = self.shape_readout(pix)
             # shape_detached = shape.detach().clone()
             # combined = torch.cat((shape, xy, pix), dim=-1)
@@ -674,7 +676,6 @@ class NumAsMapsum2stream(nn.Module):
             map_to_pass_on = sig.detach().clone()
         else:
             map_to_pass_on = sig
-        # import pdb;pdb.set_trace()
         mapsum = torch.sum(map_to_pass_on, 1, keepdim=True)
         num = self.num_readout(mapsum)
         # num = torch.round(torch.sum(x, 1))

@@ -159,12 +159,15 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
         # map_epoch_loss = 0
         count_map_epoch_loss = 0
         shape_epoch_loss = 0
-        no_shuffle = ['recurrent_control', 'cnn', 'feedforward']
+        no_shuffle = ['recurrent_control', 'cnn', 'feedforward', 'bigcnn', 'whole']
+        whole = any([name in config.model_type for name in no_shuffle])
+        if 'pretrained_ventral' in config.model_type:
+            whole = False
+
         for i, (input, target, num_dist, locations, shape_label, _) in enumerate(loader):
             assert all(locations.sum(dim=1) == target)
             n_glimpses = input.shape[1]
-
-            if config.model_type not in no_shuffle:
+            if not whole:
                 seq_len = input.shape[1]
                 # Shuffle glimpse order on each batch
                 for i, row in enumerate(input):
@@ -172,7 +175,7 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
             input_dim = input.shape[0]
 
             rnn.zero_grad()
-            if 'cnn' not in config.model_type and 'feedforward' not in config.model_type or 'pretrained' in config.model_type:
+            if ('cnn' not in config.model_type and 'feedforward' not in config.model_type) or 'ventral' in config.model_type:
                 hidden = rnn.initHidden(input_dim)
                 if config.model_type != 'hyper':
                     hidden = hidden.to(device)
@@ -182,23 +185,25 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
             # shape = torch.tensor(data['shape']).float()
             # target = torch.tensor(data['numerosity']).long()
 
-            if ('cnn' in config.model_type or 'feedforward' in config.model_type) and 'pretrained' not in config.model_type:
-                pred_num, map = rnn(input)
+            if ('cnn' in config.model_type or 'feedforward' in config.model_type) and 'ventral' not in config.model_type:
+                pred_num, map, _ = rnn(input)
             else:
                 for _ in range(recurrent_iterations):
                     for t in range(n_glimpses):
                         if config.model_type == 'recurrent_control':
                             pred_num, map, hidden = rnn(input, hidden)
+                        elif 'whole' in config.model_type:
+                            pred_num, pred_shape, map, hidden, _, _ = rnn(input, hidden)
                         else:
                             pred_num, pred_shape, map, hidden, _, _ = rnn(input[:, t, :], hidden)
-                            if learn_shape:
-                                shape_loss_mse = criterion_mse(pred_shape, shape_label[:, t, :])*10
-                                shape_loss_ce = criterion(pred_shape, shape_label[:, t, :])
-                                shape_loss = shape_loss_mse + shape_loss_ce
-                                shape_epoch_loss += shape_loss.item()
-                                shape_loss.backward(retain_graph=True)
-                            else:
-                                shape_epoch_loss += -1
+                        if learn_shape:
+                            shape_loss_mse = criterion_mse(pred_shape, shape_label[:, t, :])*10
+                            shape_loss_ce = criterion(pred_shape, shape_label[:, t, :])
+                            shape_loss = shape_loss_mse + shape_loss_ce
+                            shape_epoch_loss += shape_loss.item()
+                            shape_loss.backward(retain_graph=True)
+                        else:
+                            shape_epoch_loss += -1
             if cross_entropy:
                 num_loss = criterion(pred_num, target)
                 pred = pred_num.argmax(dim=1, keepdim=True)
@@ -211,6 +216,7 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
                 map_loss_to_add = map_loss.item()
 
                 return map_loss, map_loss_to_add
+
             if config.use_loss == 'num':
                 loss = num_loss
                 # count_map_loss_to_add = -1
@@ -294,7 +300,7 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
             # shape = torch.tensor(data['shape']).float()
             # target = torch.tensor(data['numerosity']).long()
             if 'cnn' in config.model_type:
-                pred_num, map = rnn(input)
+                pred_num, map, _ = rnn(input)
             else:
                 for _ in range(recurrent_iterations):
                     for t in range(n_glimpses):
@@ -593,7 +599,7 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
             else:
                 input_dim = input.shape[0]
             batch_results = pd.DataFrame()
-            if 'cnn' not in config.model_type and 'feedforward' not in config.model_type or 'pretrained' in config.model_type:
+            if 'cnn' not in config.model_type and 'feedforward' not in config.model_type or 'ventral' in config.model_type:
                 hidden = rnn.initHidden(input_dim)
                 if config.model_type != 'hyper':
                     hidden = hidden.to(device)
@@ -602,8 +608,8 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
             # xy = torch.tensor(data['xy']).float()
             # shape = torch.tensor(data['shape']).float()
             # target = torch.tensor(data['numerosity']).long()
-            if ('cnn' in config.model_type or 'feedforward' in config.model_type) and 'pretrained' not in config.model_type:
-                pred_num, map = rnn(input)
+            if ('cnn' in config.model_type or 'feedforward' in config.model_type) and 'ventral' not in config.model_type:
+                pred_num, map, _ = rnn(input)
             else:
                 for _ in range(recurrent_iterations):
                     if config.model_type == 'hyper':
@@ -614,15 +620,17 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
                                 pred_num, map, hidden = rnn(xy[:, t, :], shape[:, t, :, :], hidden)
                             elif config.model_type == 'recurrent_control':
                                 pred_num, map, hidden = rnn(input, hidden)
+                            elif 'whole' in config.model_type:
+                                pred_num, pred_shape, map, hidden, _, _ = rnn(input, hidden)
                             else:
                                 pred_num, pred_shape, map, hidden, _, _ = rnn(input[:, t, :], hidden)
-                                if learn_shape:
-                                    shape_loss_mse = criterion_mse(pred_shape, shape_label[:, t, :])*10
-                                    shape_loss_ce = criterion(pred_shape, shape_label[:, t, :])
-                                    shape_loss = shape_loss_mse + shape_loss_ce
-                                    shape_epoch_loss += shape_loss.item()
-                                else:
-                                    shape_epoch_loss += -1
+                            if learn_shape:
+                                shape_loss_mse = criterion_mse(pred_shape, shape_label[:, t, :])*10
+                                shape_loss_ce = criterion(pred_shape, shape_label[:, t, :])
+                                shape_loss = shape_loss_mse + shape_loss_ce
+                                shape_epoch_loss += shape_loss.item()
+                            else:
+                                shape_epoch_loss += -1
 
             if cross_entropy:
                 num_loss = criterion_noreduce(pred_num, target)
@@ -764,7 +772,7 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
             # shape = torch.tensor(data['shape']).float()
             # target = torch.tensor(data['numerosity']).long()
             if 'cnn' in config.model_type:
-                pred_num, map = rnn(input)
+                pred_num, map, _ = rnn(input)
             else:
                 for _ in range(recurrent_iterations):
                     if config.model_type == 'hyper':
@@ -1094,14 +1102,22 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
 
         return (epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss,
                 map_epoch_loss, test_results, confusion_matrix)
+    savethisep = False
+    threshold = 51
     if config.save_act:
         print('Saving untrained activations...')
         save_activations(rnn, test_loaders, base_name + '_init', config)
     test_results = pd.DataFrame()
+    tr_accuracy = 0
     for ep in range(n_epochs):
-        if ep == 50 and config.save_act:
-            print('Saving midway activations...')
-            save_activations(rnn, test_loaders, base_name + '_midway', config)
+        # if ep == 50 and config.save_act:
+        if tr_accuracy > threshold:
+            savethisep = True
+            threshold += 25 # This will be 51,76, and then 101 so we'll save at 51 and 76
+        if config.save_act and savethisep:
+            print(f'Saving midway activations at {threshold-26}% accuracy...')
+            save_activations(rnn, test_loaders, f'{base_name}_acc{threshold-26}', config)
+            savethisep = False
         epoch_timer = Timer()
         if nonsymbolic:
             train_f = train_nosymbol
@@ -1219,51 +1235,93 @@ def train_model(rnn, optimizer, scheduler, loaders, config):
 
 @torch.no_grad()
 def save_activations(model, test_loaders, basename, config):
+    """
+    Pass data through model and save activations at various points in the architecture.
+
+    Include other trial details: number of targets, number of distractors, model prediction
+    (softmax outputs), xy coordinates (in pixels).
+
+    Args:
+        model (torch nn.Module): The torch model whose activations should be calculated and saved
+        test_loaders (list): torch DataLoaders for each of the test datasets
+        basename (str): base file name indicating relevant model, data, and training parameters
+        config (Namespace): configuration variables for these model run
+    """
     model.eval()
+    softmax = nn.Softmax(dim=1)
     shape_lum = product(config.test_shapes, config.lum_sets)
     n_glimpses = config.n_glimpses
     test_names = ['validation', 'new-luminances', 'new-shapes', 'new_both']
+    sets_to_save = [0, 3]
     # 
     
-    # for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(test_loaders, shape_lum)):
+    for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(test_loaders, shape_lum)):
     # only save new-both test set for now
-    ts = 3
-    test_loader = test_loaders[-1]
-    start = 0
-    test_size = len(test_loader.dataset)
-    hidden_act = np.zeros((test_size, n_glimpses, config.h_size))
-    premap_act = np.zeros((test_size, n_glimpses, config.h_size))
-    penult_act = np.zeros((test_size, n_glimpses, config.grid**2))
-    numerosity = np.zeros((test_size,))
-    dist_num = np.zeros((test_size,))
-    predicted_num = np.zeros((test_size,))
-    correct = np.zeros((test_size,))
-    for i, (input, target, num_dist, all_loc, shape_label, pass_count) in enumerate(test_loader):
-        batch_size = input.shape[0]
-        hidden = model.initHidden(batch_size).to(device)
-        numerosity[start: start + batch_size] = target.cpu().detach().numpy()
-        dist_num[start: start + batch_size] = num_dist.cpu().detach().numpy()
-        for t in range(n_glimpses):
-            pred_num, _, _, hidden, premap, penult = model(input[:, t, :], hidden)
-            hidden_act[start: start + batch_size, t] = hidden.cpu().detach().numpy()
-            premap_act[start: start + batch_size, t] = premap.cpu().detach().numpy()
-            penult_act[start: start + batch_size, t] = penult.cpu().detach().numpy()
-        pred = pred_num.argmax(dim=1, keepdim=True)
-        predicted_num[start: start + batch_size] = pred.cpu().detach().numpy().squeeze()
-        correct[start: start + batch_size] = pred.eq(target.view_as(pred)).cpu().detach().numpy().squeeze()
+    # ts = 3
+    # test_loader = test_loaders[-1]
+        if ts not in sets_to_save:
+            continue
+        # Initialize
+        start = 0
+        test_size = len(test_loader.dataset)
+        is_cnn = 'cnn' in config.model_type and 'ventral' not in config.model_type
+        if is_cnn:
+            premap_act = np.zeros((test_size, model.fc1_size))
+        else:
+            hidden_act = np.zeros((test_size, n_glimpses, config.h_size))
+            premap_act = np.zeros((test_size, n_glimpses, config.h_size))
+            penult_act = np.zeros((test_size, n_glimpses, config.grid**2))
+        glimpse_coords = np.zeros((test_size, n_glimpses, 2))
+        numerosity = np.zeros((test_size,))
+        dist_num = np.zeros((test_size,))
+        predicted_num = np.zeros((test_size, 6))
+        correct = np.zeros((test_size,))
+        # Loop through minibatches
+        for i, (input_, target, num_dist, all_loc, shape_label, pass_count) in enumerate(test_loader):
+            batch_size = input_.shape[0]
+            numerosity[start: start + batch_size] = target.cpu().detach().numpy()
+            dist_num[start: start + batch_size] = num_dist.cpu().detach().numpy()
+            if is_cnn:
+                pred_num, _, premap  = model(input_)
+                premap_act[start: start + batch_size] = premap.cpu().detach().numpy()
+            else:
+                hidden = model.initHidden(batch_size).to(device)
+                xy = input_[:, :, :2].cpu().detach().numpy()
+                glimpse_coords[start: start + batch_size] = xy
+                for t in range(n_glimpses):
+                    pred_num, _, _, hidden, premap, penult = model(input_[:, t, :], hidden)
+                    hidden_act[start: start + batch_size, t] = hidden.cpu().detach().numpy()
+                    premap_act[start: start + batch_size, t] = premap.cpu().detach().numpy()
+                    penult_act[start: start + batch_size, t] = penult.cpu().detach().numpy()
 
-        start += batch_size
-    # Save to file
-    to_save = {'numerosity':numerosity, 'num_distractor':dist_num, 
-                'act_hidden':hidden_act, 'act_premap':premap_act, 
-                'act_penult':penult_act, 'predicted_num':predicted_num, 'correct':correct}
-    savename = f'activations/{basename}_test-{test_names[ts]}'
-    # MATLAB
-    savemat(savename + '.mat', to_save)
-    # Compressed numpy
-    np.savez(savename, numerosity=numerosity, num_distractor=dist_num, 
-                act_hidden=hidden_act, act_premap=premap_act, 
-                act_penult=penult_act)
+            pred = pred_num.argmax(dim=1, keepdim=True)
+            predicted_num[start: start + batch_size] = softmax(pred_num).cpu().detach().numpy()
+            correct[start: start + batch_size] = pred.eq(target.view_as(pred)).cpu().detach().numpy().squeeze()
+
+            start += batch_size
+        # Save to file
+        savename = f'activations/{basename}_test-{test_names[ts]}'
+        if is_cnn:
+            # Compressed numpy
+            np.savez(savename, numerosity=numerosity, num_distractor=dist_num, 
+                     act_premap=premap_act, 
+                     predicted_num=predicted_num, correct=correct)
+            to_save = {'numerosity':numerosity, 'num_distractor':dist_num, 
+                       'act_premap':premap_act, 
+                       'predicted_num':predicted_num, 'correct':correct}
+        else:
+            # Compressed numpy
+            np.savez(savename, numerosity=numerosity, num_distractor=dist_num, 
+                     act_hidden=hidden_act, act_premap=premap_act, 
+                     act_penult=penult_act, predicted_num=predicted_num, correct=correct,
+                     glimpse_xy=glimpse_coords)
+            to_save = {'numerosity':numerosity, 'num_distractor':dist_num, 
+                        'act_hidden':hidden_act, 'act_premap':premap_act, 
+                        'act_penult':penult_act, 'predicted_num':predicted_num, 'correct':correct,
+                        'glimpse_xy':glimpse_coords}
+        # MATLAB
+        savemat(savename + '.mat', to_save)
+
 
 
 
@@ -1595,8 +1653,7 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     #     challenge = '_random'
     # else:
     #     challenge = ''
-    if config.challenge:
-        challenge = '_' + config.challenge
+    challenge = '_' + config.challenge if config.challenge != '' else ''
     # distract = '_distract' if config.distract else ''
     solar = 'solarized_' if solarize else ''
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_{solar}{n_glimpses}{size}.pkl'
@@ -1684,15 +1741,18 @@ def get_loader(dataset, config):
                 shape_input = torch.tensor(glimpse_array).float().to(device)
 
         elif 'noise' in shape_format:
-            if ('cnn' in model_type and 'pretrained' not in model_type) or 'glimpsing' in model_type:
+            if ('cnn' in model_type and 'ventral' not in model_type) or 'whole' in model_type:
                 image_array = np.stack(dataset['noised image'], axis=0)
                 shape_input = torch.tensor(image_array).float().to(device)
                 shape_input = torch.unsqueeze(shape_input, 1)  # 1 channel
-                if 'glimpsing' in model_type:
-                    salience = np.stack(dataset['saliency'], axis=0)
-                    # standardize
-                    salience /= salience.max()
-                    salience = torch.tensor(salience).float().to(device)
+            elif 'glimpsing' in model_type:
+                image_array = np.stack(dataset['noised image'], axis=0)
+                shape_input = torch.tensor(image_array).float().to(device)
+                shape_input = torch.unsqueeze(shape_input, 1)  # 1 channel
+                salience = np.stack(dataset['saliency'], axis=0)
+                # standardize
+                salience /= salience.max()
+                salience = torch.tensor(salience).float().to(device)
             elif model_type == 'recurrent_control' or model_type == 'feedforward':
                 image_array = np.stack(dataset['noised image'], axis=0)
                 nex, w, h = image_array.shape
@@ -1778,18 +1838,23 @@ def get_loader(dataset, config):
             total_num = dataset['locations'].apply(sum)
             target = torch.tensor(total_num).long().to(device)
             count_num = target
+            if 'numerosity_dist' in dataset.columns:
+                dist_num = torch.tensor(dataset['numerosity_dist']).long().to(device)
+            else:
+                notA = dataset['locations_to_count'].apply(sum)
+                dist_num = torch.tensor(count_num - notA).long().to(device)
         else:
             # target = torch.tensor(dataset['numerosity']).long().to(device)
-            try:
+            if 'numerosity_dist' in dataset.columns:
                 count_num = torch.tensor(dataset['numerosity_count']).long().to(device)
                 dist_num = torch.tensor(dataset['numerosity_dist']).long().to(device)
-            except:
+            else:
                 count_num = torch.tensor(dataset['numerosity']).long().to(device)
+                dist_num = torch.zeros_like(count_num).long().to(device)
     else:
         count_num = torch.tensor(dataset['numerosity']).float().to(device)
     pass_count = torch.tensor(dataset['pass count']).float().to(device)
-    if 'numerosity_dist' in dataset.columns:
-        dist_num = torch.tensor(dataset['numerosity_dist']).long().to(device)
+
     # true_loc = torch.tensor(dataset['locations']).float().to(device)
     if 'locations_count' in dataset.columns:
         count_loc = torch.tensor(dataset['locations_count']).float().to(device)
@@ -1801,6 +1866,7 @@ def get_loader(dataset, config):
         all_loc = torch.tensor(dataset['locations']).float().to(device)
     else:
         all_loc = torch.tensor(dataset['locations']).float().to(device)
+        count_loc = all_loc
     
     if target_type == 'all':
         count_loc = all_loc
@@ -1864,7 +1930,7 @@ def get_model(model_type, **mod_args):
     elif 'feedforward' in model_type:
         in_size = height * width
         model = mod.FeedForward(in_size, hidden_size, map_size, output_size, **mod_args).to(device)
-    elif 'pretrained_ventral' in model_type:
+    elif 'ventral' in model_type:
         model = mod.PretrainedVentral(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     elif 'gated' in model_type:
         if 'map' in model_type:
@@ -2003,7 +2069,7 @@ def get_config():
         config.train_shapes = [letter_map[i] for i in config.train_shapes]
         for j, test_set in enumerate(config.test_shapes):
             config.test_shapes[j] = [letter_map[i] for i in test_set]
-    if 'pretrained_ventral' in config.model_type and config.no_pretrain:
+    if 'ventral' in config.model_type and config.no_pretrain:
         assert 'finetune' in config.model_type  # otherwise the params in the ventral module will never be trained!
     print(config)
     return config
@@ -2082,15 +2148,16 @@ def main():
 
     # Prepare datasets and torch dataloaders
     #
-    # try:
+    try:
         # config.lum_sets = [[0.1, 0.5, 0.9], [0.2, 0.4, 0.6, 0.8]]
-    config.lum_sets = [[0.1, 0.4, 0.7], [0.3, 0.6, 0.9]]
-    trainset = get_dataset(train_size, config.shapestr, config, [0.1, 0.4, 0.7], solarize=config.solarize)
-    testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
-    # except:
-    #     config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
-    #     trainset = get_dataset(train_size, config.shapestr, config, [0.0, 0.5, 1.0], solarize=config.solarize)
-    #     testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
+        config.lum_sets = [[0.1, 0.4, 0.7], [0.3, 0.6, 0.9]]
+        trainset = get_dataset(train_size, config.shapestr, config, [0.1, 0.4, 0.7], solarize=config.solarize)
+        testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
+    except:
+        config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
+        trainset = get_dataset(train_size, config.shapestr, config, [0.0, 0.5, 1.0], solarize=config.solarize)
+        testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
+    
     # train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type, target_type)
     # test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type, target_type) for testset in testsets]
     train_loader = get_loader(trainset, config)
@@ -2106,21 +2173,27 @@ def main():
     no_symbol = True if config.shape_input == 'parametric' else False
     n_classes = max_num
     n_shapes = 25 # 20 or 25
-    ventral = model_dir + '/ventral/' + config.ventral
+    if config.ventral is not None:
+        ventral = model_dir + '/ventral/' + config.ventral
+    else:
+        ventral = None
     finetune = True if 'finetune' in model_type else False
+    whole_im = True if 'whole' in model_type else False
     mod_args = {'h_size': config.h_size, 'act': config.act,
                 'small_weights': config.small_weights, 'outer':config.outer,
                 'detach': config.detach, 'format':config.shape_input,
                 'n_classes':n_classes, 'dropout': drop, 'grid': config.grid,
                 'n_shapes':n_shapes, 'ventral':ventral, 'train_on':train_on,
                 'finetune': finetune, 'device':device, 'sort':config.sort,
-                'no_pretrain': config.no_pretrain}
+                'no_pretrain': config.no_pretrain, 'whole':whole_im}
     model = get_model(model_type, **mod_args)
     # opt = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
     if config.opt == 'SGD':
+        start_lr = 0.1
         opt = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
     elif config.opt == 'Adam':
-        opt = Adam(model.parameters(), weight_decay=wd, amsgrad=True)
+        start_lr = 0.01 if config.use_loss == 'num' else 0.001
+        opt = Adam(model.parameters(), weight_decay=wd, amsgrad=True, lr=start_lr)
     # scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)
     scheduler = StepLR(opt, step_size=n_epochs/20, gamma=0.7)
 

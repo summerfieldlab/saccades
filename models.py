@@ -599,12 +599,12 @@ class ConvNet(nn.Module):
 
         # pass through FC layers
         # self.fc1 = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), 120)  # size input, size output
-        # self.fc1_size = 120
-        self.fc1_size = map_size
+        self.fc1_size = 256
+        # self.fc1_size = 
         # import pdb; pdb.set_trace()
         self.fc1 = nn.Linear(int(self.cnn3_nchannels_out * self.cnn3_width_out * self.cnn3_height_out), self.fc1_size)  # size input, size output
-
-        self.fc2 = nn.Linear(self.fc1_size, output_size)
+        self.fc2 = nn.Linear(self.fc1_size, map_size)
+        self.fc3 = nn.Linear(map_size, output_size)
 
         # Dropout
         self.drop_layer = nn.Dropout(p=dropout)
@@ -617,8 +617,9 @@ class ConvNet(nn.Module):
         # add dropout before fully connected layers, widest part of network
         x = self.drop_layer(x)
         fc1 = self.LReLU(self.fc1(x))
-        out = self.fc2(fc1)
-        return out, fc1
+        fc2 = self.LReLU(self.fc2(fc1))
+        out = self.fc3(fc2)
+        return out, fc2, fc1
 
 
 class PixConvNet(nn.Module):
