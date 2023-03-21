@@ -113,15 +113,16 @@ def add_char_glimpses(data, conf):
     half_glim = glim_wid//2
     border = half_glim
     # Initialize new columns to be filled
-    data['glimpse coords'] = None
-    data['bw image'] = None
-    data['solarized image'] = None
-    data['noised image'] = None
+    data['glimpse_coords'] = None
+    # data['bw image'] = None
+    # data['solarized image'] = None
+    data['luminances'] = None
+    data['noised_image'] = None
     data['saliency'] = None
     if glimpse:
-        data['bw glimpse pixels'] = None
-        data['sol glimpse pixels'] = None
-        data['noi glimpse pixels'] = None
+        # data['bw glimpse pixels'] = None
+        # data['sol glimpse pixels'] = None
+        data['noi_glimpse_pixels'] = None
     data['char overlap'] = None
    
     # i=0
@@ -143,7 +144,7 @@ def add_char_glimpses(data, conf):
         char_set = [chars[idx] for idx in object_shapes]
 
         char_similarity = get_overlap(char_set)
-        data.at[i, 'char overlap'] = char_similarity
+        data.at[i, 'char_overlap'] = char_similarity
 
         # Insert the specified shapes into the image at the specified locations
         image = np.zeros(image_size)
@@ -174,38 +175,39 @@ def add_char_glimpses(data, conf):
 
         image_wbord = np.zeros((PIXEL_HEIGHT+glim_wid, PIXEL_WIDTH+glim_wid))
         image_wbord[half_glim:-half_glim,half_glim:-half_glim] = image
-        data.at[i, 'bw image'] = image_wbord
+        # data.at[i, 'bw image'] = image_wbord
         glimpse_coords += half_glim
         # if save preglimpsed
         if glimpse > 0:
             glimpse_pixels = [image_wbord[y-half_glim:y+half_glim, x-half_glim:x+half_glim].flatten() for x,y in glimpse_coords]
-            data.at[i, 'bw glimpse pixels'] = glimpse_pixels
+            # data.at[i, 'bw glimpse pixels'] = glimpse_pixels
         # plt.matshow(image_wbord, origin='upper')
         
 
         # Optionaly solarize the image
         if solarize:
             fg, bg = np.random.choice(lums, size=2, replace=False)
+            data.at[i, 'luminances'] = [fg, bg]
             # ensure that the difference between the foreground and background
             # is at least 0.2, which is the smallest difference in the test sets
             while abs(fg - bg) < 0.2:
                 fg, bg = np.random.choice(lums, size=2, replace=False)
             solarized = get_solarized(image_wbord, fg, bg)
-            data.at[i, 'solarized image'] = solarized
+            # data.at[i, 'solarized image'] = solarized
             
             noised = get_solarized_noise(image_wbord, fg, bg)
-            data.at[i, 'noised image'] = noised
+            data.at[i, 'noised_image'] = noised
             # if save preglimpsed
             if glimpse:
                 glimpse_pixels_sol = [solarized[y-half_glim:y+half_glim, x-half_glim:x+half_glim].flatten() for x,y in glimpse_coords]
-                data.at[i, 'sol glimpse pixels'] = glimpse_pixels_sol
+                # data.at[i, 'sol glimpse pixels'] = glimpse_pixels_sol
                 glimpse_pixels_noi = [noised[y-half_glim:y+half_glim, x-half_glim:x+half_glim].flatten() for x,y in glimpse_coords]
-                data.at[i, 'noi glimpse pixels'] = glimpse_pixels_noi
+                data.at[i, 'noi_glimpse_pixels'] = glimpse_pixels_noi
 
         # Extract glimpse pixels
         # glimpse_pixels[0].shape
         # Store glimpse data and image in the original dataframe
-        data.at[i, 'glimpse coords'] = glimpse_coords
+        data.at[i, 'glimpse_coords'] = glimpse_coords
 
         # Plotting
         # glimpse_pixels_to_plot = [image_wbord[y-half_glim:y+half_glim, x-half_glim:x+half_glim]for x,y in glimpse_coords]
@@ -456,6 +458,7 @@ def main():
     # parser.add_argument('--distract_corner', action='store_true', default=False)
     # parser.add_argument('--random', action='store_true', default=False)
     parser.add_argument('--n_glimpses', type=int, default=None, help='how many glimpses to generate per image')
+    parser.add_argument('--policy', type=str, default='cheat+jitter')
     conf = parser.parse_args()
 
     same = 'same' if conf.same else ''
@@ -468,15 +471,20 @@ def main():
         n_glimpses = f'{conf.n_glimpses}_'
     else:
         n_glimpses = ''
-    fname_gw = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_lum{conf.luminances}_gw{conf.glimpse_wid}_{solar}{n_glimpses}{conf.size}.pkl'
-    fname = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_{n_glimpses}{conf.size}.pkl'
+    policy = conf.policy
+    # fname_gw = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_lum{conf.luminances}_gw{conf.glimpse_wid}_{solar}{n_glimpses}{conf.size}.pkl'
+    # fname = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_{n_glimpses}{conf.size}.pkl'
+    fname_gw = f'toysets/num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_{shapes}{same}{challenge}_grid{conf.grid}_policy-{policy}_lum{conf.luminances}_gw{conf.glimpse_wid}_{solar}{n_glimpses}{conf.size}.pkl'
+    fname = f'toysets/num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_{shapes}{same}{challenge}_grid{conf.grid}_policy-{policy}_{n_glimpses}{conf.size}.pkl'
+    
+    
     # if os.path.exists(fname):
     #     print(f'Loading saved dataset {fname}')
     #     data = pd.read_pickle(fname)
     # else:
     print('Generating new dataset')
     data = toy.generate_dataset(conf)
-    data.to_pickle(fname) # a bit silly that I save this dataset and then load it in the next step only to then save another version with the images filled in, just the way the development went but could be refactored to not do this
+    # data.to_pickle(fname) # a bit silly that I save this dataset and then load it in the next step only to then save another version with the images filled in, just the way the development went but could be refactored to not do this
     conf = process_args(conf)  # this get's called in generate_dataset, does it need to be called twize? there's got to be a better way
     glimpse = False if conf.no_glimpse else True
     # data = add_char_glimpses(data, conf.glimpse_wid, conf.solarize, conf.luminances)

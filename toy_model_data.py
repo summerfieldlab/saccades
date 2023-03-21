@@ -17,7 +17,7 @@ EPS = 1e-7
 CHAR_WIDTH = 4
 CHAR_HEIGHT = 5
 
-def get_xy_coords(numerosity, noise_level, n_glimpses, challenge):
+def get_xy_coords(numerosity, n_distract, noise_level, n_glimpses, challenge, policy):
     """Randomly select n spatial locations and take noisy observations of them.
 
     Objects are placed on a grid within a 1x1 square. In the case of a 3x3
@@ -50,7 +50,7 @@ def get_xy_coords(numerosity, noise_level, n_glimpses, challenge):
     # min_dist = 0.3
     # n_glimpses = 4
 
-    if 'random' in challenge:
+    if '+random' in challenge:
         # Number of random glimpses
         n_rand_gl = random.choice([0, 1, 2])
         # Total number of glimpses should still be constant, so if adding less
@@ -65,12 +65,12 @@ def get_xy_coords(numerosity, noise_level, n_glimpses, challenge):
     distractors = []
     if 'distract' in challenge:
         # randomly choose whether to place 0, 1, or 2 distractor objects
-        n_distract = random.choice([0, 1, 2])
+        # n_distract = random.choice([0, 1, 2])
         # select where to place distractor(s)
         empty_locs = [i for i in range(n_symbols) if i not in objects2count]
         if n_distract > 0:
             if 'corner' in challenge:
-                distractors = [0 for distract in range(n_distract)]
+                distractors = [0 for _ in range(n_distract)]
             else:
                 distractors = random.sample(empty_locs, n_distract)
         if 'boost_target' in challenge:
@@ -83,40 +83,45 @@ def get_xy_coords(numerosity, noise_level, n_glimpses, challenge):
     else:
         all_objects = objects2count
 
-    # Each glimpse is associated with an object idx
-    # All objects must be glimpsed, but the glimpse order should be random
-    glimpse_candidates = all_objects.copy()
-    while len(glimpse_candidates) < n_glimpses:
-        to_append = glimpse_candidates.copy()
-        random.shuffle(to_append)
-        glimpse_candidates += to_append
+    if policy == 'random':
+        glimpse_coords = [(np.random.uniform(0.05, 0.95), np.random.uniform(0.05, 0.95)) for _ in range(n_glimpses)]
+        glimpsed_objects = [-1 for _ in range(n_glimpses)]
+        coords_glimpsed_objects = [POSSIBLE_CENTROIDS[object] for object in all_objects]
+    else:
+        # Each glimpse is associated with an object idx
+        # All objects must be glimpsed, but the glimpse order should be random
+        glimpse_candidates = all_objects.copy()
+        while len(glimpse_candidates) < n_glimpses:
+            to_append = glimpse_candidates.copy()
+            random.shuffle(to_append)
+            glimpse_candidates += to_append
 
-    glimpsed_objects = glimpse_candidates[:n_glimpses]
-    random.shuffle(glimpsed_objects)
-    coords_glimpsed_objects = [POSSIBLE_CENTROIDS[object] for object in glimpsed_objects]
+        glimpsed_objects = glimpse_candidates[:n_glimpses]
+        random.shuffle(glimpsed_objects)
+        coords_glimpsed_objects = [POSSIBLE_CENTROIDS[object] for object in glimpsed_objects]
 
-    # Take noisy observations of glimpsed objects
-    # vals = [-0.05, .0, 0.05]
-    # possible_noise = [(x*nl,y*nl) for (x,y) in product(vals, vals)] + [(x*nl,y*nl) for (x,y) in product([-.1, .1], [.0])] + [(x*nl,y*nl) for (x,y) in product([.0], [-.1, .1])]
-    # noises = random.choices(possible_noise, k=n_glimpses)
-    noise_x = np.random.normal(loc=0, scale=nl/2, size=n_glimpses)
-    noise_y = np.random.normal(loc=0, scale=nl/2, size=n_glimpses)
+        # Take noisy observations of glimpsed objects
+        # vals = [-0.05, .0, 0.05]
+        # possible_noise = [(x*nl,y*nl) for (x,y) in product(vals, vals)] + [(x*nl,y*nl) for (x,y) in product([-.1, .1], [.0])] + [(x*nl,y*nl) for (x,y) in product([.0], [-.1, .1])]
+        # noises = random.choices(possible_noise, k=n_glimpses)
+        noise_x = np.random.normal(loc=0, scale=nl/2, size=n_glimpses)
+        noise_y = np.random.normal(loc=0, scale=nl/2, size=n_glimpses)
 
-    while any(abs(noise_x) > nl):
-        idx = np.where(abs(noise_x) > nl)[0]
-        noise_x[idx] = np.random.normal(loc=0, scale=nl, size=len(idx))
-    while any(abs(noise_y) > nl):
-        idx = np.where(abs(noise_y) > nl)[0]
-        noise_y[idx] = np.random.normal(loc=0, scale=nl, size=len(idx))
-    # Add noise to generate sequence of saccadic targets
-    glimpse_coords = [(x+del_x, y+del_y) for ((x,y), (del_x,del_y)) in zip(coords_glimpsed_objects, zip(noise_x, noise_y))]
-    # Add 0,1 or 2 random glimpses
-    if 'random' in challenge:
-        for r_gl in range(n_rand_gl):
-            glimpse_coords.append((np.random.uniform(0.05, 0.95), np.random.uniform(0.05, 0.95)))
-            # glimpsed_objects.append(None)
-        # shuffle order of glimpses
-        random.shuffle(glimpse_coords)
+        while any(abs(noise_x) > nl):
+            idx = np.where(abs(noise_x) > nl)[0]
+            noise_x[idx] = np.random.normal(loc=0, scale=nl, size=len(idx))
+        while any(abs(noise_y) > nl):
+            idx = np.where(abs(noise_y) > nl)[0]
+            noise_y[idx] = np.random.normal(loc=0, scale=nl, size=len(idx))
+        # Add noise to generate sequence of saccadic targets
+        glimpse_coords = [(x+del_x, y+del_y) for ((x,y), (del_x,del_y)) in zip(coords_glimpsed_objects, zip(noise_x, noise_y))]
+        # Add 0,1 or 2 random glimpses
+        if 'random' in challenge:
+            for r_gl in range(n_rand_gl):
+                glimpse_coords.append((np.random.uniform(0.05, 0.95), np.random.uniform(0.05, 0.95)))
+                # glimpsed_objects.append(None)
+            # shuffle order of glimpses
+            random.shuffle(glimpse_coords)
     return np.array(glimpse_coords), np.array(glimpsed_objects), np.array(coords_glimpsed_objects), objects2count, distractors
 
 
@@ -155,7 +160,8 @@ def get_shape_coords(glimpse_coords, glimpsed_objects, noiseless_coords, max_dis
     distractor_shape = 0
     assert distractor_shape not in shapes_set
 
-    unique_objects = np.unique(glimpsed_objects)
+    # unique_objects = np.unique(glimpsed_objects)
+    unique_objects = np.array(objects2count + distractors)
     unique_object_coords = np.unique(noiseless_coords, axis=0)
     num = len(objects2count)
     shape_coords = np.zeros((seq_len, n_shapes))
@@ -178,15 +184,16 @@ def get_shape_coords(glimpse_coords, glimpsed_objects, noiseless_coords, max_dis
     eu_dist = euclidean_distances(glimpse_coords, unique_object_coords)
     # max_dist = np.sqrt((noise_level*0.1)**2 + (noise_level*0.1)**2)
     glimpse_idx, object_idx = np.where(eu_dist <= max_dist + EPS)
-    shape_idx = [shape_map[obj] for obj in unique_objects[object_idx]]
-    # proximity = {idx:np.zeros(9,) for idx in glimpse_idx}
-    for gl_idx, obj_idx, sh_idx in zip(glimpse_idx, object_idx, shape_idx):
-        if max_dist != 0:
-            prox = 1 - (eu_dist[gl_idx, obj_idx]/max_dist)
-        else:  # avoid division by zero
-            prox  = 1
-        # print(f'gl:{gl_idx} obj:{obj_idx} sh:{sh_idx}, prox:{prox}')
-        shape_coords[gl_idx, sh_idx] += prox
+    if object_idx.any(): # only update shape_coords if nonzero
+        shape_idx = [shape_map[obj] for obj in unique_objects[object_idx]]
+        # proximity = {idx:np.zeros(9,) for idx in glimpse_idx}
+        for gl_idx, obj_idx, sh_idx in zip(glimpse_idx, object_idx, shape_idx):
+            if max_dist != 0:
+                prox = 1 - (eu_dist[gl_idx, obj_idx]/max_dist)
+            else:  # avoid division by zero
+                prox  = 1
+            # print(f'gl:{gl_idx} obj:{obj_idx} sh:{sh_idx}, prox:{prox}')
+            shape_coords[gl_idx, sh_idx] += prox
     # shape_coords[glimpse_idx, shape_idx] = 1 - eu_dist[glimpse_idx, obj_idx]/min_dist
     # make sure each glimpse has at least some shape info (not if random glimpses)
     # assert np.all(shape_coords.sum(axis=1) > 0)
@@ -203,8 +210,12 @@ class GlimpsedImage():
 
         # Remove glimpses that have empty shape feature vectors
         n_glimpses = xy_coords.shape[0]
-        self.xy_coords = np.array([xy_coords[i] for i in range(n_glimpses) if sum(shape_coords[i]>0)])
-        self.shape_coords = np.array([coords for coords in shape_coords if sum(coords)>0])
+        # self.xy_coords = np.array([xy_coords[i] for i in range(n_glimpses) if sum(shape_coords[i]>0)])
+        # self.shape_coords = np.array([coords for coords in shape_coords if sum(coords)>0])
+
+        self.xy_coords = xy_coords
+        self.shape_coords = shape_coords
+
         # self.xy_coords = xy_coords
         # self.shape_coords = shape_coords
         self.shape_map = shape_map
@@ -405,7 +416,7 @@ class GlimpsedImage():
 
 
 # def generate_one_example(num, noise_level, pass_count_range, num_range, shapes_set, n_shapes, same):
-def generate_one_example(num, config):
+def generate_one_example(num, n_disract, config):
     """Synthesize a single sequence and determine numerosity."""
     same = config.same
     # distract = config.distract
@@ -419,6 +430,7 @@ def generate_one_example(num, config):
     shapes_set = config.shapes
     n_shapes = config.n_shapes
     challenge = config.challenge
+    policy = config.policy
 
     # if config.distract:
     #     challenge = 'distract'
@@ -448,8 +460,10 @@ def generate_one_example(num, config):
     # This loop will continue synthesizing examples until it finds one within
     # the desired pass count range. The numerosity is determined before hand so
     # that limiting the pass count doesn't bias the distribution of numerosities
+    # TODO: Make this such that pass count range is only considered if included as cli argument. 
+    # Otherwise, range set to be inclusive. That way don't need to bother with setting those cli arguments when not relevant
     while final_pass_count < min_pass_count or final_pass_count > max_pass_count:
-        xy_coords, objects, noiseless_coords, to_count, distractors = get_xy_coords(num, noise_level, n_glimpses, challenge)
+        xy_coords, objects, noiseless_coords, to_count, distractors = get_xy_coords(num, n_disract, noise_level, n_glimpses, challenge, policy)
         shape_coords, shape_map, shape_hist = get_shape_coords(xy_coords, objects, noiseless_coords, max_dist, shapes_set, n_shapes, same, to_count, distractors)
         # print(shape_coords)
 
@@ -483,7 +497,7 @@ def generate_one_example(num, config):
             done = example.check_if_done(pass_count)
 
         if not done:
-            print('DID NOT SOLVE')
+            print('DID NOT SOLVE \r')
             example.pred_num = example.lower_bound
             # example.plot_example(pass_count)
 
@@ -496,20 +510,20 @@ def generate_one_example(num, config):
     example_dict = {'xy': xy_coords, 'shape': shape_coords,
                     'numerosity_count': num,
                     'numerosity_dist': len(distractors),
-                    'predicted num': example.pred_num, 'count': example.count,
+                    'predicted_num': example.pred_num, 'count': example.count,
                     'locations': filled_locations,
                     'locations_count': locations_2count,
                     'locations_distract': locations_dist,
                     'object_coords': noiseless_coords,
                     'shape_map': shape_map,
-                    'pass count': pass_count, 'unresolved ambiguity': not done,
-                    'special xy': example.special_case_xy,
-                    'special shape': example.special_case_shape,
-                    'lower bound': example.lower_bound,
-                    'upper bound': example.upper_bound,
-                    'min shape': example.min_shape, 'min num': example.min_num,
-                    'initial candidates': initial_candidates,
-                    'initial filled locations': initial_filled_locations,
+                    'pass_count': pass_count, 'unresolved ambiguity': not done,
+                    'special_xy': example.special_case_xy,
+                    'special_shape': example.special_case_shape,
+                    'lower_bound': example.lower_bound,
+                    'upper_bound': example.upper_bound,
+                    'min_shape': example.min_shape, 'min num': example.min_num,
+                    'initial_candidates': initial_candidates,
+                    'initial_filled_locations': initial_filled_locations,
                     'shape_hist': shape_hist}
     return example_dict
 
@@ -523,8 +537,14 @@ def generate_dataset(config):
     n_examples = config.size
     n_repeat = np.ceil(n_examples/len(numbers)).astype(int)
     nums = np.tile(numbers, n_repeat)
+    if 'distract' in config.challenge:
+        n_distractor_set = [0, 1, 2]
+        n_repeat_d = np.ceil(n_examples/len(n_distractor_set)).astype(int)
+        n_distract = np.repeat(n_distractor_set, n_repeat_d)
+        data = [generate_one_example(nums[i], n_distract[i], config) for i in range(n_examples)]
+    else:
     # data = [generate_one_example(nums[i], noise_level, pass_count_range, num_range, shapes_set, n_shapes, same) for i in range(n_examples)]
-    data = [generate_one_example(nums[i], config) for i in range(n_examples)]
+        data = [generate_one_example(nums[i], 0, config) for i in range(n_examples)]
     df = pd.DataFrame(data)
     # df['pass count'].hist()
     # df[df['unresolved ambiguity'] == True]
@@ -583,6 +603,7 @@ def main():
     parser.add_argument('--distract', action='store_true', default=False)
     parser.add_argument('--distract_corner', action='store_true', default=False)
     parser.add_argument('--random', action='store_true', default=False)
+    parser.add_argument('--policy', type=str, default='cheat+jitter')
 
     conf = parser.parse_args()
 
@@ -596,8 +617,10 @@ def main():
         challenge = '_random'
     else:
         challenge = ''
+    policy = config.policy
     # adding gw6 to this file name even those there are no glimpses yet just to save trouble
-    fname = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_{conf.size}.pkl'
+    # fname = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_{conf.size}.pkl'
+    fname = f'toysets/num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_{shapes}{same}{challenge}_grid{conf.grid}_policy-{policy}_{n_glimpses}{conf.size}.pkl'
     data = generate_dataset(conf)
     data.to_pickle(fname)
 
