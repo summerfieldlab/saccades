@@ -3,7 +3,7 @@ import math
 import torch
 from torch import nn
 from scipy.stats import special_ortho_group
-from models import RNN, RNN2, MultRNN, MultiplicativeLayer
+from models_old import RNN, RNN2, MultRNN, MultiplicativeLayer
 
 
 class MLP(nn.Module):

@@ -4,7 +4,7 @@ import math
 import torch
 from torch import nn
 from scipy.stats import special_ortho_group, multivariate_normal
-from models import RNN, RNN2, MultRNN, MultiplicativeLayer
+from models_old import RNN, RNN2, MultRNN, MultiplicativeLayer
 import ventral_models as vmod
 TRAIN_SHAPES = [0,  2,  4,  5,  8,  9, 14, 15, 16]
 imsize = (48, 42)

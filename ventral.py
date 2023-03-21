@@ -22,7 +22,7 @@ import torchvision.transforms as transforms
 # from ray.tune.schedulers import ASHAScheduler
 # from prettytable import PrettyTable
 import ventral_models as mod
-from models import ConvNet
+from models_old import ConvNet
 import toy_model_data as toy
 from count_unique import Timer
 

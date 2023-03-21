@@ -1,304 +1,811 @@
+# %%
 import numpy as np
 import math
 import torch
 from torch import nn
-from scipy.stats import special_ortho_group
+from scipy.stats import special_ortho_group, multivariate_normal
+from prettytable import PrettyTable
+from modules import RNN, ConvNet, MultRNN, MultiplicativeLayer
+import ventral_models as vmod
+TRAIN_SHAPES = [0,  2,  4,  5,  8,  9, 14, 15, 16]
+imsize = (48, 42)
+image_template = np.zeros((48, 42))
+GRID = np.linspace(0.1, 0.9, 6)
 
+def choose_model(config, model_dir):
+    # Prepare model arguments
+    model_type = config.model_type
+    device = config.device
+    max_num = config.max_num
+    no_symbol = True if config.shape_input == 'parametric' else False
+    drop = config.dropout
+    n_classes = max_num
+    n_shapes = 25 # 20 or 25
+    if config.ventral is not None:
+        ventral = model_dir + '/ventral/' + config.ventral
+    else:
+        ventral = None
+    finetune = True if 'finetune' in model_type else False
+    whole_im = True if 'whole' in model_type else False
+    mod_args = {'h_size': config.h_size, 'act': config.act,
+                'small_weights': config.small_weights, 'outer':config.outer,
+                'detach': config.detach, 'format':config.shape_input,
+                'n_classes':n_classes, 'dropout': drop, 'grid': config.grid,
+                'n_shapes':n_shapes, 'ventral':ventral, 'train_on':config.train_on,
+                'finetune': finetune, 'device':device, 'sort':config.sort,
+                'no_pretrain': config.no_pretrain, 'whole':whole_im}
+    
+    hidden_size = mod_args['h_size']
+    output_size = mod_args['n_classes'] + 1
+    shape_format = mod_args['format']
+    train_on = mod_args['train_on']
+    grid = mod_args['grid']
+    n_shapes = mod_args['n_shapes']
+    grid_to_im_shape = {3:[27, 24], 6:[48, 42], 9:[69, 60]}
+    height, width = grid_to_im_shape[grid]
+    map_size = grid**2
+    xy_sz = 2
+    if shape_format == 'tetris':
+        sh_sz = 4*4
+    elif 'symbolic' in shape_format:
+        # sh_sz = 64 # 8 * 8
+        # sh_sz = 9
+        sh_sz = n_shapes#20#25
+    elif 'pixel' in shape_format:
+        sh_sz = 2 if '+' in shape_format else 1
 
-# Pixel/shape only models
-class PixelPlusShapeModel(nn.Module):
-    """RNN receives joint embedding of pixels and predicted shape label.
+        sh_sz = (6 * 6) * 2
+    else:
+        sh_sz = 6 * 6
+    if '2channel' in shape_format:
+        sh_sz *= 2
+    in_sz = xy_sz if train_on=='xy' else sh_sz if train_on =='shape' else sh_sz + xy_sz
+    if train_on == 'both' and mod_args['outer']:
+        in_sz += xy_sz * sh_sz
 
-    A convolutional module receives the raw pixel inputs at each glimpse and
-    tries to predict the shape label per glimpse. The last fc layer of the
-    conv module is the pixel embedding to be passed on to the RNN, which is
-    trained to classify the numerosity of the image. The input to the RNN is a
-    joint embedding of the pixel embedding and the predicted shape label. The
-    joint embedding is constructed by concatenating them and applying a random
-    rotation. This rotation may or may not be beneficial. Anecdotal evidence
-    suggests that neural networks can have a hard time using auxiliary inputs
-    when it represented in fewer input units than the primary input.
-    """
-    def __init__(self, hidden_size, **kwargs):
-        super().__init__()
-        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
-        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
-        drop_emb = 0.1
-        device = kwargs['device']
-        # pix_size = 1152
-        # self.width = 48
-        # self.height = 24
-
-        # pix_size = 512
-        # self.width = 16*2
-        # self.height = 16
-
-        pix_size = 288
-        self.width = 12*2
-        self.height = 12
-
-        shape_size = 14
-        self.hidden_size = hidden_size
-        rnn_out_size = 200
-        fc2_size = 10
-        number_size = 8
-
-        self.conv = ConvNet(self.width, self.height, shape_size, drop_emb, big=False)
-        emb_size = self.conv.fc1_size + shape_size # 120 + 14
-        self.LReLU = nn.LeakyReLU(0.1)
-        self.rnn = RNN(emb_size, self.hidden_size, rnn_out_size, dropout=drop_rnn)
-        self.fc2 = nn.Linear(rnn_out_size, fc2_size)
-        self.drop_layer = nn.Dropout(p=drop_readout)
-        self.readout = nn.Linear(fc2_size, number_size)
-        self.softmax = nn.LogSoftmax(dim=1)
-        self.rot_mat = torch.from_numpy(special_ortho_group.rvs(emb_size)).float().to(device)
-
-    def forward(self, pix, hidden):
-        # reshape
-        shape, pix_emb = self.conv(pix.view((-1, 1, self.width, self.height)))
-        shape2 = shape.detach().clone()
-        # Concatenate the shape output and the pixel embedding
-        # Apply a random rotation to embed these two signals together
-        # Otherwise, network may struggle to take advantage of shape signal
-        rnn_input = torch.cat((pix_emb, self.softmax(shape2)), dim=1)
-        rnn_input = torch.matmul(rnn_input, self.rot_mat)
-        rnn_out, hidden = self.rnn(rnn_input, hidden)
-        number = self.LReLU(self.fc2(rnn_out))
-        number = self.drop_layer(number)
-        number = self.readout(number)
-        return number, shape, hidden
-
-
-class ShapeModel(nn.Module):
-    """RNN recieves only the (detached) prediced shape label as input."""
-    def __init__(self, hidden_size, **kwargs):
-        super().__init__()
-        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
-        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
-        drop_emb = 0.1
-        device = kwargs['device']
-        # pix_size = 1152
-        # self.width = 48
-        # self.height = 24
-
-        pix_size = 512
-        self.width = 16*2
-        self.height = 16
-
-        # pix_size = 288
-        # self.width = 12*2
-        # self.height = 12
-
-        shape_size = 14
-        self.hidden_size = hidden_size
-        rnn_out_size = 200
-        fc2_size = 10
-        number_size = 8
-
-        # self.conv = ConvNet(self.width, self.height, shape_size, drop_emb, big=True)
-        self.conv = PixConvNet(self.width, self.height, shape_size, drop_emb)
-        emb_size = self.conv.fc1_size + shape_size # 120 + 14
-        self.LReLU = nn.LeakyReLU(0.1)
-        self.rnn = RNN(7, self.hidden_size, rnn_out_size, dropout=drop_rnn)
-        self.fc2 = nn.Linear(rnn_out_size, fc2_size)
-        self.drop_layer = nn.Dropout(p=drop_readout)
-        self.readout = nn.Linear(fc2_size, number_size)
-        # self.rot_mat = torch.from_numpy(special_ortho_group.rvs(emb_size)).float().to(device)
-        self.softmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, pix, hidden, bce=False):
-        # reshape
-        shape, pix_emb = self.conv(pix.view((-1, 1, self.width, self.height)))
-        if bce:
-            shape2 = torch.sigmoid(shape[:, :7].detach().clone())
+    # Initialize the selected model class
+    if 'num_as_mapsum' in model_type:
+        if shape_format == 'parametric':  #no_symbol:
+            model = NumAsMapsum_nosymbol(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+        elif '2stream' in model_type:
+            model = NumAsMapsum2stream(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
         else:
-            shape2 = self.softmax(shape[:, :7].detach().clone())
-        # Concatenate the shape output and the pixel embedding
-        # Apply a random rotation to embed these two signals together
-        # Otherwise, network may struggle to take advantage of shape signal
-        # rnn_input = torch.cat((pix_emb, self.softmax(shape2)), dim=1)
-        # rnn_input = torch.matmul(rnn_input, self.rot_mat)
-        rnn_out, hidden = self.rnn(shape2, hidden)
-        number = self.LReLU(self.fc2(rnn_out))
-        number = self.drop_layer(number)
-        number = self.readout(number)
-        return number, shape, hidden
+            model = NumAsMapsum(in_sz, hidden_size, output_size, **mod_args).to(device)
+    elif 'glimpsing' in model_type:
+        salience_size = (42, 36)
+        model = Glimpsing(salience_size, hidden_size, map_size, output_size, **mod_args).to(device)
+    elif 'feedforward' in model_type:
+        in_size = height * width
+        model = FeedForward(in_size, hidden_size, map_size, output_size, **mod_args).to(device)
+    elif 'ventral' in model_type:
+        model = PretrainedVentral(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+    elif 'gated' in model_type:
+        if 'map' in model_type:
+            if '2' in model_type:
+                model = MapGated2RNN(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+            else:
+                model = MapGatedSymbolicRNN(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+        else:
+            model = GatedSymbolicRNN(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+    elif 'rnn_classifier' in model_type:
+        if model_type == 'rnn_classifier_par':
+            # Model with two parallel streams at the level of the map. Only one
+            # stream is optimized to match the map. The other of the same size
+            # is free, only influenced by the num loss.
+            mod_args['parallel'] = True
+        elif '2stream' in model_type:
+            if '2map' in model_type:
+                model = RNNClassifier2stream2map(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+            else:
+                model = RNNClassifier2stream(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+        elif shape_format == 'parametric':  #no_symbol:
+            model = RNNClassifier_nosymbol(in_sz, hidden_size, output_size, **mod_args).to(device)
+        else:
+            model = RNNClassifier(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+    elif model_type == 'recurrent_control':
+        # in_sz = 21 * 27  # Size of the images
+        in_size = height * width
+        model = RNNClassifier(in_sz, hidden_size, output_size, **mod_args).to(device)
+    elif model_type == 'rnn_regression':
+        model = RNNRegression(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+    elif model_type == 'mult':
+        model = MultiplicativeModel(in_sz, hidden_size, output_size, **mod_args).to(device)
+    # elif model_type == 'hyper':
+    #     model = HyperModel(in_sz, hidden_size, output_size).to(device)
+    elif 'cnn' in model_type:
+        # width = 24 #21
+        # height = 27
+        dropout = mod_args['dropout']
+        if model_type == 'bigcnn':
+            mod_args['big'] = True
+            model = ConvNet(width, height, map_size, output_size, **mod_args).to(device)
+        else:
+            model = ConvNet(width, height, map_size, output_size, **mod_args).to(device)
+    else:
+        print(f'Model type {model_type} not implemented. Exiting')
+        exit()
+    # if small_weights:
+    #     model.init_small()  # not implemented yet
+    print('Params to learn:')
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"\t {name} {param.shape}")
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f'Total number of trainable model params: {total_params}')
 
+    def count_parameters(model):
+        table = PrettyTable(["Modules", "Parameters"])
+        total_params = 0
+        for name, parameter in model.named_parameters():
+            if not parameter.requires_grad: continue
+            params = parameter.numel()
+            table.add_row([name, params])
+            total_params+=params
+        print(table)
+        print(f"Total Trainable Params: {total_params}")
+        return total_params
 
-class Distinctive(nn.Module):
-    """Intended for case when all shapes are distinctive. """
-    def __init__(self, hidden_size, **kwargs):
+    count_parameters(model)
+    return model
+
+def soft_argmax(voxels, device):
+	"""
+    Copied from https://github.com/Fdevmsy/PyTorch-Soft-Argmax
+	Arguments: voxel patch in shape (batch_size, channel, H, W, depth)
+	Return: 3D coordinates in shape (batch_size, channel, 3)
+	"""
+	assert voxels.dim()==5
+	# alpha is here to make the largest element really big, so it
+	# would become very close to 1 after softmax
+	alpha = 1000.0 
+	N,C,H,W,D = voxels.shape
+	soft_max = nn.functional.softmax(voxels.view(N,C,-1)*alpha,dim=2)
+	soft_max = soft_max.view(voxels.shape)
+	indices_kernel = torch.arange(start=0,end=H*W*D, device=device).unsqueeze(0)
+	indices_kernel = indices_kernel.view((H,W,D))
+	conv = soft_max*indices_kernel
+	indices = conv.sum(2).sum(2).sum(2)
+	z = indices%D
+	y = (indices/D).floor()%W
+	x = (((indices/D).floor())/W).floor()%H
+	coords = torch.stack([x,y,z],dim=2)
+	return coords
+
+# %%
+class Glimpsing(nn.Module):
+    def __init__(self, salience_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
-        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
-        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
-        drop_emb = 0.1
-        # pix_size = 1152
-        # self.width = 48
-        # self.height = 24
+        self.device = kwargs['device']
+        self.height, self.width = salience_size
+        self.glimpse_width = 6
+        self.half_glim = self.glimpse_width // 2
+        pix_size = self.glimpse_width**2
+        self.where_look_x = nn.Linear(hidden_size + self.height*self.width, self.width)
+        self.where_look_y = nn.Linear(hidden_size + self.height*self.width, self.height)
+        
+        self.Softmax = nn.LogSoftmax(dim=1)
+        self.pretrained_ventral = PretrainedVentral(pix_size, hidden_size, map_size, output_size, **kwargs)
+        self.initHidden = self.pretrained_ventral.initHidden
+    
+    def forward(self, image, saliency, hidden):
+        pre_glimpse = torch.cat((hidden, saliency.view(hidden.shape[0], -1)), dim=1)
+        x = self.where_look_x(pre_glimpse)
+        N, H = x.shape
+        x = soft_argmax(x.view(N, 1, H, 1, 1), self.device)[:,:,0]  # Take first dim because 1D argmax
+        y = self.where_look_y(pre_glimpse)
+        N, H = y.shape
+        y = soft_argmax(y.view(N, 1, H, 1, 1), self.device)[:,:,0] # Take first dim because 1D argmax
+        glimpse_contents = self.extract_glimpse(x, y, image)
+        input_ = torch.cat((x, y, glimpse_contents), dim=1)
+        num, shape, map_, hidden = self.pretrained_ventral(input_, hidden)
+        return num, shape, map_, hidden
+    
+    def extract_glimpse(self, x, y, image):
+        """
+        In the spatial (4-D) case, for input with shape (N,C,Hin,Win) and grid with shape (N,Hout,Wout,2)
+        """
 
-        # pix_size = 512
-        # self.width = 16*2
-        # self.height = 16
+        hg = self.half_glim
+        N, nch, Hin, Win = image.shape
+        x = torch.stack((x-2.5, x-1.5, x-0.5, x+0.5, x+1.5, x+2.5), dim=-1)
+        x -= self.width/2
+        x /= self.width/2
+        y = torch.stack((y-2.5, y-1.5, y-0.5, y+0.5, y+1.5, y+2.5), dim=-1)
+        y -= self.height/2
+        y /= self.height/2
+        grid = torch.stack((x, y)).view(N, 6, 6, 2)
 
-        pix_size = 288
-        self.width = 12*2
-        self.height = 12
+        # theta = 
+        # size = (N, 1, self.glimpse_width, self.glimpse_width)
+        # grid = nn.functional.affine_grid(theta, size)
+        glimpse_pixels = nn.functional.grid_sample(image.view(N, 1, Hin, Win), grid)
+        # glimpse_pixels = image[y - hg: y + hg, x - hg: x + hg].flatten()
+        return glimpse_pixels.flatten()
 
-        shape_size = 14
-        self.hidden_size = hidden_size
-        rnn_out_size = 200
-        fc2_size = 10
-        number_size = 8
 
-        self.conv = ConvNet(self.width, self.height, shape_size, drop_emb, big=False)
-        emb_size = self.conv.fc1_size # 120
+
+class FeedForward(nn.Module):
+    def __init__(self, in_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        self.output_size = output_size
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        self.layer1 = nn.Linear(in_size, hidden_size)
+        self.layer2 = nn.Linear(hidden_size, hidden_size)
+        self.layer3 = nn.Linear(hidden_size, hidden_size)
+        self.layer4 = nn.Linear(hidden_size, hidden_size)
+        self.layer5 = nn.Linear(hidden_size, map_size)
+        self.layer6 = nn.Linear(map_size, output_size)
+        self.drop_layer = nn.Dropout(p=drop)
         self.LReLU = nn.LeakyReLU(0.1)
-        self.rnn = RNN(emb_size, self.hidden_size, rnn_out_size, dropout=drop_rnn)
-        self.fc2 = nn.Linear(rnn_out_size, fc2_size)
-        self.drop_layer = nn.Dropout(p=drop_readout)
-        self.readout = nn.Linear(fc2_size, number_size)
 
-    def forward(self, pix, hidden):
-        # reshape
-        shape, pix_emb = self.conv(pix.view((-1, 1, self.width, self.height)))
-        rnn_out, hidden = self.rnn(pix_emb, hidden)
-        number = self.LReLU(self.fc2(rnn_out))
-        number = self.drop_layer(number)
-        number = self.readout(number)
-        return number, shape, hidden
+    def forward(self, x):
+        x = self.LReLU(self.layer1(x))
+        x = self.LReLU(self.layer2(x))
+        x = self.LReLU(self.layer3(x))
+        x = self.LReLU(self.layer4(x))
+        x = self.drop_layer(x)
+        map = self.LReLU(self.layer5(x))
+        out = self.layer6(map)
+        return out, map
 
 
-class DistinctiveCheat(nn.Module):
-    def __init__(self, **kwargs):
+class PretrainedVentral(nn.Module):
+    def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
-        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
-        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
-        input_size = 14
-        self.hidden_size = 25
-        output_size = 25
-        fc2_size = 10
-        number_size = 8
-        self.fc1 = nn.Linear(14, 14)
+        self.output_size = output_size
+        self.train_on = kwargs['train_on']
+        ventral_file = kwargs['ventral']
+        self.whole_im = kwargs['whole']
+        if 'loss-ce' in ventral_file:
+            self.ce = True
+        self.finetune = kwargs['finetune']
+        self.sort = kwargs['sort']
+        no_pretrain = kwargs['no_pretrain']
+        if self.train_on == 'xy':
+            shape_rep_len = 0
+        elif self.sort:
+            shape_rep_len = 2
+        else:
+            # shape_rep_len = 8
+            shape_rep_len = 4
+            # shape_rep_len = len(TRAIN_SHAPES)
+        if self.finetune:
+            drop = 0.25
+        else:
+            drop = 0
+        ventral_output_size = 25
+        # output_size = 6
+        if 'mlp' in ventral_file:
+            self.ventral = vmod.MLP(pix_size, 1024, 3, ventral_output_size, drop=drop)
+        elif 'cnn' in ventral_file:
+            self.cnn = True
+            if self.whole_im:
+                self.width = 42; self.height = 48
+            else:
+                self.width = 6; self.height = 6
+            penult_size = 4
+            self.ventral = vmod.ConvNet(self.width, self.height, penult_size, ventral_output_size, dropout=drop)
+        if not no_pretrain:
+            print('Loading saved ventral model parameters...')
+            self.ventral.load_state_dict(torch.load(ventral_file))
+        # self.ventral.eval()
+        # self.rnn = RNNClassifier2stream(shape_rep_len+100, hidden_size, map_size, output_size, **kwargs)
+        self.rnn = RNNClassifier2stream(shape_rep_len, hidden_size, map_size, output_size, **kwargs)
+        self.initHidden = self.rnn.initHidden
+        self.Softmax = nn.Softmax(dim=1)
+
+    def forward(self, x, hidden):
+        if self.train_on == 'shape':
+            pix = x
+        elif self.train_on == 'xy':
+            xy = x
+        else:
+            xy = x[:, :2]  # xy coords are first two input features
+            pix = x[:, 2:]
+        if self.cnn and not self.whole_im and self.train_on != 'xy':
+            n, p = pix.shape
+            pix = pix.view(n, 1, self.width, self.height)
+        if self.train_on != 'xy':
+            if not self.finetune:
+                with torch.no_grad():
+                    # shape_rep = self.ventral(pix)[:, 1:3] # ignore 0th, take 1st and 2nd column
+                    shape_rep, penult = self.ventral(pix) # for BCE experiment
+                    # shape_rep = torch.sigmoid(shape_rep[:, TRAIN_SHAPES])
+                    # the 0th output was trained with  BCEWithLogitsLoss so need to apply sigmoid
+                    # shape_rep[:, 0] = torch.sigmoid(shape_rep[:, 0])
+                    # shape_rep = torch.concat((shape_rep[:, :2], penult), dim=1)
+                    if self.sort:
+                        shape_rep = shape_rep[:, :2].detach().clone()
+                        if self.ce:
+                            shape_rep = self.Softmax(shape_rep)
+                    else:
+                        shape_rep = penult.detach().clone()
+
+            else:
+                shape_rep, penult = self.ventral(pix)
+                # shape_rep, _ = self.ventral(pix)
+                if self.sort:
+                    shape_rep = shape_rep[:, :2]
+                    if self.ce:
+                            shape_rep = self.Softmax(shape_rep)
+                else:
+                    shape_rep = penult
+
+            if self.train_on == 'both':
+                # x = torch.concat((xy, shape_rep.detach().clone()), dim=1)
+                x = torch.cat((xy, shape_rep), dim=1)
+            elif self.train_on == 'shape':
+                x = shape_rep
+        elif self.train_on == 'xy':
+            x = xy
+
+        num, shape, map_, hidden, premap, penult = self.rnn(x, hidden)
+        return num, shape, map_, hidden, premap, penult
+
+
+class RNNClassifier2stream2map(nn.Module):
+    def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        # map_size = 9
+        self.train_on = kwargs['train_on']
+        self.n_out = 6
+        self.output_size = output_size
+        n_shapes = kwargs['n_shapes'] if 'n_shapes' in kwargs.keys() else 20
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
+
+        self.pix_embedding = nn.Linear(pix_size, hidden_size//2)
+        self.shape_readout = nn.Linear(hidden_size//2, n_shapes)
+
+        self.xy_embedding = nn.Linear(2, hidden_size//2)
+        self.joint_embedding = nn.Linear(hidden_size + n_shapes, hidden_size)
+        self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
+        self.drop_layer = nn.Dropout(p=drop)
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        self.map_dist_readout = nn.Linear(hidden_size, map_size)
+        self.after_map_count = nn.Linear(map_size, map_size)
+        self.after_map_dist = nn.Linear(map_size, map_size)
+        self.after_map_all = nn.Linear(map_size, map_size)
+        if self.par:
+            self.notmap = nn.Linear(hidden_size, map_size)
+            self.num_readout_count = nn.Linear(map_size * 2, output_size)
+            self.num_readout_dist = nn.Linear(map_size * 2, 3)
+            self.num_readout_all = nn.Linear(map_size * 2, output_size +2 )
+        else:
+            self.num_readout_count = nn.Linear(map_size, output_size)
+            self.num_readout_dist = nn.Linear(map_size, 3)
+            self.num_readout_all = nn.Linear(map_size, output_size + 2)
+
+        self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
         self.LReLU = nn.LeakyReLU(0.1)
-        self.rnn = RNN(input_size, self.hidden_size, output_size, dropout=drop_rnn)
-        self.fc2 = nn.Linear(output_size, fc2_size)
-        self.drop_layer = nn.Dropout(p=drop_readout)
-        self.readout = nn.Linear(fc2_size, number_size)
 
-    def forward(self, glimpse_label, hidden):
-        glimpse_emb = self.LReLU(self.fc1(glimpse_label))
-        rnn_out, hidden = self.rnn(glimpse_emb, hidden)
-        number = self.LReLU(self.fc2(rnn_out))
-        number = self.drop_layer(number)
-        number = self.readout(number)
-        return number, hidden
+    def forward(self, x, hidden):
+        if self.train_on == 'both':
+            xy = x[:,:2]  # xy coords are first two input features
+            pix = x[:,2:]
+            xy = self.LReLU(self.xy_embedding(xy))
+            pix = self.LReLU(self.pix_embedding(pix))
+            shape = self.shape_readout(pix)
+            combined = torch.cat((shape, xy, pix), dim=-1)
+        elif self.train_on == 'xy':
+            xy = x
+            xy = self.LReLU(self.xy_embedding(xy))
+            combined = xy
+        elif self.train_on == 'shape':
+            pix = x
+            pix = self.LReLU(self.pix_embedding(pix))
+            shape = self.shape_readout(pix)
+            combined = pix
 
+        x = self.LReLU(self.joint_embedding(combined))
+        x, hidden = self.rnn(x, hidden)
+        x = self.drop_layer(x)
 
-class DistinctiveCheat_small(nn.Module):
-    def __init__(self, **kwargs):
+        map_count = self.map_readout(x)
+        map_dist = self.map_dist_readout(x)
+        # full map is sum of the two submaps
+        map_all = torch.add(map_count, map_dist)
+
+        sig_count = self.sigmoid(map_count)
+        sig_dist = self.sigmoid(map_dist)
+        sig_all = self.sigmoid(map_all)
+        if self.detach:
+            map_to_pass_on_count = sig_count.detach().clone()
+            map_to_pass_on_dist = sig_dist.detach().clone()
+            map_to_pass_on_all = sig_all.detach().clone()
+        else:
+            map_to_pass_on_count = sig_count
+            map_to_pass_on_dist = sig_dist
+            map_to_pass_on_all = sig_all
+
+        penult_count = self.LReLU(self.after_map_count(map_to_pass_on_count))
+        penult_dist = self.LReLU(self.after_map_dist(map_to_pass_on_dist))
+        penult_all = self.LReLU(self.after_map_all(map_to_pass_on_all))
+        # if self.par:
+        #     # Two parallel layers, one to be a map, the other not
+        #     notmap = self.notmap(x)
+        #     penult = torch.cat((penult, notmap), dim=1)
+        # num = self.num_readout(map_to_pass_on)
+        num_count = self.num_readout_count(penult_count)
+        num_dist = self.num_readout_dist(penult_dist)
+        num_all = self.num_readout_all(penult_all)
+        all_num = (num_count, num_dist, num_all)
+        all_maps = (map_count, map_dist, map_all)
+        return all_num, shape, all_maps, hidden
+
+class MapGated2RNN(nn.Module):
+    def __init__(self, sh_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
-        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
-        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
-        input_size = 14
-        self.hidden_size = 25
-        output_size = 25
-        fc2_size = 10
-        number_size = 8
-        # self.fc1 = nn.Linear(14, 14)
-        # self.LReLU = nn.LeakyReLU(0.1)
-        self.rnn = RNN(input_size, self.hidden_size, number_size, dropout=drop_rnn)
-        # self.fc2 = nn.Linear(output_size, fc2_size)
-        # self.drop_layer = nn.Dropout(p=drop_readout)
-        # self.readout = nn.Linear(fc2_size, number_size)
-
-    def forward(self, glimpse_label, hidden):
-        # glimpse_emb = self.LReLU(self.fc1(glimpse_label))
-        number, hidden = self.rnn(glimpse_label, hidden)
-        # number = self.LReLU(self.fc2(rnn_out))
-        # number = self.drop_layer(number)
-        # number = self.readout(number)
-        return number, hidden
-
-
-# Models for min task
-class ContentGated_cheat(nn.Module):
-    """Same as ContentGated except the shape label is passed directly.
-
-    No pixel processing involved. For debugging."""
-    def __init__(self, hidden_size, map_size, output_size, act=None):
-        super().__init__()
-        total_number_size = output_size
-        min_number_size = 4
-        min_shape_size = 4
+        self.output_size = output_size
         self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.out_size = output_size
+        emb_size=100
+        # n_shapes = kwargs['n_shapes'] if 'n_shapes' in kwargs.keys() else 20
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        # self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
+        self.pix_embedding = nn.Linear(sh_size, hidden_size//2)
+        # self.shape_readout = nn.Linear(hidden_size//2, n_shapes)
+        self.xy_embedding = nn.Linear(2, hidden_size//2)
+        self.joint_embedding = nn.Linear(hidden_size, hidden_size)
+        self.rnn_map = RNN(hidden_size, hidden_size, hidden_size, self.act)
+        self.rnn_gate = RNN(hidden_size, hidden_size, hidden_size, self.act)
+        self.drop_layer = nn.Dropout(p=drop)
 
-        self.dorsal = TwoStepModel(map_size, hidden_size, map_size, total_number_size, act=act)
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        self.gate = nn.Linear(hidden_size, map_size)
+        self.after_map = nn.Linear(map_size, map_size)
+        self.num_readout = nn.Linear(map_size, output_size)
 
-        self.softmax = nn.LogSoftmax(dim=1)
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
 
-        size_prod = min_shape_size * total_number_size
-        self.min_shape_readout = nn.Linear(size_prod, min_number_size)
-        self.min_num_readout = nn.Linear(size_prod, min_number_size)
+    def initHidden(self, batch_size):
+        hidden_m = self.rnn_map.initHidden(batch_size)
+        hidden_g = self.rnn_gate.initHidden(batch_size)
+        hidden = torch.cat((hidden_m, hidden_g), dim=1)
+        return hidden
+
+    def forward(self, x, hidden):
+        hidden_map = hidden[:, :self.hidden_size]
+        hidden_gate = hidden[:, self.hidden_size:]
+        xy = x[:,:2]  # xy coords are first two input features
+        shape = x[:,2:]
+        # gate = self.sigmoid(self.gate(shape))
+        # gated = torch.mul(x, gate)
+        # xy = gated[:,:2]  # xy coords are first two input features
+        # shape = gated[:,2:]
+        shape_emb = self.LReLU(self.pix_embedding(shape))
+        xy_emb = self.LReLU(self.xy_embedding(xy))
+        combined = torch.cat((shape_emb, xy_emb), dim=-1)
+        # gated_combined = torch.mul(combined, gate)
+        x = self.LReLU(self.joint_embedding(combined))
+        x_map, hidden_map = self.rnn_map(x, hidden_map)
+        x_gate, hidden_gate = self.rnn_gate(x, hidden_gate)
+        x_map = self.drop_layer(x_map)
+
+        full_map = self.map_readout(x_map)
+        # sig_full = self.sigmoid(full_map)
+        gate = self.sigmoid(self.gate(x_gate))
+        if self.detach:
+            # map_to_pass_on = sig_full.detach().clone()
+            map_to_pass_on = full_map.detach().clone()
+        else:
+            # map_to_pass_on = sig_full
+            map_to_pass_on = full_map
+        gated_map = torch.mul(map_to_pass_on, gate)
+        if self.detach:
+            gated_map_to_pass_on = gated_map.detach().clone()
+        else:
+            gated_map_to_pass_on = gated_map
+        penult = self.LReLU(self.after_map(gated_map_to_pass_on))
+        num = self.num_readout(penult)
+        hidden = torch.cat((hidden_map, hidden_gate), dim=1)
+        return num, shape, (full_map, gated_map), hidden
 
 
-    def forward(self, gaze, shape, hidden):
-        # From the gaze, Dorsal stream creates a map of objects in the image
-        # and counts them
-        number, map_, hidden[0, :, :] = self.dorsal(gaze, hidden[0, :, :])
+class MapGatedSymbolicRNN(nn.Module):
+    def __init__(self, sh_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        self.output_size = output_size
+        emb_size=100
+        # n_shapes = kwargs['n_shapes'] if 'n_shapes' in kwargs.keys() else 20
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        # self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
+        self.pix_embedding = nn.Linear(sh_size, emb_size//2)
+        # self.shape_readout = nn.Linear(hidden_size//2, n_shapes)
+        self.xy_embedding = nn.Linear(2, emb_size//2)
+        self.joint_embedding = nn.Linear(emb_size, hidden_size)
+        self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
+        self.drop_layer = nn.Dropout(p=drop)
 
-        # The same dorsal module (the same parameters) is applied to shape-
-        # gated versions of the gaze, with separate hidden states for each
-        # shape, producing shape-specific counts. No supervision is provided
-        # for these shape-specific counts, so they are also free to take a
-        # different form.
-        bs, size = gaze.shape
-        gate = [label.expand(size, bs).T for label in shape.T]
-        n_hrt, map_hrt, hidden[1, :, :] = self.dorsal(gaze * gate[0], hidden[1, :, :])
-        n_star, map_star, hidden[2, :, :] = self.dorsal(gaze * gate[1], hidden[2, :, :])
-        n_sqre, map_sqre, hidden[3, :, :] = self.dorsal(gaze * gate[2], hidden[3, :, :])
-        n_tri, map_tri, hidden[4, :, :] = self.dorsal(gaze * gate[3], hidden[4, :, :])
-        counts = [number, n_hrt, n_star, n_sqre, n_tri]
-        counts = [self.softmax(count) for count in counts]
-        maps = [map_, map_hrt, map_star, map_sqre, map_tri]
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        self.gate = nn.Linear(hidden_size, map_size)
+        self.after_map = nn.Linear(map_size, map_size)
+        # if self.par:
+        #     self.notmap = nn.Linear(hidden_size, map_size)
+        #     self.num_readout = nn.Linear(map_size * 2, output_size)
+        # else:
+        self.num_readout = nn.Linear(map_size, output_size)
 
-        # These shape-specific counts are contcatenated and passed to linear
-        # readout layers for min shape and min number
-        combined = torch.cat((n_hrt, n_star, n_sqre, n_tri), dim=1)
-        min_shape = self.min_shape_readout(combined)
-        min_number = self.min_num_readout(combined)
+        self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
 
-        return min_shape, min_number, counts, maps, hidden
+    def forward(self, x, hidden):
+        xy = x[:,:2]  # xy coords are first two input features
+        shape = x[:,2:]
+        # gate = self.sigmoid(self.gate(shape))
+        # gated = torch.mul(x, gate)
+        # xy = gated[:,:2]  # xy coords are first two input features
+        # shape = gated[:,2:]
+        shape_emb = self.LReLU(self.pix_embedding(shape))
+        xy_emb = self.LReLU(self.xy_embedding(xy))
+        combined = torch.cat((shape_emb, xy_emb), dim=-1)
+        # gated_combined = torch.mul(combined, gate)
+        x = self.LReLU(self.joint_embedding(combined))
+        x, hidden = self.rnn(x, hidden)
+        x = self.drop_layer(x)
+
+        full_map = self.map_readout(x)
+        # sig_full = self.sigmoid(full_map)
+        gate = self.sigmoid(self.gate(x))
+        if self.detach:
+            # map_to_pass_on = sig_full.detach().clone()
+            map_to_pass_on = full_map.detach().clone()
+        else:
+            # map_to_pass_on = sig_full
+            map_to_pass_on = full_map
+        gated_map = torch.mul(map_to_pass_on, gate)
+        penult = self.LReLU(self.after_map(gated_map))
+        num = self.num_readout(penult)
+        return num, shape, (full_map, gated_map), hidden
 
 
-# Models with integrated pixel and gaze streams
-class MapReadoutModel(nn.Module):
-    """Inpsired by RNNClassifier from models_toy.
+class GatedSymbolicRNN(nn.Module):
+    def __init__(self, sh_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        self.output_size = output_size
+        # n_shapes = kwargs['n_shapes'] if 'n_shapes' in kwargs.keys() else 20
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        # self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
+        self.pix_embedding = nn.Linear(sh_size, hidden_size//2)
+        # self.shape_readout = nn.Linear(hidden_size//2, n_shapes)
+        self.xy_embedding = nn.Linear(2, hidden_size//2)
+        self.gate = nn.Linear(sh_size, sh_size+2)
+        self.joint_embedding = nn.Linear(hidden_size, hidden_size)
+        self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
+        self.drop_layer = nn.Dropout(p=drop)
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        self.after_map = nn.Linear(map_size, map_size)
+        # if self.par:
+        #     self.notmap = nn.Linear(hidden_size, map_size)
+        #     self.num_readout = nn.Linear(map_size * 2, output_size)
+        # else:
+        self.num_readout = nn.Linear(map_size, output_size)
 
-    Pixels and gaze coordinates merge into a joint embedding layer which feeds
-    into RNN. The output of the RNN is treated as a map of the image, from
-    which numerosity is read out.
-    """
+        self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
+
+    def forward(self, x, hidden):
+        xy = x[:,:2]  # xy coords are first two input features
+        shape = x[:,2:]
+        gate = self.sigmoid(self.gate(shape))
+        gated = torch.mul(x, gate)
+        xy = gated[:,:2]  # xy coords are first two input features
+        shape = gated[:,2:]
+        shape_emb = self.LReLU(self.pix_embedding(shape))
+        xy_emb = self.LReLU(self.xy_embedding(xy))
+        combined = torch.cat((shape_emb, xy_emb), dim=-1)
+        # gated_combined = torch.mul(combined, gate)
+        x = self.LReLU(self.joint_embedding(combined))
+        x, hidden = self.rnn(x, hidden)
+        x = self.drop_layer(x)
+
+        map_ = self.map_readout(x)
+        sig = self.sigmoid(map_)
+        if self.detach:
+            map_to_pass_on = sig.detach().clone()
+        else:
+            map_to_pass_on = sig
+        penult = self.LReLU(self.after_map(map_to_pass_on))
+        num = self.num_readout(penult)
+        return num, shape, map_, hidden
+
+class RNNClassifier2stream(nn.Module):
+    def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        # map_size = 9
+        self.train_on = kwargs['train_on']
+        self.output_size = output_size
+        n_shapes = kwargs['n_shapes'] if 'n_shapes' in kwargs.keys() else 20
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
+        self.pix_embedding = nn.Linear(pix_size, hidden_size//2)
+        # self.pix_embedding2 = nn.Linear(hidden_size//2, hidden_size//2)
+        # self.shape_readout = nn.Linear(hidden_size, n_shapes)
+        self.xy_embedding = nn.Linear(2, hidden_size//2)
+        # self.joint_embedding = nn.Linear(hidden_size//2 + n_shapes, hidden_size)
+        if self.train_on == 'both':
+            self.joint_embedding = nn.Linear(hidden_size, hidden_size)
+        else:
+            self.joint_embedding = nn.Linear(hidden_size//2, hidden_size)
+        self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
+        self.drop_layer = nn.Dropout(p=drop)
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        self.after_map = nn.Linear(map_size, map_size)
+        if self.par:
+            self.notmap = nn.Linear(hidden_size, map_size)
+            self.num_readout = nn.Linear(map_size * 2, output_size)
+        else:
+            self.num_readout = nn.Linear(map_size, output_size)
+
+        self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
+
+    def forward(self, x, hidden):
+        if self.train_on == 'both':
+            xy = x[:, :2]  # xy coords are first two input features
+            pix = x[:, 2:]
+            xy = self.LReLU(self.xy_embedding(xy))
+            pix = self.LReLU(self.pix_embedding(pix))
+            # pix = self.LReLU(self.pix_embedding2(pix))
+            # shape = self.shape_readout(pix)
+            # shape_detached = shape.detach().clone()
+            # combined = torch.cat((shape, xy, pix), dim=-1)
+            # combined = torch.cat((shape_detached, xy), dim=-1)
+            combined = torch.cat((xy, pix), dim=-1)
+        elif self.train_on == 'xy':
+            xy = x
+            xy = self.LReLU(self.xy_embedding(xy))
+            combined = xy
+            pix = torch.zeros_like(xy)
+        elif self.train_on == 'shape':
+            pix = x
+            pix = self.LReLU(self.pix_embedding(pix))
+            combined = pix
+        x = self.LReLU(self.joint_embedding(combined))
+        x, hidden = self.rnn(x, hidden)
+        x = self.drop_layer(x)
+
+        map_ = self.map_readout(x)
+        sig = self.sigmoid(map_)
+        if self.detach:
+            map_to_pass_on = sig.detach().clone()
+        else:
+            map_to_pass_on = sig
+
+        penult = self.LReLU(self.after_map(map_to_pass_on))
+        if self.par:
+            # Two parallel layers, one to be a map, the other not
+            notmap = self.notmap(x)
+            penult = torch.cat((penult, notmap), dim=1)
+        # num = self.num_readout(map_to_pass_on)
+        num = self.num_readout(penult)
+        return num, pix, map_, hidden, x, penult
+
+
+class RNNClassifier(nn.Module):
     def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
-        self.map_size = map_size
-        self.hidden_size = hidden_size
-        self.act = kwargs['act'] if 'act' in kwargs.keys() else 'lrelu'
-        self.detach = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        drop = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0
+        # map_size = 9
+        self.output_size = output_size
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
         self.embedding = nn.Linear(input_size, hidden_size)
-        self.rnn = RNN2(hidden_size, hidden_size, hidden_size, self.act)
+        self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
         self.drop_layer = nn.Dropout(p=drop)
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        if self.par:
+            self.notmap = nn.Linear(hidden_size, map_size)
+            self.num_readout = nn.Linear(map_size * 2, output_size)
+        else:
+            self.num_readout = nn.Linear(map_size, output_size)
+
+        self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
+        device = torch.device("cuda")
+        self.mock_shape_pred = torch.zeros((10,)).to(device)
+
+    def forward(self, x, hidden):
+        x = self.LReLU(self.embedding(x))
+        x, hidden = self.rnn(x, hidden)
+        x = self.drop_layer(x)
+
+        map = self.map_readout(x)
+        sig = self.sigmoid(map)
+        if self.detach:
+            map_to_pass_on = sig.detach().clone()
+        else:
+            map_to_pass_on = sig
+        if self.par:
+            # Two parallel layers, one to be a map, the other not
+            notmap = self.notmap(x)
+            penult = torch.cat((map_to_pass_on, notmap), dim=1)
+        else:
+            penult = map_to_pass_on
+        # num = self.num_readout(map_to_pass_on)
+        num = self.num_readout(penult)
+        shape = self.mock_shape_pred
+        return num, shape, map, hidden
+
+
+class RNNClassifier_nosymbol(nn.Module):
+    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        # map_size = 9
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        self.n_shapes = 9
+        self.embedding = nn.Linear(input_size, hidden_size)
+        self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
+        self.baby_rnn = RNN(3, 27, 27, self.act)
+        self.shape_readout = nn.Linear(27, 9)
         self.map_readout = nn.Linear(hidden_size, map_size)
         self.num_readout = nn.Linear(map_size, output_size)
         self.initHidden = self.rnn.initHidden
         self.sigmoid = nn.Sigmoid()
         self.LReLU = nn.LeakyReLU(0.1)
 
-    def forward(self, x, hidden):
-        x = self.LReLU(self.embedding(x))
+    def forward(self, xy, shape, hidden):
+        """shape here will be batchsize x n_kinds_of_shapes x 3."""
+        batch_size = xy.shape[0]
+        baby_hidden = self.baby_rnn.initHidden(batch_size)
+        baby_hidden = baby_hidden.to(shape.device)
+        for i in range(self.n_shapes):
+            shape_emb, baby_hidden = self.baby_rnn(shape[:, i, :], baby_hidden)
+        shape_emb = self.shape_readout(shape_emb)
+        combined = torch.cat((xy, shape_emb), 1)
+        x = self.LReLU(self.embedding(combined))
         x, hidden = self.rnn(x, hidden)
+        map = self.map_readout(x)
+        sig = self.sigmoid(map)
+        if self.detach:
+            map_to_pass_on = sig.detach().clone()
+        else:
+            map_to_pass_on = sig
+        num = self.num_readout(map_to_pass_on)
+        return num, map, shape_emb, hidden
+
+class NumAsMapsum2stream(nn.Module):
+    def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        self.output_size = output_size
+        self.pix_embedding = nn.Linear(pix_size, hidden_size//2)
+        self.xy_embedding = nn.Linear(2, hidden_size//2)
+        self.joint_embedding = nn.Linear(hidden_size, hidden_size)
+        self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
+        self.drop_layer = nn.Dropout(p=drop)
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        self.num_readout = nn.Linear(1, 7)
+        self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
+
+    def forward(self, x, hidden):
+        xy = x[:, :2]  # xy coords are first two input features
+        pix = x[:, 2:]
+        xy = self.LReLU(self.xy_embedding(xy))
+        pix = self.LReLU(self.pix_embedding(pix))
+        combined = torch.cat((xy, pix), dim=-1)
+        x, hidden = self.rnn(combined, hidden)
         x = self.drop_layer(x)
         map_ = self.map_readout(x)
         sig = self.sigmoid(map_)
@@ -306,732 +813,169 @@ class MapReadoutModel(nn.Module):
             map_to_pass_on = sig.detach().clone()
         else:
             map_to_pass_on = sig
-        num = self.num_readout(map_to_pass_on)
+        mapsum = torch.sum(map_to_pass_on, 1, keepdim=True)
+        num = self.num_readout(mapsum)
+        # num = torch.round(torch.sum(x, 1))
+        # num_onehot = nn.functional.one_hot(num, 9)
         return num, map_, hidden
 
-
-class IntegratedModel(nn.Module):
-    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
-        """Integrate pixel and gaze location streams.
-
-        One embedding layer for pixels, merged with place code gaze location
-        before input into RNN trained to produce map of object locations.
-        Three layer conv readout from map.
-        """
+class NumAsMapsum(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, **kwargs):
         super().__init__()
-        act = kwargs['act'] if 'act' in kwargs.keys() else None
-        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
-        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        # dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
-        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
-        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.width = int(np.sqrt(map_size))
-        self.out_size = output_size
-        self.detached = detached
-        # detached=False should always be false for the twostep model here,
-        # self.pix_fc1 = nn.Linear(1152, 2000)
-
-        # self.pix_fc1 = nn.Linear(1152, map_size)  # when glimpse width=24
-        self.pix_fc1 = nn.Linear(288, map_size)  # when glimpse width=12
-        self.LReLU = nn.LeakyReLU(0.1)
-        self.pix_fc2 = nn.Linear(map_size, map_size)
-
-        # even if we want to detach in the forward of this class
-        self.rnn = ConvReadoutMapNet(map_size*2, hidden_size, map_size, output_size, **kwargs)
-        self.readout = self.rnn.readout
-        # self.rnn = TwoStepModel(map_size*2, hidden_size, map_size, output_size, detached=detached, dropout=0)
-        # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-        # self.readout1 = nn.Linear(map_size, map_size, bias=True)
-        # self.readout = nn.Linear(map_size, output_size, bias=True)
-        # self.readout = ConvNet(self.width, self.width, self.out_size, drop_readout, big=False)
-
-    def forward(self, x, hidden):
-        gaze = x[:, :self.map_size]
-        pix = x[:, self.map_size:]
-        pix = self.LReLU(self.pix_fc1(pix))
-        pix = self.LReLU(self.pix_fc2(pix))
-        # pix = torch.relu(self.pix_fc2(pix))
-        combined = torch.cat((gaze, pix), dim=1)
-        number, map_, hidden = self.rnn(combined, hidden)
-
-        return number, map_, hidden
-
-
-class TwoRNNs(nn.Module):
-    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
-        super().__init__()
-        act = kwargs['act'] if 'act' in kwargs.keys() else None
-        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
-        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        # dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
-        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
-        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
-        pix_to_map = kwargs['pix_to_map'] if 'pix_to_map' in kwargs.keys() else False
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.width = int(np.sqrt(map_size))
-        self.out_size = output_size
-        self.detached = detached
-        # detached=False should always be false for the twostep model here,
-        # self.pix_fc1 = nn.Linear(1152, 2000)
-
-        # self.pix_fc1 = nn.Linear(1152, map_size)  # when glimpse width=24
-        pix_sz = 288
-        # Two pixel embedding layers
-        self.pix_fc1 = nn.Linear(pix_sz, map_size)  # when glimpse width=12
-        self.LReLU = nn.LeakyReLU(0.1)
-        self.pix_fc2 = nn.Linear(map_size, map_size)
-
-        # Two RNNs, one for pixels, one to produce a map of objects
-        self.pix_rnn = RNN(pix_sz, hidden_size, map_size, act, eye_weight, drop_rnn)
-        map_in_sz = input_size if pix_to_map else map_size
-        self.map_rnn = RNN(map_in_sz, hidden_size, map_size, act, eye_weight, drop_rnn)
-
-        # Readout from both streams
-        self.pix_readout = nn.Linear(map_size, self.out_size)
-        self.map_readout = ConvNet(self.width, self.width, self.out_size, drop_readout)
-
-        # Combined readout
-        self.fc = nn.Linear(self.out_size*2, self.out_size)
-
-
-    def forward(self, x, hidden, pix_to_map=False):
-        """The first ."""
-        pix = x[:, self.map_size:]
-        pix = self.LReLU(self.pix_fc1(pix))
-        pix = self.LReLU(self.pix_fc2(pix))
-        pix, hidden[self.map_size:] = self.pix_rnn(pix, hidden[self.map_size:])
-        pix = self.LReLU(self.pix_readout(pix))
-
-        gaze = x[:, :self.map_size]
-        if pix_to_map:
-            input_to_map_rnn = torch.cat((gaze, pix), 1)
-        else:
-            input_to_map_rnn = gaze
-        map_, hidden[:self.map_size] = self.map_rnn(input_to_map_rnn, hidden[:self.map_size])
-        gaze = self.map_readout(map.view((-1, 1, self.width, self.width)))
-        combined = torch.cat((pix, gaze), dim=1)
-        number = self.fc(combined)
-        return number, map_, hidden
-
-
-# Gaze only models
-class ThreeStepModel(nn.Module):
-    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
-        super().__init__()
-        act = kwargs['act'] if 'act' in kwargs.keys() else None
-        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
-        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.out_size = output_size
-        self.detached = detached
-        # detached=False should always be false for the twostep model here,
-        # even if we want to detach in the forward of this class
-        # self.rnn = TwoStepModel(input_size, hidden_size, map_size, map_size, detached=False, dropout=0)
-        self.rnn = RNN(input_size, hidden_size, map_size)
-        # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-        self.readout1 = nn.Linear(map_size, map_size//2, bias=True)
-        self.readout2 = nn.Linear(map_size//2, output_size, bias=True)
-
-    def forward(self, x, hidden):
-        # map_, _, hidden = self.rnn(x, hidden)
-        map_, hidden = self.rnn(x, hidden)
-        if self.detached:
-            map_to_pass_on = map_.detach()
-        else:
-            map_to_pass_on = map_
-        map_to_pass_on = torch.tanh(torch.relu(map_to_pass_on))
-        # number = self.readout(torch.sigmoid(map_to_pass_on))
-        # intermediate = torch.relu(self.readout1(map_to_pass_on))
-        number = torch.relu(self.readout1(map_to_pass_on))
-        number = self.readout2(number)
-        # number = torch.relu(self.fc(map))
-        return number, map_, hidden
-
-
-class TwoStepModel(nn.Module):
-    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
-        super().__init__()
-        act = kwargs['act'] if 'act' in kwargs.keys() else None
-        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
-        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.out_size = output_size
-        self.detached = detached
-        self.rnn = RNN(input_size, hidden_size, map_size, act, eye_weight)
+        map_size = 9
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.embedding = nn.Linear(input_size, hidden_size)
+        self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
+        self.readout = nn.Linear(hidden_size, map_size)
         self.initHidden = self.rnn.initHidden
-        # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-        self.drop_layer = nn.Dropout(p=dropout)
-        self.readout = nn.Linear(map_size, output_size, bias=True)
-
-    def forward(self, x, hidden):
-        map_, hidden = self.rnn(x, hidden)
-        map_ = self.drop_layer(map_)
-        if self.detached:
-            map_to_pass_on = map_.detach()
-        else:
-            map_to_pass_on = map_
-        # If this model is mapping rather than counting, nonlineartities get applied later
-        if self.map_size != self.out_size: # counting
-            map_to_pass_on = torch.tanh(torch.relu(map_to_pass_on))
-        else: # mapping
-            map_to_pass_on = self.drop_layer(map_to_pass_on)
-
-        number = self.readout(map_to_pass_on)
-        # number = torch.relu(self.fc(map))
-        return number, map_, hidden
-
-
-class ConvReadoutMapNet(nn.Module):
-    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
-        super().__init__()
-        act = kwargs['act'] if 'act' in kwargs.keys() else None
-        eye_weight = kwargs['eye_weight'] if 'eye_weight' in kwargs.keys() else False
-        detached = kwargs['detached'] if 'detached' in kwargs.keys() else False
-        drop_rnn = kwargs['drop_rnn'] if 'drop_rnn' in kwargs.keys() else 0.0
-        drop_readout = kwargs['drop_readout'] if 'drop_readout' in kwargs.keys() else 0.0
-        self.rotate = kwargs['rotate'] if 'rotate' in kwargs.keys() else False
-        big = kwargs['big'] if 'big' in kwargs.keys() else False
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.width = int(np.sqrt(map_size))
-        self.out_size = output_size
-        self.detached = detached
-        self.rnn = RNN(input_size, hidden_size, map_size, act, eye_weight, drop_rnn)
-        self.initHidden = self.rnn.initHidden
-        self.readout = ConvNet(self.width, self.width, self.out_size, drop_readout, big=big)
-        if self.rotate:
-            self.rot_mat = torch.from_numpy(special_ortho_group.rvs(input_size)).float()
-
-
-    def forward(self, x, hidden):
-        batch_size = x.shape[0]
-        if self.rotate:
-            x = torch.matmul(x, self.rot_mat)
-        map_, hidden = self.rnn(x, hidden)
-        # map_ = self.drop_layer(map_)
-        if self.detached:
-            map_to_pass_on = map_.detach()
-        else:
-            map_to_pass_on = map_
-
-        # If this model is mapping rather than counting, nonlineartities get applied later
-        if self.map_size != self.out_size: # counting
-            map_to_pass_on = torch.tanh(torch.relu(map_to_pass_on))
-        if self.rotate:
-            map_to_pass_on = torch.matmul(map_to_pass_on, self.rot_mat)
-        map_to_pass_on = map_to_pass_on.view((-1, 1, self.width, self.width))
-        number, _ = self.readout(map_to_pass_on)
-        # number = torch.relu(self.fc(map))
-        return number, map_, hidden
-
-
-class ConvNet(nn.Module):
-    def __init__(self, width, height, map_size, output_size, **kwargs):
-        super().__init__()
-        grid = kwargs['grid'] if 'grid' in kwargs.keys() else 9
-        big = kwargs['big'] if 'big' in kwargs.keys() else False
-        dropout = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0.0
-        # Larger version
-        if big:
-            self.kernel1_size = 3
-            self.cnn1_nchannels_out = 56
-            self.poolsize = 2
-            self.kernel2_size = 2
-            self.cnn2_nchannels_out = 56
-            self.kernel3_size = 2
-            self.cnn3_nchannels_out = 56
-
-            # self.kernel1_size = 3
-            # self.cnn1_nchannels_out = 128
-            # self.poolsize = 2
-            # self.kernel2_size = 2
-            # self.cnn2_nchannels_out = 256
-            # self.kernel3_size = 2
-            # self.cnn3_nchannels_out = 32
-        elif grid==3: # Smaller version
-            self.kernel1_size = 3
-            self.cnn1_nchannels_out = 33
-            self.poolsize = 2
-            self.kernel2_size = 2
-            self.cnn2_nchannels_out = 33
-            self.kernel3_size = 2
-            self.cnn3_nchannels_out = 33
-        elif grid==6: # Smaller version
-            self.kernel1_size = 3
-            self.cnn1_nchannels_out = 33
-            self.poolsize = 2
-            self.kernel2_size = 2
-            self.cnn2_nchannels_out = 30
-            self.kernel3_size = 2
-            self.cnn3_nchannels_out = 20
-        elif grid==9:
-            self.kernel1_size = 3
-            self.cnn1_nchannels_out = 33
-            self.poolsize = 2
-            self.kernel2_size = 2
-            self.cnn2_nchannels_out = 20
-            self.kernel3_size = 2
-            self.cnn3_nchannels_out = 20
-        self.output_size = output_size
+        self.sigmoid = nn.Sigmoid()
         self.LReLU = nn.LeakyReLU(0.1)
 
-        # Default initialization is init.kaiming_uniform_(self.weight, a=math.sqrt(5))
-        # (Also assumes leaky Relu for gain)
-        # which is appropriate for all layers here
-        self.conv1 = nn.Conv2d(1, self.cnn1_nchannels_out, self.kernel1_size)    # (NChannels_in, NChannels_out, kernelsize)
-        # torch.nn.init.kaiming_uniform_(self.conv1.weight, nonlinearity='relu')
-        self.pool = nn.MaxPool2d(self.poolsize, self.poolsize)     # kernel height, kernel width
-        self.conv2 = nn.Conv2d(self.cnn1_nchannels_out, self.cnn2_nchannels_out, self.kernel2_size)   # (NChannels_in, NChannels_out, kernelsize)
-        self.conv3 = nn.Conv2d(self.cnn2_nchannels_out, self.cnn3_nchannels_out, self.kernel3_size)
-        # torch.nn.init.kaiming_uniform_(self.conv2.weight, nonlinearity='relu')
-        # track the size of the cnn transformations
-        # self.cnn2_width_out = ((width - self.kernel1_size+1) - self.kernel2_size + 1) // self.poolsize
-        # self.cnn2_height_out = ((height - self.kernel1_size+1) - self.kernel2_size + 1) // self.poolsize
-        self.cnn3_width_out = (((width - self.kernel1_size+1) - self.kernel2_size + 1)  // self.poolsize) - self.kernel3_size+1
-        self.cnn3_height_out = (((height - self.kernel1_size+1) - self.kernel2_size + 1)  // self.poolsize) - self.kernel3_size+1
+    def forward(self, x, hidden):
+        x = self.LReLU(self.embedding(x))
+        x, hidden = self.rnn(x, hidden)
+        map = self.readout(x)
+        sig = self.sigmoid(map)
 
-        # pass through FC layers
-        # self.fc1 = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), 120)  # size input, size output
-        self.fc1_size = 256
-        # self.fc1_size = 
-        # import pdb; pdb.set_trace()
-        self.fc1 = nn.Linear(int(self.cnn3_nchannels_out * self.cnn3_width_out * self.cnn3_height_out), self.fc1_size)  # size input, size output
-        self.fc2 = nn.Linear(self.fc1_size, map_size)
-        self.fc3 = nn.Linear(map_size, output_size)
+        num = torch.sum(sig, 1)
+        # num = torch.round(torch.sum(x, 1))
+        # num_onehot = nn.functional.one_hot(num, 9)
+        return num, map, hidden
 
-        # Dropout
-        self.drop_layer = nn.Dropout(p=dropout)
+    def init_small(self):
+        pass
 
-    def forward(self, x):
-        x = self.LReLU(self.conv1(x))
-        x = self.pool(self.LReLU(self.conv2(x)))
-        x = self.LReLU(self.conv3(x))
-        x = x.view(-1, x.shape[1]*x.shape[2]*x.shape[3]) # this reshapes the tensor to be a 1D vector, from whatever the final convolutional layer output
-        # add dropout before fully connected layers, widest part of network
-        x = self.drop_layer(x)
-        fc1 = self.LReLU(self.fc1(x))
-        fc2 = self.LReLU(self.fc2(fc1))
-        out = self.fc3(fc2)
-        return out, fc2, fc1
-
-
-class PixConvNet(nn.Module):
-    def __init__(self, width, height, output_size, dropout):
+class NumAsMapsum_nosymbol(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, **kwargs):
         super().__init__()
-        self.width = width
-        self.height = height
-        self.kernel1_size = 4
-        self.cnn1_nchannels_out = 15
-        self.poolsize = 2
-        self.kernel2_size = 3
-        self.cnn2_nchannels_out = 15
-        self.fc1_size = 120
+        map_size = 9
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.n_shapes = 9
+        self.embedding = nn.Linear(input_size, hidden_size)
+        self.baby_rnn = RNN(3, 27, 27, self.act)
+        self.shape_readout = nn.Linear(27, 9)
+        self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
+        self.readout = nn.Linear(hidden_size, map_size)
+        self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
 
-        # pixels layers
-        self.conv1a = nn.Conv2d(1, self.cnn1_nchannels_out, self.kernel1_size)    # (NChannels_in, NChannels_out, kernelsize)
-        self.conv1b = nn.Conv2d(1, self.cnn1_nchannels_out, self.kernel1_size)
-        self.pix_drop_layer = nn.Dropout(p=dropout)
-        self.pool = nn.MaxPool2d(self.poolsize, self.poolsize)     # kernel height, kernel width
-        self.conv2 = nn.Conv2d(self.cnn1_nchannels_out*2, self.cnn2_nchannels_out, self.kernel2_size)   # (NChannels_in, NChannels_out, kernelsize)
+    def forward(self, xy, shape, hidden):
+        """shape here will be batchsize x n_kinds_of_shapes x 3."""
+        batch_size = xy.shape[0]
+        baby_hidden = self.baby_rnn.initHidden(batch_size)
+        baby_hidden = baby_hidden.to(shape.device)
+        for i in range(self.n_shapes):
+            shape_emb, baby_hidden = self.baby_rnn(shape[:, i, :], baby_hidden)
+        shape_emb = self.shape_readout(shape_emb)
+        combined = torch.cat((xy, shape_emb), 1)
+        x = self.LReLU(self.embedding(combined))
+        x, hidden = self.rnn(x, hidden)
+        map = self.readout(x)
+        sig = self.sigmoid(map)
 
-        # track the size of the cnn transformations
-        self.cnn2_width_out = ((height - self.kernel1_size+1) - self.kernel2_size + 1) // (self.poolsize)
-        self.cnn2_height_out = ((height - self.kernel1_size+1) - self.kernel2_size + 1) // (self.poolsize)
+        num = torch.sum(sig, 1)
+        # num = torch.round(torch.sum(x, 1))
+        # num_onehot = nn.functional.one_hot(num, 9)
+        return num, map, shape_emb, hidden
 
-        # pass through FC layers
-        self.fc1_pix = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), self.fc1_size)  # size input, size output
-        self.shape_out = nn.Linear(self.fc1_size, output_size)
+#
+# class RNNClassifier_nosymbol(nn.Module):
+#     def __init__(self, input_size, hidden_size, output_size, act=None):
+#         super().__init__()
+#         map_size = 9
+#         self.n_shapes = 9
+#         self.embedding = nn.Linear(input_size, hidden_size)
+#         self.baby_rnn = RNN(3, 9, 9, act)
+#         self.rnn = RNN(hidden_size, hidden_size, hidden_size, act)
+#         self.readout = nn.Linear(hidden_size, output_size)
+#         self.initHidden = self.rnn.initHidden
+#         self.LReLU = nn.LeakyReLU(0.1)
+#         # self.sigmoid = nn.Sigmoid()
+#
+#     def forward(self, xy, shape, hidden):
+#         """shape here will be batchsize x n_kinds_of_shapes x 3."""
+#         batch_size = xy.shape[0]
+#         baby_hidden = self.baby_rnn.initHidden(batch_size)
+#         baby_hidden = baby_hidden.to(shape.device)
+#         for i in range(self.n_shapes):
+#             shape_emb, baby_hidden = self.baby_rnn(shape[:, i, :], baby_hidden)
+#         combined = torch.cat((xy, shape_emb), 1)
+#         x = self.LReLU(self.embedding(combined))
+#         x, hidden = self.rnn(x, hidden)
+#         num = self.readout(x)
+#         return num, shape_emb, hidden
+#
+#     def init_small(self):
+#         pass
+#
+#
+# class RNNClassifier(nn.Module):
+#     def __init__(self, input_size, hidden_size, output_size, act=None):
+#         super().__init__()
+#         map_size = 9
+#         self.embedding = nn.Linear(input_size, hidden_size)
+#         self.rnn = RNN(hidden_size, hidden_size, hidden_size, act)
+#         self.readout = nn.Linear(hidden_size, output_size)
+#         self.initHidden = self.rnn.initHidden
+#         self.LReLU = nn.LeakyReLU(0.1)
+#         # self.sigmoid = nn.Sigmoid()
+#
+#     def forward(self, x, hidden):
+#         x = self.LReLU(self.embedding(x))
+#         x, hidden = self.rnn(x, hidden)
+#         num = self.readout(x)
+#         return num, None, hidden
+#
+#     def init_small(self):
+#         pass
 
-    def forward(self, x):
-        patch_a = x[:, :, :self.height, :]
-        patch_b = x[:, :, self.height:, :]
 
-        whata = torch.relu(self.conv1a(patch_a))
-        whatb = torch.relu(self.conv1b(patch_b))
-        what = torch.cat((whata, whatb), 1)
+class RNNRegression(RNNClassifier):
+    def __init__(self, input_size, hidden_size, output_size, **kwargs):
+        super().__init__(input_size, hidden_size, output_size, **kwargs)
+        map_size = 9
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.embedding = nn.Linear(input_size, hidden_size)
+        self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
+        self.readout = nn.Linear(hidden_size, 1)
+        self.initHidden = self.rnn.initHidden
+        self.LReLU = nn.LeakyReLU(0.1)
+        # self.sigmoid = nn.Sigmoid()
 
-        what = self.pool(torch.relu(self.conv2(what)))
-        what = what.view(-1, what.shape[1]*what.shape[2]*what.shape[3]) # this reshapes the tensor to be a 1D vector, from whatever the final convolutional layer output
-        what = torch.relu(self.fc1_pix(what))
-        what = self.pix_drop_layer(what)
-        shape = self.shape_out(what)
-        return shape, what
-# class TwoStepModel_hist(nn.Module):
-    # def __init__(self, input_size, hidden_size, map_size, output_size):
-    #     super(TwoStepModel_hist, self).__init__()
-    #     fc_size = 64
-    #     self.rnn = linearRNN_hist(input_size, hidden_size, map_size)
-    #     # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-    #     self.fc1 = nn.Linear(map_size, fc_size)
-    #     self.fc2 = nn.Linear(fc_size, output_size)
 
-    # def forward(self, x, hidden):
-    #     outs, hidden, hist = self.rnn(x, hidden)
-    #     fc_layer = torch.relu(self.fc1(hist))
-    #     number = self.fc2(fc_layer)
-    #     # number = torch.relu(self.fc(map))
-    #     return outs, hidden, number
-
-class TwoStepModel_weightshare(nn.Module):
-    def __init__(self, hidden_size, map_size, output_size, init, act=None, eye_weight=False):
-        super(TwoStepModel_weightshare, self).__init__()
-        # self.saved_model = torch.load('models/two_step_model_with_maploss_bias.pt')
-        self.hidden_size = hidden_size
-        self.map_size = map_size
-        self.out_size = output_size
-        self.rnn = RNN(map_size, hidden_size, map_size, act, eye_weight)
-        # self.rnn = tanhRNN(input_size, hidden_size, map_size)
-
-        self.readout = Readout(map_size, output_size, init)
-        # self.fc = nn.Linear(map_size, output_size)
-        # self.fc.weight = self.saved_model.fc.weight
-        # self.fc.weight.requires_grad = False
-        # self.fc.bias = self.saved_model.fc.bias
-        # self.fc.bias.requires_grad = False
-
-        # hardcode_weight = torch.linspace(-0.1, 0.1, steps=7, dtype=torch.float)
-        # hardcode_bias = torch.linspace(0.3, -0.3, steps=7, dtype=torch.float)
-        # with torch.no_grad():
-        #     for i in range(output_size):
-        #         self.fc.weight[i, :] = hardcode_weight[i]
-        #         self.fc.bias[i] =  hardcode_bias[i]
+class MultiplicativeModel(nn.Module):
+    def __init__(self, input_size, hidden_size, output_size, small_weights):
+        super().__init__()
+        shape_size = 9
+        xy_size = 2
+        embedding_size = 25
+        factor_size = 26
+        map_size = 9
+        if input_size == xy_size:
+            self.embedding = nn.Linear(input_size, embedding_size)
+        else:
+            self.embedding = MultiplicativeLayer(shape_size, xy_size, embedding_size, small_weights)
+        # self.embedding = nn.Linear(input_size, hidden_size)
+        self.rnn = MultRNN(embedding_size, hidden_size, factor_size, hidden_size, small_weights)
+        self.readout = nn.Linear(hidden_size, map_size)
+        if small_weights:
+            nn.init.normal_(self.readout.weight, mean=0, std=0.1)
+        self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
 
     def forward(self, x, hidden):
-        map_, hidden = self.rnn(x, hidden)
-        # number = self.fc(torch.sigmoid(map_))
-        number = self.readout(torch.sigmoid(map_))
-        # number = torch.relu(self.fc(map))
-        return number, map_, hidden
-
-
-class TwoStepModel_weightshare_detached(TwoStepModel_weightshare):
-
-    def forward(self, x, hidden):
-        map_, hidden = self.rnn(x, hidden)
-        # number = self.fc(torch.sigmoid(map_))
-        map_detached = map_.detach()
-        number = self.readout(torch.sigmoid(map_detached))
-        # number = torch.relu(self.fc(map))
-        return number, map_, hidden
-
-    def train_rnn(self):
-        for param in self.readout.parameters():
-            param.requires_grad = False
-        for param in self.rnn.parameters():
-            param.requires_grad = True
-
-    def train_readout(self):
-        for param in self.readout.parameters():
-            param.requires_grad = True
-        for param in self.rnn.parameters():
-            param.requires_grad = False
-
-
-class Readout(nn.Module):
-    def __init__(self, map_size, out_size, init):
-        super(Readout, self).__init__()
-        self.map_size = map_size
-        self.out_size = out_size
-        weight_bound = 7
-        bias_bound = 4 * weight_bound
-        # self.weight = torch.nn.Parameter(torch.empty((out_size,)))
-        # self.bias = torch.nn.Parameter(torch.empty((out_size,)))
-        if init:
-            self.weight = torch.nn.Parameter(torch.linspace(-weight_bound, weight_bound, self.out_size))
-            self.bias = torch.nn.Parameter(torch.linspace(bias_bound, -bias_bound, self.out_size))
+        if x.shape[1] > 2:
+            xy = x[:, :2]
+            shape = x[:, 2:]
+            x = self.LReLU(self.embedding(xy, shape))
         else:
-            self.weight = torch.nn.Parameter(torch.empty((out_size,)))
-            self.bias = torch.nn.Parameter(torch.empty((out_size,)))
-            nn.init.uniform_(self.weight, -1, 1)
-            nn.init.uniform_(self.bias, -1, 1)
+            x = self.LReLU(self.embedding(x))
+        x, hidden = self.rnn(x, hidden)
+        map = self.readout(x)
+        sig = self.sigmoid(map)
+        num = torch.sum(sig, 1)
 
-        # self.weight_mat = self.weight.expand(map_size, out_size)
-        # self.weight_mat = self.weight.repeat(map_size, out_size)
-        # self.init_params()
+        return num, map, hidden
 
-    # def init_params(self):
-    #     weight_bound = 1
-    #     bias_bound = 4 * weight_bound
-    #     with torch.no_grad():
-    #         self.weight = torch.nn.Parameter(torch.linspace(-weight_bound, weight_bound, self.out_size))
-    #         self.bias = torch.nn.Parameter(torch.linspace(bias_bound, -bias_bound, self.out_size))
-        # nn.init.uniform_(self.weight, -weight_bound, weight_bound)
-        # if self.bias is not None:
-        #     nn.init.uniform_(self.bias, -bias_bound, bias_bound)
-
-    def forward(self, map):
-        # map = torch.sigmoid(map)
-        # out = torch.matmul(map, self.weight_mat) + self.bias
-        weight_mat = self.weight.repeat(self.map_size, 1)
-        # out = torch.addmm(self.bias, map, self.weight_mat)
-        out = torch.addmm(self.bias, map, weight_mat)
-        return out
-
-class RNN2(nn.Module):
-
-    # you can also accept arguments in your model constructor
-    def __init__(self, data_size, hidden_size, output_size, act=None):
-        super(RNN2, self).__init__()
-
-        self.hidden_size = hidden_size
-        input_size = data_size + hidden_size
-        if act == 'tanh':
-            self.act_fun = torch.tanh
-            gain = 5/3
-        elif act == 'relu':
-            self.act_fun = torch.relu
-            gain = np.sqrt(2)
-        elif act == 'sig':
-            self.act_fun = nn.Sigmoid()
-            gain = 1
-        elif act == 'lrelu':
-            self.act_fun = nn.LeakyReLU(0.1)
-            gain = np.sqrt(2)
-        else:
-            self.act_fun = None
-            gain = 1
-
-        self.i2h = nn.Linear(input_size, hidden_size)
-        self.h2o = nn.Linear(hidden_size, output_size)
-        self.init_params(gain)
-
-
-    def forward(self, data, last_hidden):
-        input = torch.cat((data, last_hidden), 1)
-        hidden = self.i2h(input)
-        if self.act_fun is not None:
-            hidden = self.act_fun(hidden)
-        output = self.h2o(hidden)
-        return output, hidden
-
-    def init_params(self, gain):
-        if self.act_fun == 'relu':
-            nn.init.kaiming_uniform_(self.i2h.weight, a=math.sqrt(5), nonlinearity='relu')
-            nn.init.kaiming_uniform_(self.h2o.weight, a=math.sqrt(5), nonlinearity='relu')
-        elif self.act_fun == 'lrelu':
-            nn.init.kaiming_uniform_(self.i2h.weight, a=math.sqrt(5), nonlinearity='leaky_relu')
-            nn.init.kaiming_uniform_(self.h2o.weight, a=math.sqrt(5), nonlinearity='leaky_relu')
-        elif self.act_fun is None:
-            nn.init.kaiming_uniform_(self.i2h.weight, a=math.sqrt(5), nonlinearity='linear')
-            nn.init.kaiming_uniform_(self.h2o.weight, a=math.sqrt(5), nonlinearity='linear')
-        else:
-            nn.init.xavier_uniform_(self.i2h.weight, gain=gain)
-            nn.init.xavier_uniform_(self.h2o.weight, gain=gain)
-
-    def initHidden(self, batch_size):
-        return torch.zeros(batch_size, self.hidden_size)
-
-class RNN(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, act=None, eye_weight=False, dropout=0):
-        super(RNN, self).__init__()
-        self.input_size = input_size
-        self.out_size = output_size
-        self.hidden_size = hidden_size
-        self.eye_weight = eye_weight
-        if act == 'tanh':
-            self.act_fun = torch.tanh
-            gain = 5/3
-        elif act == 'relu':
-            self.act_fun = torch.relu
-            gain = np.sqrt(2)
-        elif act == 'sig':
-            self.act_fun = nn.Sigmoid()
-            gain = 1
-        elif act == 'lrelu':
-            self.act_fun = nn.LeakyReLU(0.1)
-            gain = np.sqrt(2)
-        else:
-            self.act_fun = None
-            gain = 1
-
-        self.i2h = nn.Linear(input_size + hidden_size, hidden_size)
-        self.drop_layer = nn.Dropout(p=dropout)
-        self.i2o = nn.Linear(input_size + hidden_size, output_size)
-        self.init_params(gain)
-
-                # self.i2o.weight[:, :input_size] = (torch.eye(input_size) * 1.05) - 0.05
-                # self.i2h.weight[:, input_size:] = (torch.eye(hidden_size) * 1.05) - 0.05
-        # self.softmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, input, hidden):
-        combined = torch.cat((input, hidden), 1)
-        hidden = self.i2h(combined)
-        hidden = self.drop_layer(hidden)
-        if self.act_fun is not None:
-            hidden = self.act_fun(hidden)
-        output = self.i2o(combined)
-        return output, hidden
-
-    def init_params(self, gain):
-        if self.act_fun == 'relu':
-            nn.init.kaiming_uniform_(self.i2h.weight, a=math.sqrt(5), nonlinearity='relu')
-            nn.init.kaiming_uniform_(self.i2o.weight, a=math.sqrt(5), nonlinearity='relu')
-        elif self.act_fun == 'lrelu':
-            nn.init.kaiming_uniform_(self.i2h.weight, a=math.sqrt(5), nonlinearity='leaky_relu')
-            nn.init.kaiming_uniform_(self.i2o.weight, a=math.sqrt(5), nonlinearity='leaky_relu')
-        elif self.act_fun is None:
-            nn.init.kaiming_uniform_(self.i2h.weight, a=math.sqrt(5), nonlinearity='linear')
-            nn.init.kaiming_uniform_(self.i2o.weight, a=math.sqrt(5), nonlinearity='linear')
-        else:
-            nn.init.xavier_uniform_(self.i2h.weight, gain=gain)
-            nn.init.xavier_uniform_(self.i2o.weight, gain=gain)
-        if self.eye_weight:
-            with torch.no_grad():
-                nn.init.eye_(self.i2o.weight[:, :self.input_size])
-                nn.init.eye_(self.i2h.weight[:, self.input_size:])
-
-    def initHidden(self, batch_size):
-        return torch.zeros(batch_size, self.hidden_size)
-
-
-class MultRNN(nn.Module):
-    """ Include multiplicative or gated interactions between input and hidden.
-
-    Normally this would require a weight tensor. Here we use a factorized
-    version as described in:
-    Sutskever, I., Martens, J., & Hinton, G. (2011). Generating text with
-    recurrent neural networks. Proceedings of the 28th International Conference
-    on Machine Learning, ICML 2011, 1017–1024.
-    """
-    def __init__(self, input_size, hidden_size, factor_size, output_size, small_weights):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.i2f = nn.Linear(input_size, factor_size, bias=False)
-        self.h2f = nn.Linear(hidden_size, factor_size, bias=False)
-        self.f2h = nn.Linear(factor_size, hidden_size, bias=False)
-        self.i2h = nn.Linear(input_size, hidden_size, bias=False)
-        self.h2o = nn.Linear(hidden_size, output_size, bias=True)
-        self.gain = 5/3
-        self.params = [self.i2f, self.h2f, self.f2h, self.i2h, self.h2o]
-        self.small_weights = small_weights
-        self.init_params()
-
-    def forward(self, x_t,  h_tm1):
-        # zTU = a.t @ self.i2ha.weight
-        # Vx = self.i2hb.weight @ b
-        # zTWx = a.t @ self.i2hab.weight @ b
-        # hidden = zTU + Vx + zTWx + self.i2h.bias
-        # output = self.h2o.weight
-        W_fx = self.i2f.weight
-        W_fh = self.h2f.weight
-        W_hf = self.f2h.weight
-        W_hx = self.i2h.weight
-        W_oh = self.h2o.weight
-        b_o = self.h2o.bias
-
-        # left = torch.diag(W_fx @ x_t.t())
-        left = torch.diag(x_t @ W_fx.t())
-        # right = W_fh @ h_tm1.t()
-        right = h_tm1 @ W_fh.t()
-        f_t = left * right
-        # f_t = left @ right
-        h_t = torch.tanh(f_t @ W_hf.t() + x_t @ W_hx.t())
-        o_t = h_t @ W_oh + b_o
-        return o_t, h_t
-
-    def init_params(self):
-        for par in self.params:
-            if self.small_weights:
-                nn.init.normal_(par.weight, mean=0, std=0.1)
-            else:
-                nn.init.xavier_uniform_(par.weight, gain=self.gain)
-
-    def initHidden(self, batch_size):
-        return torch.zeros(batch_size, self.hidden_size)
-
-
-class MultiplicativeLayer(nn.Module):
-    def __init__(self, z_size, x_size, out_size, small_weights):
-        super().__init__()
-        self.U = nn.Linear(z_size, out_size, bias=True)
-        self.V = nn.Linear(x_size, out_size, bias=False)
-        self.W = nn.Parameter(torch.zeros((z_size, out_size, x_size)))
-        self.params = [self.U.weight, self.V.weight, self.W]
-        self.small_weights = small_weights
-        self.init_params()
-
-    def init_params(self):
-        for par in self.params:
-            if self.small_weights:
-                nn.init.normal_(par, mean=0, std=0.1)
-            else:
-                nn.init.kaiming_uniform_(par, a=math.sqrt(5), nonlinearity='leaky_relu')
-
-
-    def forward(self, x, z):
-        # zTU = z.t @ self.U
-        # zTU = self.U(z)
-        # # Vx = self.V.weight @ x
-        # Vx = self.V(x)
-        # zTWx = z @ self.W @ x.t()
-        # # z.unsqueeze(1)
-        # # test = torch.tensordot(torch.tensordot(z, self.W), x.t())
-        # out = zTU + Vx + zTWx
-        zTW = torch.einsum('ij,jkl->ikl', z, self.W)
-        # zz = z.unsqueeze(2)
-        # torch.einsum('ijk,lk->ilj', self.W, z)
-        # np.einsum('ijk,lk->ilj', self.W, z)
-        # tensordot(a2D,a3D,((-1,),(-1,))).transpose(1,0,2)
-        W_prime =  zTW + self.V.weight
-        b_prime = self.U(z)
-
-        W_primex = torch.einsum('ij,ikj->ik', x, W_prime)
-        y = W_primex + b_prime
-        return y
-
-class linearRNN_hist(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size):
-        super(linearRNN_hist, self).__init__()
-
-        self.hidden_size = hidden_size
-
-        self.i2h = nn.Linear(input_size + hidden_size, hidden_size)
-        self.i2o_1 = nn.Linear(input_size + hidden_size, output_size)
-        self.i2o_2 = nn.Linear(input_size + hidden_size, output_size)
-        self.i2o_3 = nn.Linear(input_size + hidden_size, output_size)
-        self.i2o_4 = nn.Linear(input_size + hidden_size, output_size)
-        self.i2o_5 = nn.Linear(input_size + hidden_size, output_size)
-        self.i2o_6 = nn.Linear(input_size + hidden_size, output_size)
-        self.i2o_7 = nn.Linear(input_size + hidden_size, output_size)
-        # self.softmax = nn.LogSoftmax(dim=1)
-
-    def forward(self, input, hidden):
-        combined = torch.cat((input, hidden), 1)
-        hidden = self.i2h(combined)
-        out1 = self.i2o_1(combined)
-        out2 = self.i2o_2(combined)
-        out3 = self.i2o_3(combined)
-        out4 = self.i2o_4(combined)
-        out5 = self.i2o_5(combined)
-        out6 = self.i2o_6(combined)
-        out7 = self.i2o_7(combined)
-        outs = [out1, out2, out3, out4, out5, out6, out7]
-
-        hist = torch.stack([torch.argmax(out, dim=1) for out in outs]).T.float()
-
-        # output = self.softmax(output)
-        return outs, hidden, hist
-
-    def initHidden(self, batch_size):
-        return torch.zeros(batch_size, self.hidden_size)
-
-class NumberAsMapSum(nn.Module):
-    def __init__(self, input_size, hidden_size):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.input_size = input_size
-        self.rnn = RNN(input_size, hidden_size, input_size)
-
-    def forward(self, input, hidden):
-        map_, hidden = self.rnn(input, hidden)
-        number = torch.sum(torch.sigmoid(map_), axis=1)
-        # number_oh = F.one_hot(torch.relu(number).long(), self.input_size)
-
-        return number, hidden, map_
