@@ -21,8 +21,9 @@ from utils import Timer
 
 def set_device(config):
     # Specify the compute resource (CUDA or CPU) to train model with
-    use_cuda = (config.no_cuda) and torch.cuda.is_available()
-    device = torch.device("cuda" if use_cuda else "cpu")
+    use_cuda = (not config.no_cuda) and torch.cuda.is_available()
+    device = torch.device(f"cuda:{config.gpu}" if use_cuda else "cpu")
+    print(f'Using device: {device}')
     return device
 
 def main(config):
@@ -37,8 +38,13 @@ def main(config):
         if not os.path.exists(directory):
             os.makedirs(directory)
     
+    
     # Load data, init model and trainer
     base_name = get_base_name(config)
+    if os.path.isfile(f'{fig_dir}/accuracy_{base_name}.png'):
+        ui = input(f"{base_name} exists. Would you like to increment rep counter? (y/n) If no, previous results will be overwritten.")
+        if ui == 'y':
+            config.rep += 1
     config.base_name = base_name
     loaders = choose_loader(config)
     model = choose_model(config, model_dir)
