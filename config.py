@@ -52,7 +52,7 @@ def get_config():
     parser.add_argument('--noise_level', type=float, default=1.6)
     parser.add_argument('--train_size', type=int, default=100000)
     parser.add_argument('--test_size', type=int, default=5000)
-    parser.add_argument('--grid', type=int, default=9)
+    parser.add_argument('--grid', type=int, default=6)
     parser.add_argument('--n_iters', type=int, default=1, help='how many times the rnn should loop through sequence')
     parser.add_argument('--rotate', action='store_true', default=False)  # not implemented
     # parser.add_argument('--small_weights', action='store_true', default=False)  # not implemented

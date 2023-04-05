@@ -3,13 +3,35 @@ import math
 import torch
 from torch import nn
 from scipy.stats import special_ortho_group
-from models_old import RNN, RNN2, MultRNN, MultiplicativeLayer
+# from modules import RNN, MultRNN, MultiplicativeLayer
 
+class BasicMLP(nn.Module):
+    def __init__(self, input_size, layer_width, penult_size, output_size, drop=0.5):
+        super().__init__()
+        self.layer0 = nn.Linear(input_size, layer_width)
+        self.layer1 = nn.Linear(layer_width, layer_width)
+        self.layer2 = nn.Linear(layer_width, layer_width)
+        self.drop_layer = nn.Dropout(p=drop)
+        self.layer3 = nn.Linear(layer_width, 100)
+        self.layer4 = nn.Linear(100, penult_size)
+        self.out = nn.Linear(penult_size, output_size)
+        self.LReLU = nn.LeakyReLU(0.1)
+
+
+    def forward(self, x):
+        x = self.LReLU(self.layer0(x))
+        x = self.LReLU(self.layer1(x))
+        x = self.LReLU(self.layer2(x))
+        x = self.drop_layer(x)
+        x = self.LReLU(self.layer3(x))
+        x = self.LReLU(self.layer4(x))
+        pred = self.out(x)
+        return pred, x
+    
 
 class MLP(nn.Module):
-    def __init__(self, input_size, layer_width, n_layers, output_size, drop=0.5):
+    def __init__(self, input_size, layer_width, penult_size, output_size, drop=0.5):
         super().__init__()
-        self.n_layers = n_layers
         self.layer0 = nn.Linear(input_size, layer_width)
         self.BN0 = torch.nn.BatchNorm1d(layer_width)
         self.layer1 = nn.Linear(layer_width, layer_width)
@@ -19,10 +41,10 @@ class MLP(nn.Module):
         self.drop_layer = nn.Dropout(p=drop)
         self.layer3 = nn.Linear(layer_width, 100)
         self.BN3 = torch.nn.BatchNorm1d(100)
-        self.layer4 = nn.Linear(100, 8)
-        self.BN4 = torch.nn.BatchNorm1d(8)
+        self.layer4 = nn.Linear(100, penult_size)
+        self.BN4 = torch.nn.BatchNorm1d(penult_size)
         # self.layers = [self.layer1, self.layer2, self.layer3]
-        self.out = nn.Linear(8, output_size)
+        self.out = nn.Linear(penult_size, output_size)
         self.LReLU = nn.LeakyReLU(0.1)
 
 
@@ -138,7 +160,7 @@ class ConvNet(nn.Module):
         self.cnn2_width_out = ((width - self.kernel1_size[0]+1) - self.kernel2_size[0] + 1)
         self.cnn2_height_out = ((height - self.kernel1_size[1]+1) - self.kernel2_size[1] + 1)
 
-        # pass through FC layers
+        # FC layers
         self.fc1_size = 100
         self.fc2_size = penult_size
         self.fc1 = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), self.fc1_size)  # size input, size output
