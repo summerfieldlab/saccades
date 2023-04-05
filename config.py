@@ -32,7 +32,7 @@ def get_base_name(config):
     challenge = config.challenge
     solar = 'solarized_' if config.solarize else ''
     shapes = ''.join([str(i) for i in config.shapestr])
-    sort = 'sort_' if config.sort else '_notsort'
+    sort = 'sort_' if config.sort else ''
     policy = config.policy
     data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_grid{config.grid}_policy-{policy}_trainshapes-{shapes}{same}_{challenge}_gw6_{solar}{n_glimpses}{train_size}'
     # train_desc = f'loss-{use_loss}_niters-{n_iters}_{n_epochs}eps'
