@@ -7,7 +7,8 @@ from scipy.stats import special_ortho_group, multivariate_normal
 from prettytable import PrettyTable
 from modules import RNN, ConvNet, MultRNN, MultiplicativeLayer
 import ventral_models as vmod
-TRAIN_SHAPES = [0,  2,  4,  5,  8,  9, 14, 15, 16]
+# TRAIN_SHAPES = [0,  2,  4,  5,  8,  9, 14, 15, 16]
+TRAIN_SHAPES = [0, 2, 4, 5, 9, 10, 15, 16, 17]
 imsize = (48, 42)
 image_template = np.zeros((48, 42))
 GRID = np.linspace(0.1, 0.9, 6)
@@ -19,7 +20,10 @@ def choose_model(config, model_dir):
     max_num = config.max_num
     no_symbol = True if config.shape_input == 'parametric' else False
     drop = config.dropout
-    n_classes = max_num
+    if 'unique' in config.challenge:
+        n_classes = 3
+    else:
+        n_classes = max_num
     n_shapes = 25 # 20 or 25
     if config.ventral is not None:
         ventral = model_dir + '/ventral/' + config.ventral
@@ -28,7 +32,8 @@ def choose_model(config, model_dir):
     finetune = True if 'finetune' in model_type else False
     whole_im = True if 'whole' in model_type else False
     mod_args = {'h_size': config.h_size, 'act': config.act,
-                'small_weights': config.small_weights, 'outer':config.outer,
+                # 'small_weights': config.small_weights, 
+                'outer':config.outer,
                 'detach': config.detach, 'format':config.shape_input,
                 'n_classes':n_classes, 'dropout': drop, 'grid': config.grid,
                 'n_shapes':n_shapes, 'ventral':ventral, 'train_on':config.train_on,
@@ -74,7 +79,7 @@ def choose_model(config, model_dir):
     elif 'glimpsing' in model_type:
         salience_size = (42, 36)
         model = Glimpsing(salience_size, hidden_size, map_size, output_size, **mod_args).to(device)
-    elif 'feedforward' in model_type:
+    elif 'mlp' in model_type:
         in_size = height * width
         model = FeedForward(in_size, hidden_size, map_size, output_size, **mod_args).to(device)
     elif 'ventral' in model_type:
@@ -100,12 +105,12 @@ def choose_model(config, model_dir):
                 model = RNNClassifier2stream(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
         elif shape_format == 'parametric':  #no_symbol:
             model = RNNClassifier_nosymbol(in_sz, hidden_size, output_size, **mod_args).to(device)
-        else:
-            model = RNNClassifier(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+        # else:
+            # model = RNNClassifier(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     elif model_type == 'recurrent_control':
         # in_sz = 21 * 27  # Size of the images
         in_size = height * width
-        model = RNNClassifier(in_sz, hidden_size, output_size, **mod_args).to(device)
+        model = RNNClassifier2stream(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     elif model_type == 'rnn_regression':
         model = RNNRegression(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     elif model_type == 'mult':
@@ -246,7 +251,7 @@ class FeedForward(nn.Module):
         x = self.drop_layer(x)
         map = self.LReLU(self.layer5(x))
         out = self.layer6(map)
-        return out, map
+        return out, map, x
 
 
 class PretrainedVentral(nn.Module):
@@ -256,8 +261,7 @@ class PretrainedVentral(nn.Module):
         self.train_on = kwargs['train_on']
         ventral_file = kwargs['ventral']
         self.whole_im = kwargs['whole']
-        if 'loss-ce' in ventral_file:
-            self.ce = True
+        self.ce = True if 'loss-ce' in ventral_file else False
         self.finetune = kwargs['finetune']
         self.sort = kwargs['sort']
         no_pretrain = kwargs['no_pretrain']
@@ -287,7 +291,10 @@ class PretrainedVentral(nn.Module):
             self.ventral = vmod.ConvNet(self.width, self.height, penult_size, ventral_output_size, dropout=drop)
         if not no_pretrain:
             print('Loading saved ventral model parameters...')
-            self.ventral.load_state_dict(torch.load(ventral_file))
+            try:
+                self.ventral = torch.load(ventral_file)
+            except:
+                self.ventral.load_state_dict(torch.load(ventral_file))
         # self.ventral.eval()
         # self.rnn = RNNClassifier2stream(shape_rep_len+100, hidden_size, map_size, output_size, **kwargs)
         self.rnn = RNNClassifier2stream(shape_rep_len, hidden_size, map_size, output_size, **kwargs)
@@ -696,52 +703,52 @@ class RNNClassifier2stream(nn.Module):
         return num, pix, map_, hidden, x, penult
 
 
-class RNNClassifier(nn.Module):
-    def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
-        super().__init__()
-        # map_size = 9
-        self.output_size = output_size
-        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
-        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
-        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
-        self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
-        self.embedding = nn.Linear(input_size, hidden_size)
-        self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
-        self.drop_layer = nn.Dropout(p=drop)
-        self.map_readout = nn.Linear(hidden_size, map_size)
-        if self.par:
-            self.notmap = nn.Linear(hidden_size, map_size)
-            self.num_readout = nn.Linear(map_size * 2, output_size)
-        else:
-            self.num_readout = nn.Linear(map_size, output_size)
+# class RNNClassifier(nn.Module):
+#     def __init__(self, input_size, hidden_size, map_size, output_size, **kwargs):
+#         super().__init__()
+#         # map_size = 9
+#         self.output_size = output_size
+#         self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+#         self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+#         drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+#         self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
+#         self.embedding = nn.Linear(input_size, hidden_size)
+#         self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
+#         self.drop_layer = nn.Dropout(p=drop)
+#         self.map_readout = nn.Linear(hidden_size, map_size)
+#         if self.par:
+#             self.notmap = nn.Linear(hidden_size, map_size)
+#             self.num_readout = nn.Linear(map_size * 2, output_size)
+#         else:
+#             self.num_readout = nn.Linear(map_size, output_size)
 
-        self.initHidden = self.rnn.initHidden
-        self.sigmoid = nn.Sigmoid()
-        self.LReLU = nn.LeakyReLU(0.1)
-        device = torch.device("cuda")
-        self.mock_shape_pred = torch.zeros((10,)).to(device)
+#         self.initHidden = self.rnn.initHidden
+#         self.sigmoid = nn.Sigmoid()
+#         self.LReLU = nn.LeakyReLU(0.1)
+#         device = torch.device("cuda")
+#         self.mock_shape_pred = torch.zeros((10,)).to(device)
 
-    def forward(self, x, hidden):
-        x = self.LReLU(self.embedding(x))
-        x, hidden = self.rnn(x, hidden)
-        x = self.drop_layer(x)
+#     def forward(self, x, hidden):
+#         x = self.LReLU(self.embedding(x))
+#         x, hidden = self.rnn(x, hidden)
+#         x = self.drop_layer(x)
 
-        map = self.map_readout(x)
-        sig = self.sigmoid(map)
-        if self.detach:
-            map_to_pass_on = sig.detach().clone()
-        else:
-            map_to_pass_on = sig
-        if self.par:
-            # Two parallel layers, one to be a map, the other not
-            notmap = self.notmap(x)
-            penult = torch.cat((map_to_pass_on, notmap), dim=1)
-        else:
-            penult = map_to_pass_on
-        # num = self.num_readout(map_to_pass_on)
-        num = self.num_readout(penult)
-        shape = self.mock_shape_pred
-        return num, shape, map, hidden
+#         map = self.map_readout(x)
+#         sig = self.sigmoid(map)
+#         if self.detach:
+#             map_to_pass_on = sig.detach().clone()
+#         else:
+#             map_to_pass_on = sig
+#         if self.par:
+#             # Two parallel layers, one to be a map, the other not
+#             notmap = self.notmap(x)
+#             penult = torch.cat((map_to_pass_on, notmap), dim=1)
+#         else:
+#             penult = map_to_pass_on
+#         # num = self.num_readout(map_to_pass_on)
+#         num = self.num_readout(penult)
+#         shape = self.mock_shape_pred
+#         return num, shape, map, hidden
 
 
 class RNNClassifier_nosymbol(nn.Module):
@@ -931,7 +938,8 @@ class NumAsMapsum_nosymbol(nn.Module):
 #         pass
 
 
-class RNNRegression(RNNClassifier):
+# class RNNRegression(RNNClassifier):
+class RNNRegression(RNNClassifier2stream):
     def __init__(self, input_size, hidden_size, output_size, **kwargs):
         super().__init__(input_size, hidden_size, output_size, **kwargs)
         map_size = 9

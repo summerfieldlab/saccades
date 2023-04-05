@@ -3,6 +3,7 @@ import pandas as pd
 from matplotlib import pyplot as plt
 import seaborn as sns
 from itertools import product
+from scipy.io import savemat
 
 import torch
 from torch import nn
@@ -17,7 +18,24 @@ criterion_mse = nn.MSELoss()
 criterion_mse_noreduce = nn.MSELoss(reduction='none')
 
 def choose_trainer(model, loaders, config):
-    trainer = Trainer(model, loaders, config)
+    if config.model_type in ['cnn', 'bigcnn', 'mlp']:
+        if 'distract' in config.challenge:
+            print('Using FeedForwardTrainerDistract class')
+            trainer = FeedForwardTrainerDistract(model, loaders, config)
+        else:
+            print('Using FeedForwardTrainer class')
+            trainer = FeedForwardTrainer(model, loaders, config)
+    elif 'recurrent_control' in config.model_type:
+        if 'distract' in config.challenge:
+            trainer = RecurrentTrainerDistract(model, loaders, config)
+        else:
+            trainer = RecurrentTrainer(model, loaders, config)
+    elif 'distract' in config.challenge:
+        print('Using TrainerDistract class')
+        trainer = TrainerDistract(model, loaders, config)
+    else:
+        print('Using Trainer class')
+        trainer = Trainer(model, loaders, config)
     return trainer
 
 class Trainer():
@@ -37,6 +55,19 @@ class Trainer():
         self.scheduler = StepLR(self.optimizer, step_size=config.n_epochs/20, gamma=0.7)
 
         self.shuffle = True
+
+        self.nclasses = self.model.output_size
+        if 'unique' in config.challenge:
+            max_num = 3
+            min_num = 1
+            self.ticks = list(range(max_num - min_num + 1))
+            self.ticklabels = [str(tick + min_num) for tick in self.ticks]
+            self.to_subtract = 1
+        else:
+            self.ticks = list(range(config.max_num - config.min_num + 1))
+            self.ticklabels = [str(tick + config.min_num) for tick in self.ticks]
+            self.to_subtract = config.min_num
+        
     
     def train_network(self):
         config = self.config
@@ -92,7 +123,7 @@ class Trainer():
         threshold = 51
         if config.save_act:
             print('Saving untrained activations...')
-            save_activations(self.model, test_loaders, base_name + '_init', config)
+            self.save_activations(self.model, self.test_loaders, base_name + '_init', config)
         test_results = pd.DataFrame()
         tr_accuracy = 0
         for ep in range(n_epochs):
@@ -102,7 +133,7 @@ class Trainer():
                 threshold += 25 # This will be 51,76, and then 101 so we'll save at 51 and 76
             if config.save_act and savethisep:
                 print(f'Saving midway activations at {threshold-26}% accuracy...')
-                save_activations(self.model, test_loaders, f'{base_name}_acc{threshold-26}', config)
+                self.save_activations(self.model, self.test_loaders, f'{base_name}_acc{threshold-26}', config)
                 savethisep = False
             epoch_timer = Timer()
 
@@ -187,7 +218,7 @@ class Trainer():
         # Save network activations
         if config.save_act:
             print('Saving activations...')
-            save_activations(self.model, test_loaders, base_name + '_trained', config)
+            self.save_activations(self.model, self.test_loaders, base_name + '_trained', config)
 
         train_num_losses = (train_count_num_loss, train_dist_num_loss, train_all_num_loss)
         train_map_losses = (train_count_map_loss, train_dist_map_loss, train_full_map_loss)
@@ -207,6 +238,7 @@ class Trainer():
 
     @torch.no_grad()
     def test(self, loader, ep):
+        noreduce = True
         self.model.eval()
         config = self.config
         device = config.device
@@ -216,8 +248,13 @@ class Trainer():
         count_map_epoch_loss = 0
         # count_map_epoch_loss = 0
         shape_epoch_loss = 0
-        nclasses = self.model.output_size
-        confusion_matrix = np.zeros((3, nclasses-config.min_num, nclasses-config.min_num))
+        # if 'unique' in config.challenge:
+        #     max_num = 3
+        #     min_num = 1
+        #     confusion_matrix = np.zeros((max_num, max_num))
+        # else:
+        #     confusion_matrix = np.zeros((self.nclasses-config.min_num, self.nclasses-config.min_num))
+        confusion_matrix = None
         test_results = pd.DataFrame()
         # for i, (input, target, locations, shape_label, pass_count) in enumerate(loader):
         for i, (input, target, num_dist, all_loc, shape_label, pass_count) in enumerate(loader):
@@ -237,55 +274,8 @@ class Trainer():
                 else:
                     shape_epoch_loss += -1
 
-            if config.cross_entropy:
-                num_loss = criterion_noreduce(pred_num, target)
-                pred = pred_num.argmax(dim=1, keepdim=True)
-            else:
-                num_loss = criterion_mse_noreduce(torch.squeeze(pred_num), target)
-                pred = torch.round(pred_num)
-
-            def get_map_loss():
-                all_map_loss = self.criterion_bce_full_noreduce(map, all_loc)
-                map_loss = all_map_loss.mean(axis=1)
-                map_loss_to_add = map_loss.sum().item()
-                return map_loss, map_loss_to_add
-
-            if config.use_loss == 'num':
-                loss = num_loss
-                # map_loss = criterion_bce_noreduce(map, locations)
-                map_loss_to_add = -1
-                # full_map_loss_to_add = -1
-                # count_map_loss_to_add = -1
-                # map_loss = -1
-                map_loss_to_add = -1
-            elif config.use_loss == 'map':
-                # Average over map locations, sum over instances
-                # map_loss = criterion_bce_noreduce(map, locations)
-                # map_loss_to_add = map_loss.mean(axis=1).sum()
-                # map_loss, map_loss_to_add = get_map_loss()
-                # loss = map_loss.mean(axis=1)
-                # map_loss, map_loss_to_add = get_map_loss()
-                map_loss, map_loss_to_add = get_map_loss()
-                loss = map_loss
-
-            elif config.use_loss == 'both':
-                # map_loss = criterion_bce_noreduce(map, locations)
-                # # map_loss_reduce = criterion_bce(map, locations)
-                # map_loss_to_add = map_loss.mean(axis=1).sum()
-                # map_loss, map_loss_to_add = get_map_loss()
-                map_loss, map_loss_to_add = get_map_loss()
-                # loss = num_loss + map_loss.mean(axis=1)
-                loss = num_loss + map_loss
-            elif config.use_loss == 'map_then_both':
-                # map_loss = criterion_bce_noreduce(map, locations)
-
-                # map_loss, map_loss_to_add = get_map_loss()
-                map_loss, map_loss_to_add = get_map_loss()
-
-                if ep < 150:
-                    loss = map_loss
-                else:
-                    loss = num_loss + map_loss
+            losses, pred = self.get_losses(pred_num, target, map, all_loc, ep, noreduce)
+            loss, num_loss, map_loss, map_loss_to_add = losses
             correct = pred.eq(target.view_as(pred))
             batch_results['pass count'] = pass_count.detach().cpu().numpy()
             batch_results['correct'] = correct.cpu().numpy()
@@ -317,13 +307,8 @@ class Trainer():
             count_map_epoch_loss += map_loss_to_add
             # class-specific analysis and confusion matrix
             # c = (pred.squeeze() == target)
-            for dist in [0, 1, 2]:
-                ind = num_dist == dist
-                target_subset = target[ind]
-                pred_subset = pred[ind]
-                for j in range(target_subset.shape[0]):
-                    label = target_subset[j]
-                    confusion_matrix[dist, label-config.min_num, pred_subset[j]-config.min_num] += 1
+            confusion_matrix = self.update_confusion(target, pred, num_dist, confusion_matrix)
+
         # These two lines should be the same
         # map_epoch_loss / len(loader.dataset)
         # test_results['map loss'].mean()
@@ -345,6 +330,7 @@ class Trainer():
     
     def train(self, loader, ep):
         self.model.train()
+        noreduce = False
         config = self.config
         correct = 0
         epoch_loss = 0
@@ -354,13 +340,14 @@ class Trainer():
         shape_epoch_loss = 0
 
         for i, (input, target, num_dist, locations, shape_label, _) in enumerate(loader):
-            assert all(locations.sum(dim=1) == target)
+            # assert all(locations.sum(dim=1) == target)
             n_glimpses = input.shape[1]
             seq_len = input.shape[1]
             if self.shuffle:
                 # Shuffle glimpse order on each batch
-                for i, row in enumerate(input):
-                    input[i, :, :] = row[torch.randperm(seq_len), :]
+                # for i, row in enumerate(input):
+                    # input[i, :, :] = row[torch.randperm(seq_len), :]
+                input = input[:, torch.randperm(seq_len), :]
             input_dim = input.shape[0]
 
             self.model.zero_grad()
@@ -377,37 +364,8 @@ class Trainer():
                     shape_loss.backward(retain_graph=True)
                 else:
                     shape_epoch_loss += -1
-            num_loss = criterion(pred_num, target)
-            pred = pred_num.argmax(dim=1, keepdim=True)
-
-            def get_map_loss():
-                map_loss = self.criterion_bce_full(map, locations)
-                map_loss_to_add = map_loss.item()
-
-                return map_loss, map_loss_to_add
-
-            if config.use_loss == 'num':
-                loss = num_loss
-                # count_map_loss_to_add = -1
-                # all_map_loss_to_add  = -1
-                # map_loss = -1
-                map_loss_to_add = -1
-            elif config.use_loss == 'map':
-                # map_loss, map_loss_to_add = get_map_loss()
-                map_loss, map_loss_to_add = get_map_loss()
-                loss = map_loss
-            elif config.use_loss == 'both':
-                # map_loss, map_loss_to_add = get_map_loss()
-                map_loss, map_loss_to_add = get_map_loss()
-                loss = num_loss + map_loss
-            elif config.use_loss == 'map_then_both':
-                # map_loss, map_loss_to_add = get_map_loss()
-                map_loss, map_loss_to_add = get_map_loss()
-                # map_loss_to_add = count_map_loss
-                if ep < 100:
-                    loss = map_loss
-                else:
-                    loss = num_loss + map_loss
+            losses, pred = self.get_losses(pred_num, target, map, locations, ep, noreduce)
+            loss, num_loss, map_loss, map_loss_to_add = losses
 
             loss.backward()
             nn.utils.clip_grad_norm_(self.model.parameters(), 2)
@@ -431,8 +389,7 @@ class Trainer():
         return epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss, map_epoch_loss
 
     def plot_performance(self, test_results, train_losses, train_acc, confs, ep, config):
-        ticks = list(range(config.max_num - config.min_num + 1))
-        ticklabels = [str(tick + config.min_num) for tick in ticks]
+
         base_name = config.base_name
         test_results['accuracy'] = test_results['correct'].astype(int)*100
         # data = test_results[test_results['test shapes'] == str(test_shapes) and test_results['test lums'] == str(lums)]
@@ -475,27 +432,40 @@ class Trainer():
 
         # acc_on_difficult = accuracy.loc[ep, 5.0]['accuracy']
         # print(f'Testset {ts}, Accuracy on level 5 difficulty: {acc_on_difficult}')
+        self.plot_confusion(confs)
 
-        fig, axs = plt.subplots(3, 4, figsize=(19, 16))
-        
+    def update_confusion(self, target, pred, num_dist, confusion_matrix):
+        if confusion_matrix is None:
+            if 'unique' in self.config.challenge:
+                max_num = 3
+                min_num = 1
+                confusion_matrix = np.zeros((max_num, max_num))
+            else:
+                confusion_matrix = np.zeros((self.nclasses-self.config.min_num, self.nclasses-self.config.min_num))
+            
+        for label, prediction in zip(target, pred):
+            confusion_matrix[label - self.to_subtract, prediction - self.to_subtract] += 1
+        return confusion_matrix
+
+    def plot_confusion(self, confs):
+        fig, axs = plt.subplots(2, 2, figsize=(19, 16))
         maxes = [mat.max() for mat in confs]
         vmax = max(maxes)
-        # axs = axs.flatten()
-        for dist in [0, 1, 2]:
-            shape_lum = product(config.test_shapes, config.lum_sets)
-            for i, (shape, lum) in enumerate(shape_lum):
-        # for i, (ax, (shape, lum)) in enumerate(zip(axs, shape_lum)):
-                axs[dist, i].matshow(confs[i][dist, :, :], cmap='Greys', vmin=0, vmax=vmax)
-                axs[dist, i].set_aspect('equal', adjustable='box')
-                axs[dist, i].set_title(f'dist={dist} shapes={shape} lums={lum}')
-                axs[dist, i].set_xticks(ticks, ticklabels)
-                axs[dist, i].set_xlabel('Predicted Class')
-                axs[dist, i].set_ylabel('True Class')
-                axs[dist, i].set_yticks(ticks, ticklabels)
+        axs = axs.flatten()
+        shape_lum = product(self.config.test_shapes, self.config.lum_sets)
+            # for i, (shape, lum) in enumerate(shape_lum):
+        for i, (ax, (shape, lum)) in enumerate(zip(axs, shape_lum)):
+            ax.matshow(confs[i], cmap='Greys', vmin=0, vmax=vmax)
+            ax.set_aspect('equal', adjustable='box')
+            ax.set_title(f'shapes={shape} lums={lum}')
+            ax.set_xticks(self.ticks, self.ticklabels)
+            ax.set_xlabel('Predicted Class')
+            ax.set_ylabel('True Class')
+            ax.set_yticks(self.ticks, self.ticklabels)
             # ax2 = ax.twinx()
             # ax2.set_yticks(ticks, np.sum(confs[i], axis=1))
         fig.tight_layout()
-        plt.savefig(f'figures/toy/letters/confusion_{base_name}.png', dpi=300)
+        plt.savefig(f'figures/toy/letters/confusion_{self.config.base_name}.png', dpi=300)
         plt.close()
 
 
@@ -534,8 +504,9 @@ class Trainer():
         ax2.grid()
 
         ax3.plot(train_sh_loss[:ep + 1], ':', color='green', label='training loss')
-        sns.lineplot(data=data, x='epoch', y='shape loss', hue='test shapes',
-                    style='test lums', ax=ax3, estimator='mean', alpha=0.7)
+        if 'shape loss' in data.columns:
+            sns.lineplot(data=data, x='epoch', y='shape loss', hue='test shapes',
+                        style='test lums', ax=ax3, estimator='mean', alpha=0.7)
         ax3.set_ylabel('Shape Loss')
         # plt.title(title)
         ylim = ax3.get_ylim()
@@ -637,7 +608,322 @@ class Trainer():
             # MATLAB
             savemat(savename + '.mat', to_save)
 
-class RecurrentDualStreamTrainer(Trainer):
-    def __init__():
-        super().__init__()
+    def get_map_loss(self, map, locations, noreduce=False):
+        if noreduce:
+            all_map_loss = self.criterion_bce_full_noreduce(map, locations)
+            map_loss = all_map_loss.mean(axis=1)
+            map_loss_to_add = map_loss.sum().item()
+        else:
+            map_loss = self.criterion_bce_full(map, locations)
+            map_loss_to_add = map_loss.item()
+        return map_loss, map_loss_to_add
+    
+    def get_losses(self, pred_num, target, map, locations, ep, noreduce):
+        # Calculate number classification loss
+        if noreduce:
+            num_loss = criterion_noreduce(pred_num, target)
+            pred = pred_num.argmax(dim=1, keepdim=True)
+        else:
+            num_loss = criterion(pred_num, target)
+            pred = pred_num.argmax(dim=1, keepdim=True)
+        
+        # Calculate other losses and assign which to be optimized
+        if self.config.use_loss == 'num':
+            loss = num_loss
+            map_loss_to_add = -1
+        elif self.config.use_loss == 'map':
+            map_loss, map_loss_to_add = self.get_map_loss(map, locations, noreduce)
+            loss = map_loss
+        elif self.config.use_loss == 'both':
+            map_loss, map_loss_to_add = self.get_map_loss(map, locations, noreduce)
+            loss = num_loss + map_loss
+        elif self.config.use_loss == 'map_then_both':
+            map_loss, map_loss_to_add = self.get_map_loss(map, locations, noreduce)
+            if ep < 150:
+                loss = map_loss
+            else:
+                loss = num_loss + map_loss
+        
+        losses = (loss, num_loss, map_loss, map_loss_to_add)
+        return losses, pred
 
+
+class TrainerDistract(Trainer):
+    def __init__(self, model, loaders, config):
+        super().__init__(model, loaders, config)
+    
+    def update_confusion(self, target, pred, num_dist, confusion_matrix):
+        if confusion_matrix is None:
+            confusion_matrix = np.zeros((3, self.nclasses-self.config.min_num, self.nclasses-self.config.min_num))
+        for dist in [0, 1, 2]:
+            ind = num_dist == dist
+            target_subset = target[ind]
+            pred_subset = pred[ind]
+            for j in range(target_subset.shape[0]):
+                label = target_subset[j]
+                confusion_matrix[dist, label-self.config.min_num, pred_subset[j]-self.config.min_num] += 1
+        return confusion_matrix
+
+    def plot_confusion(self, confs):
+        fig, axs = plt.subplots(3, 4, figsize=(19, 16))
+        
+        maxes = [mat.max() for mat in confs]
+        vmax = max(maxes)
+        # axs = axs.flatten()
+        for dist in [0, 1, 2]:
+            shape_lum = product(self.config.test_shapes, self.config.lum_sets)
+            for i, (shape, lum) in enumerate(shape_lum):
+        # for i, (ax, (shape, lum)) in enumerate(zip(axs, shape_lum)):
+                axs[dist, i].matshow(confs[i][dist, :, :], cmap='Greys', vmin=0, vmax=vmax)
+                axs[dist, i].set_aspect('equal', adjustable='box')
+                axs[dist, i].set_title(f'dist={dist} shapes={shape} lums={lum}')
+                axs[dist, i].set_xticks(self.ticks, self.ticklabels)
+                axs[dist, i].set_xlabel('Predicted Class')
+                axs[dist, i].set_ylabel('True Class')
+                axs[dist, i].set_yticks(self.ticks, self.ticklabels)
+            # ax2 = ax.twinx()
+            # ax2.set_yticks(ticks, np.sum(confs[i], axis=1))
+        fig.tight_layout()
+        plt.savefig(f'figures/toy/letters/confusion_{self.config.base_name}.png', dpi=300)
+        plt.close()
+
+
+class FeedForwardTrainer(Trainer):
+    def __init__(self, model, loaders, config):
+        super().__init__(model, loaders, config)
+    
+    @torch.no_grad()
+    def test(self, loader, ep):
+        self.model.eval()
+        noreduce = True
+        config = self.config
+        n_correct = 0
+        epoch_loss = 0
+        num_epoch_loss = 0
+        count_map_epoch_loss = 0
+        confusion_matrix = None
+        test_results = pd.DataFrame()
+        # for i, (input, target, locations, shape_label, pass_count) in enumerate(loader):
+        for i, (input, target, num_dist, all_loc, pass_count) in enumerate(loader):
+            batch_results = pd.DataFrame()
+            pred_num, map, _ = self.model(input)
+
+            losses, pred = self.get_losses(pred_num, target, map, all_loc, ep, noreduce)
+            loss, num_loss, map_loss, map_loss_to_add = losses
+            correct = pred.eq(target.view_as(pred))
+            
+            batch_results['pass count'] = pass_count.detach().cpu().numpy()
+            batch_results['correct'] = correct.cpu().numpy()
+            batch_results['predicted'] = pred.detach().cpu().numpy()
+            batch_results['true'] = target.detach().cpu().numpy()
+            batch_results['loss'] = loss.detach().cpu().numpy()
+            try:
+                # Somehow before it was like just the first column was going
+                # into batch_results, so just map loss for the first out of
+                # nine location, instead of the average over all locations.
+                # batch_results['map loss'] = map_loss.mean(axis=1).detach().cpu().numpy()
+                # batch_results['map loss'] = map_loss.mean(axis=1).detach().cpu().numpy()
+                batch_results['full map loss'] = map_loss.detach().cpu().numpy()
+                # batch_results['count map loss'] = count_map_loss.detach().cpu().numpy()
+            except:
+                # batch_results['map loss'] = np.ones(loss.shape) * -1
+                batch_results['full map loss'] = np.ones(loss.shape) * -1
+                batch_results['count map loss'] = np.ones(loss.shape) * -1
+            batch_results['num loss'] = num_loss.detach().cpu().numpy()
+            # batch_results['shape loss'] = shape_loss.detach().cpu().numpy() if self.config.learn_shape else -1
+            batch_results['epoch'] = ep
+            test_results = pd.concat((test_results, batch_results))
+
+            n_correct += correct.sum().item()
+            epoch_loss += loss.mean().item()
+            num_epoch_loss += num_loss.mean().item()
+            count_map_epoch_loss += map_loss_to_add
+            # class-specific analysis and confusion matrix
+            confusion_matrix = self.update_confusion(target, pred, num_dist, confusion_matrix)
+
+        # These two lines should be the same
+        # map_epoch_loss / len(loader.dataset)
+        # test_results['map loss'].mean()
+
+        accuracy = 100. * (n_correct/len(loader.dataset))
+        epoch_loss /= len(loader)
+        num_epoch_loss /= len(loader)
+        # map_epoch_loss /= len(loader)
+        if config.use_loss == 'num':
+            # map_epoch_loss /= len(loader)
+            count_map_epoch_loss /= len(loader)
+        else:
+            count_map_epoch_loss /= len(loader.dataset)
+        map_epoch_loss = (count_map_epoch_loss, -1)
+        shape_epoch_loss = -1
+        return (epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss,
+                map_epoch_loss, test_results, confusion_matrix)
+    
+    def train(self, loader, ep):
+        self.model.train()
+        noreduce = False
+        correct = 0
+        epoch_loss = 0
+        num_epoch_loss = 0
+        # map_epoch_loss = 0
+        count_map_epoch_loss = 0
+        shape_epoch_loss = 0
+        for i, (input, target, _, locations, _) in enumerate(loader):
+            # assert all(locations.sum(dim=1) == target)
+            self.model.zero_grad()
+            pred_num, map, _ = self.model(input)
+            losses, pred = self.get_losses(pred_num, target, map, locations, ep, noreduce)
+            loss, num_loss, _, map_loss_to_add = losses
+            loss.backward()
+            self.optimizer.step()
+
+            correct += pred.eq(target.view_as(pred)).sum().item()
+            epoch_loss += loss.item()
+            num_epoch_loss += num_loss.item()
+            # if not isinstance(map_loss_to_add, int):
+                # map_loss_to_add = map_loss_to_add.item()
+            count_map_epoch_loss += map_loss_to_add
+            # count_map_epoch_loss += count_map_loss_to_add
+        self.scheduler.step()
+        accuracy = 100. * (correct/len(loader.dataset))
+        epoch_loss /= i+1
+        num_epoch_loss /= i+1
+        # full_map_epoch_loss /= len(loader)
+        count_map_epoch_loss /= i+1
+        map_epoch_loss = (count_map_epoch_loss, -1)
+        shape_epoch_loss = -1
+        return epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss, map_epoch_loss
+
+    @torch.no_grad()
+    def save_activations(self, model, test_loaders, basename, config):
+        pass
+        # TODO
+    
+class FeedForwardTrainerDistract(FeedForwardTrainer, TrainerDistract):
+    def __init__(self, model, loaders, config):
+        super().__init__(model, loaders, config)
+    
+    
+class RecurrentTrainer(Trainer):
+    def __init__(self, model, loaders, config):
+        super().__init__(model, loaders, config)
+    
+    @torch.no_grad()
+    def test(self, loader, ep):
+        self.model.eval()
+        noreduce = True
+        config = self.config
+        n_correct = 0
+        epoch_loss = 0
+        num_epoch_loss = 0
+        count_map_epoch_loss = 0
+        confusion_matrix = None
+        test_results = pd.DataFrame()
+        # for i, (input, target, locations, shape_label, pass_count) in enumerate(loader):
+        for i, (input, target, num_dist, all_loc, pass_count) in enumerate(loader):
+            input_dim = input.shape[0]
+            n_glimpses = config.n_glimpses
+            batch_results = pd.DataFrame()
+            hidden = self.model.initHidden(input_dim)
+            hidden = hidden.to(self.config.device)
+
+            for t in range(n_glimpses):
+                pred_num, _, map, hidden, _, _ = self.model(input, hidden)
+            pred_num, map, _ = self.model(input)
+
+            losses, pred = self.get_losses(pred_num, target, map, all_loc, ep, noreduce)
+            loss, num_loss, map_loss, map_loss_to_add = losses
+            correct = pred.eq(target.view_as(pred))
+            
+            batch_results['pass count'] = pass_count.detach().cpu().numpy()
+            batch_results['correct'] = correct.cpu().numpy()
+            batch_results['predicted'] = pred.detach().cpu().numpy()
+            batch_results['true'] = target.detach().cpu().numpy()
+            batch_results['loss'] = loss.detach().cpu().numpy()
+            try:
+                # Somehow before it was like just the first column was going
+                # into batch_results, so just map loss for the first out of
+                # nine location, instead of the average over all locations.
+                # batch_results['map loss'] = map_loss.mean(axis=1).detach().cpu().numpy()
+                # batch_results['map loss'] = map_loss.mean(axis=1).detach().cpu().numpy()
+                batch_results['full map loss'] = map_loss.detach().cpu().numpy()
+                # batch_results['count map loss'] = count_map_loss.detach().cpu().numpy()
+            except:
+                # batch_results['map loss'] = np.ones(loss.shape) * -1
+                batch_results['full map loss'] = np.ones(loss.shape) * -1
+                batch_results['count map loss'] = np.ones(loss.shape) * -1
+            batch_results['num loss'] = num_loss.detach().cpu().numpy()
+            # batch_results['shape loss'] = shape_loss.detach().cpu().numpy() if self.config.learn_shape else -1
+            batch_results['epoch'] = ep
+            test_results = pd.concat((test_results, batch_results))
+
+            n_correct += correct.sum().item()
+            epoch_loss += loss.mean().item()
+            num_epoch_loss += num_loss.mean().item()
+            count_map_epoch_loss += map_loss_to_add
+            # class-specific analysis and confusion matrix
+            confusion_matrix = self.update_confusion(target, pred, num_dist, confusion_matrix)
+
+        # These two lines should be the same
+        # map_epoch_loss / len(loader.dataset)
+        # test_results['map loss'].mean()
+
+        accuracy = 100. * (n_correct/len(loader.dataset))
+        epoch_loss /= len(loader)
+        num_epoch_loss /= len(loader)
+        # map_epoch_loss /= len(loader)
+        if config.use_loss == 'num':
+            # map_epoch_loss /= len(loader)
+            count_map_epoch_loss /= len(loader)
+        else:
+            count_map_epoch_loss /= len(loader.dataset)
+        map_epoch_loss = (count_map_epoch_loss, -1)
+        shape_epoch_loss = -1
+        return (epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss,
+                map_epoch_loss, test_results, confusion_matrix)
+    
+    def train(self, loader, ep):
+        self.model.train()
+        noreduce = False
+        correct = 0
+        epoch_loss = 0
+        num_epoch_loss = 0
+        # map_epoch_loss = 0
+        count_map_epoch_loss = 0
+        shape_epoch_loss = 0
+        for i, (input, target, _, locations, _) in enumerate(loader):
+            # assert all(locations.sum(dim=1) == target)
+            self.model.zero_grad()
+            input_dim = input.shape[0]
+            n_glimpses = self.config.n_glimpses
+            hidden = self.model.initHidden(input_dim)
+            hidden = hidden.to(self.config.device)
+
+            for t in range(n_glimpses):
+                pred_num, _, map, hidden, _, _ = self.model(input, hidden)
+            losses, pred = self.get_losses(pred_num, target, map, locations, ep, noreduce)
+            loss, num_loss, _, map_loss_to_add = losses
+            loss.backward()
+            self.optimizer.step()
+
+            correct += pred.eq(target.view_as(pred)).sum().item()
+            epoch_loss += loss.item()
+            num_epoch_loss += num_loss.item()
+            # if not isinstance(map_loss_to_add, int):
+                # map_loss_to_add = map_loss_to_add.item()
+            count_map_epoch_loss += map_loss_to_add
+            # count_map_epoch_loss += count_map_loss_to_add
+        self.scheduler.step()
+        accuracy = 100. * (correct/len(loader.dataset))
+        epoch_loss /= i+1
+        num_epoch_loss /= i+1
+        # full_map_epoch_loss /= len(loader)
+        count_map_epoch_loss /= i+1
+        map_epoch_loss = (count_map_epoch_loss, -1)
+        shape_epoch_loss = -1
+        return epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss, map_epoch_loss
+
+
+class RecurrentTrainerDistract(RecurrentTrainer, TrainerDistract):
+    def __init__(self, model, loaders, config):
+        super().__init__(model, loaders, config)

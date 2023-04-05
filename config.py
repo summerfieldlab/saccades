@@ -23,7 +23,7 @@ def get_base_name(config):
     # Prepare base file name for results files
     kernel = '-kernel' if config.outer else ''
     act = '-' + config.act if config.act is not None else ''
-    alt_rnn = '2'
+    # alt_rnn = '2'
     n_glimpses = f'{config.n_glimpses}_' if config.n_glimpses is not None else ''
     detach = '-detach' if config.detach else ''
     pretrain = '-nopretrain' if config.no_pretrain else ''
@@ -39,8 +39,8 @@ def get_base_name(config):
     withshape = '+shape' if config.learn_shape else ''
     train_desc = f'loss-{use_loss}{withshape}_opt-{config.opt}_drop{drop}_{sort}count-{target_type}_{n_epochs}eps_rep{config.rep}'
     base_name = f'{model_desc}_{data_desc}_{train_desc}'
-    if config.small_weights:
-        base_name += '_small'
+    # if config.small_weights:
+    #     base_name += '_small'
     return base_name
 
 
@@ -55,7 +55,7 @@ def get_config():
     parser.add_argument('--grid', type=int, default=9)
     parser.add_argument('--n_iters', type=int, default=1, help='how many times the rnn should loop through sequence')
     parser.add_argument('--rotate', action='store_true', default=False)  # not implemented
-    parser.add_argument('--small_weights', action='store_true', default=False)  # not implemented
+    # parser.add_argument('--small_weights', action='store_true', default=False)  # not implemented
     parser.add_argument('--n_epochs', type=int, default=500)
     parser.add_argument('--use_loss', type=str, default='both', help='num, map or both')
     parser.add_argument('--ventral', type=str, default=None)  
@@ -74,11 +74,8 @@ def get_config():
     parser.add_argument('--learn_shape', action='store_true', default=False, help='for the parametric shape rep, whether to additional train to produce symbolic shape labels')
     parser.add_argument('--shape_input', type=str, default='symbolic', help='Which format to use for what pathway (symbolic, parametric, tetris, or char)')
     parser.add_argument('--same', action='store_true', default=False)
-    # parser.add_argument('--distract', action='store_true', default=False)
-    # parser.add_argument('--distract_corner', action='store_true', default=False)
-    # parser.add_argument('--random', action='store_true', default=False)
     parser.add_argument('--challenge', type=str, default='')
-    parser.add_argument('--solarize', action='store_true', default=False)
+    parser.add_argument('--no_solarize', action='store_true', default=False)
     parser.add_argument('--n_glimpses', type=int, default=None)
     parser.add_argument('--rep', type=int, default=0)
     parser.add_argument('--opt', type=str, default='SGD')
@@ -93,10 +90,12 @@ def get_config():
     parser.add_argument('--save_act', action='store_true', default=False)
     parser.add_argument('--sort', action='store_true', default=False, help='whether ventral stream was trained on sorted shape labels')
     parser.add_argument('--no_pretrain', action='store_true', default=False)
+    parser.add_argument('--whole_image', action='store_true', default=False)
     parser.add_argument('--batch_size', type=int, default=512)
     parser.add_argument('--policy', type=str, default='cheat+jitter')
+    parser.add_argument('--gpu', type=int, default=0, help='which gpu to use')
     config = parser.parse_args()
-
+    config.solarize = False if config.no_solarize else True
     if config.model_type == 'rnn_regression':
         config.cross_entropy = False
     else:
