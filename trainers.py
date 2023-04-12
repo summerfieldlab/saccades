@@ -49,7 +49,8 @@ class Trainer():
             mom = 0.9
             self.optimizer = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=config.wd)
         elif config.opt == 'Adam':
-            start_lr = 0.01 if config.use_loss == 'num' else 0.001
+            # start_lr = 0.01 if config.use_loss == 'num' else 0.001
+            start_lr = 0.001
             self.optimizer = Adam(model.parameters(), weight_decay=config.wd, amsgrad=True, lr=start_lr)
         # scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)
         self.scheduler = StepLR(self.optimizer, step_size=config.n_epochs/20, gamma=0.7)
@@ -631,6 +632,7 @@ class Trainer():
         if self.config.use_loss == 'num':
             loss = num_loss
             map_loss_to_add = -1
+            map_loss = None
         elif self.config.use_loss == 'map':
             map_loss, map_loss_to_add = self.get_map_loss(map, locations, noreduce)
             loss = map_loss
@@ -769,6 +771,7 @@ class FeedForwardTrainer(Trainer):
         count_map_epoch_loss = 0
         shape_epoch_loss = 0
         for i, (input, target, _, locations, _) in enumerate(loader):
+            # import pdb;pdb.set_trace()
             # assert all(locations.sum(dim=1) == target)
             self.model.zero_grad()
             pred_num, map, _ = self.model(input)

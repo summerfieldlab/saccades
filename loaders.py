@@ -129,7 +129,7 @@ def get_loader(dataset, config, batch_size=None):
 
     ### PIXEL/SHAPE INPUT ###
     if train_on == 'both' or train_on =='shape':
-        if shape_format == 'noised':
+        if shape_format == 'noise':
             try:
                 glimpse_array = np.stack(dataset['noi_glimpse_pixels'], axis=0)
             except:

@@ -20,11 +20,12 @@ from models import choose_model
 from utils import Timer
 
 def set_device(config):
-    # Specify the compute resource (CUDA or CPU) to train model with
+    """Specify the compute resource (CUDA or CPU) to train model with"""
     use_cuda = (not config.no_cuda) and torch.cuda.is_available()
     device = torch.device(f"cuda:{config.gpu}" if use_cuda else "cpu")
     print(f'Using device: {device}')
     return device
+
 
 def main(config):
     timer = Timer()
@@ -68,7 +69,7 @@ def main(config):
     (test_count_map_loss, test_dist_map_loss, test_full_map_loss) = test_map_losses
 
     # train_loss, train_acc, train_num_loss, train_shape_loss, train_full_map_loss, train_count_map_loss, test_loss, test_acc, test_num_loss, test_shape_loss, test_full_map_loss, test_count_map_loss, conf, test_results = results
-    test_results.to_pickle(f'{results_dir}/detailed_test_results_{base_name}.pkl')
+    test_results.to_pickle(f'{results_dir}/test_results_{base_name}.pkl')
     df_train = pd.DataFrame()
     df_test_list = [pd.DataFrame() for _ in range(4)]
     # df_train['loss'] = train_loss

@@ -22,6 +22,8 @@ def choose_model(config, model_dir):
     drop = config.dropout
     if 'unique' in config.challenge:
         n_classes = 3
+    elif 'distract' in config.challenge and config.target_type == 'all':
+        n_classes = max_num + 2
     else:
         n_classes = max_num
     n_shapes = 25 # 20 or 25
@@ -76,14 +78,15 @@ def choose_model(config, model_dir):
             model = NumAsMapsum2stream(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
         else:
             model = NumAsMapsum(in_sz, hidden_size, output_size, **mod_args).to(device)
+    elif 'ventral' in model_type:
+        model = PretrainedVentral(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     elif 'glimpsing' in model_type:
         salience_size = (42, 36)
         model = Glimpsing(salience_size, hidden_size, map_size, output_size, **mod_args).to(device)
     elif 'mlp' in model_type:
         in_size = height * width
         model = FeedForward(in_size, hidden_size, map_size, output_size, **mod_args).to(device)
-    elif 'ventral' in model_type:
-        model = PretrainedVentral(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+
     elif 'gated' in model_type:
         if 'map' in model_type:
             if '2' in model_type:
@@ -280,7 +283,11 @@ class PretrainedVentral(nn.Module):
         ventral_output_size = 25
         # output_size = 6
         if 'mlp' in ventral_file:
-            self.ventral = vmod.MLP(pix_size, 1024, 3, ventral_output_size, drop=drop)
+            penult_size = 8
+            layer_width = 1024
+            # self.ventral = vmod.MLP(pix_size, 1024, 3, ventral_output_size, drop=drop)
+            self.ventral = vmod.BasicMLP(pix_size, layer_width, penult_size, ventral_output_size, drop=drop)
+            self.cnn = False
         elif 'cnn' in ventral_file:
             self.cnn = True
             if self.whole_im:
@@ -291,9 +298,9 @@ class PretrainedVentral(nn.Module):
             self.ventral = vmod.ConvNet(self.width, self.height, penult_size, ventral_output_size, dropout=drop)
         if not no_pretrain:
             print('Loading saved ventral model parameters...')
-            try:
+            try:  # Try loading the whole model first, this is the way to go in case we make changes to the ventral model
                 self.ventral = torch.load(ventral_file)
-            except:
+            except:  # Otherwise just load the state variables. Assumes the same architecture as initialized above.
                 self.ventral.load_state_dict(torch.load(ventral_file))
         # self.ventral.eval()
         # self.rnn = RNNClassifier2stream(shape_rep_len+100, hidden_size, map_size, output_size, **kwargs)
