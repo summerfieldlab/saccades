@@ -15,22 +15,24 @@ from functools import partial
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.data import random_split
-import torchvision
-import torchvision.transforms as transforms
+from utils import Timer
+
 # from ray import tune
 # from ray.tune import CLIReporter
 # from ray.tune.schedulers import ASHAScheduler
 # from prettytable import PrettyTable
 import ventral_models as mod
-from models_old import ConvNet
-import toy_model_data as toy
+
 from count_unique import Timer
 
 mom = 0.9
-wd = 0.0001
-start_lr = 0.01
-BATCH_SIZE = 512
-TRAIN_SHAPES = [0,  2,  4,  5,  8,  9, 14, 15, 16]
+# wd = 0.0001
+wd = 0
+start_lr = 1.0
+BATCH_SIZE = 1024
+# BATCH_SIZE = 1
+# TRAIN_SHAPES = [2,  4,  5,  8,  9, 14, 15, 16]
+TRAIN_SHAPES = [0, 2, 4, 5, 9, 10, 15, 16, 17]
 
 # device = torch.device("cuda")
 # device = torch.device("cpu")
@@ -156,9 +158,9 @@ def load_data(config, device):
     # lums = [0.1, 0.2, 0.4, 0.5, 0.6, 0.8, 0.9]
     lums = config.lums
     trainframe = get_dataframe(train_size, config.shapestr, config, lums, solarize=True)
-    trainset = get_dataset(trainframe, model_type, target_type, device, sort)
+    trainset = get_dataset(trainframe, config, device)
     testframe = get_dataframe(test_size, config.testshapestr[0], config, lums, solarize=True)
-    testset = get_dataset(testframe, model_type, target_type, device, sort)
+    testset = get_dataset(testframe, config, device)
     # try:
     #     config.lum_sets = [[0.1, 0.5, 0.9], [0.2, 0.4, 0.6, 0.8]]
     #     trainframe = get_dataframe(train_size, config.shapestr, config, [0.1, 0.5, 0.9], solarize=config.solarize)
@@ -192,7 +194,9 @@ def te_accuracy(net, cla, device="cpu"):
 
     return correct / total
 
-def train_model(model, optimizer, scheduler, loaders, config):
+def train_model(model, optimizer, scheduler, loaders, config, device):
+    if 'distract' in config.challenge:
+        TRAIN_SHAPES.append(0)
     train_loader, test_loader = loaders
     tr_loss_mse = np.zeros((config.n_epochs+1,))
     tr_loss_ce = np.zeros((config.n_epochs+1,))
@@ -202,23 +206,33 @@ def train_model(model, optimizer, scheduler, loaders, config):
     te_loss_ce = np.zeros((config.n_epochs+1,))
     te_loss = np.zeros((config.n_epochs+1,))
     te_acc = np.zeros((config.n_epochs+1,))
-
-    tr_loss_mse[0], tr_loss_ce[0], tr_loss[0], tr_acc[0] = test(train_loader, model, config.loss, config.sort)
-    te_loss_mse[0], te_loss_ce[0], te_loss[0], te_acc[0] = test(test_loader, model, config.loss, config.sort)
+    # if 'logpolar' in config.model_type:
+    #     tr_loss_mse[0], tr_loss_ce[0], tr_loss[0], tr_acc[0] = test_logpolar(train_loader, model, config.loss, config.sort)
+    #     te_loss_mse[0], te_loss_ce[0], te_loss[0], te_acc[0] = test_logpolar(test_loader, model, config.loss, config.sort)
+    # else:
+    tr_loss_mse[0], tr_loss_ce[0], tr_loss[0], tr_acc[0] = test(train_loader, model, config.loss, config.sort, device)
+    te_loss_mse[0], te_loss_ce[0], te_loss[0], te_acc[0] = test(test_loader, model, config.loss, config.sort, device)
     print('Before training')
     print(f'Train: {tr_loss_mse[0]:.4}/{tr_loss_ce[0]:.4}/{tr_loss[0]:.4}/{tr_acc[0]:.3}%')
     print(f'Test: {te_loss_mse[0]:.4}/{te_loss_ce[0]:.4}/{te_loss[0]:.4}/{te_acc[0]:.3}%')
     for ep in range(config.n_epochs):
-        tr_res = train_one_epoch(train_loader, model, optimizer, config.loss, config.sort)
+        epoch_timer = Timer()
+        # if 'logpolar' in config.model_type:
+        #     tr_res = train_one_epoch_logpolar(train_loader, model, optimizer, config.loss, config.sort)
+        #     te_res = test_logpolar(test_loader, model, config.loss, config.sort)
+        # else:
+        tr_res = train_one_epoch(train_loader, model, optimizer, config.loss, config.sort, device)
+        te_res = test(test_loader, model, config.loss, config.sort, device)
+        
         tr_loss_mse[ep+1], tr_loss_ce[ep+1], tr_loss[ep+1], tr_acc[ep+1] = tr_res
-        te_res = test(test_loader, model, config.loss, config.sort)
         te_loss_mse[ep+1], te_loss_ce[ep+1], te_loss[ep+1], te_acc[ep+1] = te_res
         scheduler.step()
         print(f'Epoch {ep+1}. LR={optimizer.param_groups[0]["lr"]:.4}')
-        print(f'Train: {tr_loss_mse[ep+1]:.4}/{tr_loss_ce[ep+1]:.4}/{tr_loss[ep+1]:.4}/{tr_acc[ep+1]:.4}%')
-        print(f'Test: {te_loss_mse[ep+1]:.4}/{te_loss_ce[ep+1]:.4}/{te_loss[ep+1]:.4}/{te_acc[ep+1]:.4}%')
+        print(f'Train (mse/ce/tot): {tr_loss_mse[ep+1]:.4}/{tr_loss_ce[ep+1]:.4}/{tr_loss[ep+1]:.4}/{tr_acc[ep+1]:.4}%')
+        print(f'Test (mse/ce/tot): {te_loss_mse[ep+1]:.4}/{te_loss_ce[ep+1]:.4}/{te_loss[ep+1]:.4}/{te_acc[ep+1]:.4}%')
         # if not ep % 10 or ep < 2:
             # plot_performance()
+        epoch_timer.stop_timer()
     tr_results = (tr_loss_mse, tr_loss_ce, tr_loss, tr_acc)
     te_results = (te_loss_mse, te_loss_ce, te_loss, te_acc)
     columns = ['loss_mse', 'loss_ce', 'loss', 'accuracy']
@@ -233,25 +247,30 @@ def train_model(model, optimizer, scheduler, loaders, config):
 
 
 
-def train_one_epoch(train_loader, model, optimizer, which_loss, sort):
+def train_one_epoch(train_loader, model, optimizer, which_loss, sort, device):
     """Iterate through all mini-batches for one epoch of training."""
     model.train()
-    optimizer.zero_grad()
     mse_loss = 0
     ce_loss = 0
     tot_loss = 0
     correct = 0
     n = 0
+    batch_n = 0
     for (input, target) in train_loader:
+        input, target = input.to(device), target.to(device)
+        optimizer.zero_grad()
+        batch_n += 1
         pred, _ = model(input)
         if sort:
             # 0th output for bce loss - detect As
             # 1st and 2nd outputs for MSE loss
             mse = criterion_mse(pred[:, :2], target[:, :2])
             ce = criterion_ce(pred[:, :2], target[:, :2])
+            ce_noprob = criterion_ce(pred[:, :2], torch.argmax(target[:, :2], 1))
         else:
             mse = criterion_mse(pred[:, TRAIN_SHAPES], target[:, TRAIN_SHAPES])
             ce = criterion_ce(pred[:, TRAIN_SHAPES], target[:, TRAIN_SHAPES])
+            ce_noprob = criterion_ce(pred[:, TRAIN_SHAPES], torch.argmax(target[:, TRAIN_SHAPES], 1))
         
         # ce = criterion(pred, target)
         # ce = criterion_bce(pred[:, 0], target[:, 0])
@@ -259,21 +278,21 @@ def train_one_epoch(train_loader, model, optimizer, which_loss, sort):
 
         # total = (mse*10) + (ce/10)
         # total = (mse*10) + (bce)
-        total = mse
+        lambd = .5
+        total = lambd*(mse*10) + lambd*ce
         # total = ce
         # loss = mse
         if which_loss=='mse':
             loss = mse
         elif which_loss == 'ce':
             loss = ce
+        elif which_loss == 'ce_noprob':
+            loss = ce_noprob
+            ce = ce_noprob
+        elif which_loss == 'mse+ce':
+            loss = total
 
-        if sort:
-            argmax_labels = torch.argmax(target[:, :2], 1)
-            argmax_pred = torch.argmax(pred[:, :2], 1)
-        else:
-            argmax_labels = torch.argmax(target[:, TRAIN_SHAPES], 1)
-            argmax_pred = torch.argmax(pred[:, TRAIN_SHAPES], 1)
-        correct += (argmax_pred == argmax_labels).sum().item()
+
         # elif which_loss == 'bce':
         #     loss = bce
         #     labels = torch.ceil(target[:, TRAIN_SHAPES])
@@ -285,44 +304,119 @@ def train_one_epoch(train_loader, model, optimizer, which_loss, sort):
         #     A_pred = torch.round(torch.sigmoid(pred[:, 0]))
         #     correct += (A_pred == A_labels).sum().item()
         loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 2)
+        # torch.nn.utils.clip_grad_norm_(model.parameters(), 2)
         optimizer.step()
+        if sort:
+            argmax_labels = torch.argmax(target[:, :2], 1)
+            argmax_pred = torch.argmax(pred[:, :2], 1)
+        else:
+            argmax_labels = torch.argmax(target[:, TRAIN_SHAPES], 1)
+            argmax_pred = torch.argmax(pred[:, TRAIN_SHAPES], 1)
+        correct += (argmax_pred == argmax_labels).sum().item()
         n += target.size(0)
         mse_loss += mse.item()
         # bce_loss += bce.item()
         ce_loss += ce.item()
         tot_loss += total.item()
     acc = 100 * (correct/n)
-    mse_loss /= len(train_loader)
-    ce_loss /= len(train_loader)
-    tot_loss /= len(train_loader)
+    mse_loss /= batch_n
+    ce_loss /= batch_n
+    tot_loss /= batch_n
+    return mse_loss, ce_loss, tot_loss, acc
+
+
+def train_one_epoch_logpolar(train_loader, model, optimizer, which_loss, sort):
+    """Iterate through all mini-batches for one epoch of training."""
+    model.train()
+    mse_loss = 0
+    ce_loss = 0
+    tot_loss = 0
+    correct = 0
+    n = 0
+    batch_n = 0
+    n_glimpses = 12
+    for (input, xx, yy, target) in train_loader:
+        for glimpse_idx in range(n_glimpses):
+            optimizer.zero_grad()
+            batch_n += 1
+            pred, _ = model(input, xx[:, glimpse_idx], yy[:, glimpse_idx])
+            if sort:
+                # 0th output for bce loss - detect As
+                # 1st and 2nd outputs for MSE loss
+                mse = criterion_mse(pred[:, :2], target[:, glimpse_idx, :2])
+                ce = criterion_ce(pred[:, :2], target[:, glimpse_idx, :2])
+                ce_noprob = criterion_ce(pred[:, :2], torch.argmax(target[:, glimpse_idx, :2], 1))
+            else:
+                mse = criterion_mse(pred[:, TRAIN_SHAPES], target[:, glimpse_idx, TRAIN_SHAPES])
+                ce = criterion_ce(pred[:, TRAIN_SHAPES], target[:, glimpse_idx, TRAIN_SHAPES])
+                ce_noprob = criterion_ce(pred[:, TRAIN_SHAPES], torch.argmax(target[:, glimpse_idx, TRAIN_SHAPES], 1))
+            
+
+            lambd = .5
+            total = lambd*(mse*10) + lambd*ce
+            # total = ce
+            # loss = mse
+            if which_loss=='mse':
+                loss = mse
+            elif which_loss == 'ce':
+                loss = ce
+            elif which_loss == 'ce_noprob':
+                loss = ce_noprob
+                ce = ce_noprob
+            elif which_loss == 'mse+ce':
+                loss = total
+
+            loss.backward()
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), 2)
+            optimizer.step()
+            if sort:
+                argmax_labels = torch.argmax(target[:, glimpse_idx, :2], 1)
+                argmax_pred = torch.argmax(pred[:, :2], 1)
+            else:
+                argmax_labels = torch.argmax(target[:, glimpse_idx, TRAIN_SHAPES], 1)
+                argmax_pred = torch.argmax(pred[:, TRAIN_SHAPES], 1)
+            correct += (argmax_pred == argmax_labels).sum().item()
+            n += target.size(0)
+            mse_loss += mse.item()
+            # bce_loss += bce.item()
+            ce_loss += ce.item()
+            tot_loss += total.item()
+    acc = 100 * (correct/n)
+    mse_loss /= batch_n
+    ce_loss /= batch_n
+    tot_loss /= batch_n
     return mse_loss, ce_loss, tot_loss, acc
 
 
 @torch.no_grad()
-def test(loader, model, which_loss, sort):
+def test(loader, model, which_loss, sort, device):
     model.eval()
     mse_loss = 0
     ce_loss = 0
-    loss = 0
+    tot_loss = 0
     correct = 0
     n = 0
-    
+    batch_n = 0
     for (input, target) in loader:
+        input, target = input.to(device), target.to(device)
+        batch_n += 1
         pred, _ = model(input)
         if sort:
             mse = criterion_mse(pred[:, :2], target[:, :2])
             ce = criterion_ce(pred[:, :2], target[:, :2])
+            ce_noprob = criterion_ce(pred[:, :2], torch.argmax(target[:, :2], 1))
         else:
             mse = criterion_mse(pred[:, TRAIN_SHAPES], target[:, TRAIN_SHAPES])
             ce = criterion_ce(pred[:, TRAIN_SHAPES], target[:, TRAIN_SHAPES])
+            ce_noprob = criterion_ce(pred[:, TRAIN_SHAPES], torch.argmax(target[:, TRAIN_SHAPES], 1))
         # mse = criterion_mse(pred[:, 1:3], target[:, :2])
         # mse = criterion_mse(pred[:, TRAIN_SHAPES], target[:, TRAIN_SHAPES])
         # bce = criterion_bce(pred[:, TRAIN_SHAPES], target[:, TRAIN_SHAPES])
         # ce = criterion_bce(pred[:, 0], target[:, 0])
         # total = (mse*10) + (ce/10)
         # total = (mse*10) + (bce)
-        total = mse
+        lambd = .5
+        total = lambd*(mse*10) + lambd*ce
         # total = ce
         # if which_loss=='mse':
 
@@ -342,17 +436,82 @@ def test(loader, model, which_loss, sort):
         #     A_pred = torch.round(torch.sigmoid(pred[:, 0]))
         #     correct += (A_pred == A_labels).sum().item()        
         n += target.size(0)
+        if which_loss == 'ce_noprob':
+            ce = ce_noprob
         mse_loss += mse.item()
         # bce_loss += bce.item()
         ce_loss += ce.item()
-        loss += total.item()
-    print(f'{pred.max()} {pred.min()}')
+        tot_loss += total.item()
+    print(f'{pred.min()} --- {pred.max()}')
     acc = 100 * (correct/n)
-    mse_loss /= len(loader)
-    ce_loss /= len(loader)
-    loss /= len(loader)
-    return mse_loss, ce_loss, loss, acc
+    mse_loss /= batch_n
+    ce_loss /= batch_n
+    tot_loss /= batch_n
+    return mse_loss, ce_loss, tot_loss, acc
 
+
+@torch.no_grad()
+def test_logpolar(loader, model, which_loss, sort):
+    model.eval()
+    mse_loss = 0
+    ce_loss = 0
+    tot_loss = 0
+    correct = 0
+    n = 0
+    batch_n = 0
+    n_glimpses = 12
+    for (input, xx, yy, target) in loader:
+        batch_n += 1
+        for glimpse_idx in range(n_glimpses):
+            batch_n += 1
+            pred, _ = model(input, xx[:, glimpse_idx], yy[:, glimpse_idx])
+            if sort:
+                mse = criterion_mse(pred[:, :2], target[:, glimpse_idx, :2])
+                ce = criterion_ce(pred[:, :2], target[:, glimpse_idx, :2])
+                ce_noprob = criterion_ce(pred[:, :2], torch.argmax(target[:, glimpse_idx, :2], 1))
+            else:
+                mse = criterion_mse(pred[:, TRAIN_SHAPES], target[:, glimpse_idx, TRAIN_SHAPES])
+                ce = criterion_ce(pred[:, TRAIN_SHAPES], target[:, glimpse_idx, TRAIN_SHAPES])
+                ce_noprob = criterion_ce(pred[:, TRAIN_SHAPES], torch.argmax(target[:, glimpse_idx, TRAIN_SHAPES], 1))
+            # mse = criterion_mse(pred[:, 1:3], target[:, :2])
+            # mse = criterion_mse(pred[:, TRAIN_SHAPES], target[:, TRAIN_SHAPES])
+            # bce = criterion_bce(pred[:, TRAIN_SHAPES], target[:, TRAIN_SHAPES])
+            # ce = criterion_bce(pred[:, 0], target[:, 0])
+            # total = (mse*10) + (ce/10)
+            # total = (mse*10) + (bce)
+            lambd = .5
+            total = lambd*(mse*10) + lambd*ce
+            # total = ce
+            # if which_loss=='mse':
+
+            if sort:
+                argmax_labels = torch.argmax(target[:, glimpse_idx, :2], 1)
+                argmax_pred = torch.argmax(pred[:, :2], 1)
+            else:
+                argmax_labels = torch.argmax(target[:, glimpse_idx, TRAIN_SHAPES], 1)
+                argmax_pred = torch.argmax(pred[:, TRAIN_SHAPES], 1)
+            correct += (argmax_pred == argmax_labels).sum().item()
+            # elif which_loss == 'bce':
+            #     labels = torch.ceil(target[:, TRAIN_SHAPES])
+            #     pred = torch.round(torch.sigmoid(pred[:, TRAIN_SHAPES]))
+            #     correct += ((pred == labels) * 1.0).mean(dim=1).sum().item()
+            # else:
+            #     A_labels = torch.ceil(target[:, 0])
+            #     A_pred = torch.round(torch.sigmoid(pred[:, 0]))
+            #     correct += (A_pred == A_labels).sum().item()        
+            n += target.size(0)
+            if which_loss == 'ce_noprob':
+                ce = ce_noprob
+            mse_loss += mse.item()
+            # bce_loss += bce.item()
+            ce_loss += ce.item()
+            tot_loss += total.item()
+    print(f'{pred.min()} --- {pred.max()}')
+    acc = 100 * (correct/n)
+    mse_loss /= batch_n
+    ce_loss /= batch_n
+    tot_loss /= batch_n
+    return mse_loss, ce_loss, tot_loss, acc
 
 
 # def plot_performance():
@@ -390,19 +549,24 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}{tet}.pkl'
     # fname_notet = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}'
     samee = 'same' if same else ''
-    if config.distract:
-        challenge = '_distract'
-    elif config.distract_corner:
-        challenge = '_distract_corner'
-    elif config.random:
-        challenge = '_random'
-    else:
-        challenge = ''
+    # if config.distract:
+    #     challenge = '_distract'
+    # elif config.distract_corner:
+    #     challenge = '_distract_corner'
+    # elif config.random:
+    #     challenge = '_random'
+    # else:
+    #     challenge = ''
+    challenge = config.challenge
     # distract = '_distract' if config.distract else ''
-    solar = 'solarized_' if solarize else ''
+    # solar = 'solarized_' if solarize else ''
     home = '/mnt/jessica/data0/Dropbox/saccades/rnn_tests'
-    fname = f'{home}/toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_{solar}{size}.pkl'
-    fname_gw = f'{home}/toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_lum{lums}_gw6_{solar}{size}.pkl'
+    # fname = f'{home}/toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}_{challenge}_grid{config.grid}_{solar}{size}.pkl'
+    # fname_gw = f'{home}/toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}_{challenge}_grid{config.grid}_lum{lums}_gw6_{solar}{size}.pkl'
+    # fname = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_{solar}12_{size}.pkl'
+    transform = 'logpolar_' if config.logpolar else f'gw6_'
+    fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-cheat+jitter_lum{lums}_{transform}12_{size}.pkl'
+    
     if os.path.exists(fname_gw):
         print(f'Loading saved dataset {fname_gw}')
         data = pd.read_pickle(fname_gw)
@@ -419,7 +583,7 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
     return data
 
 
-def get_dataset(dataframe, model_type, target_type, device, sort):
+def get_dataset(dataframe, config, device):
     """_summary_
 
     Args:
@@ -433,59 +597,89 @@ def get_dataset(dataframe, model_type, target_type, device, sort):
     """
     dataframe['shape1'] = dataframe['shape']
     shape_array = np.stack(dataframe['shape'], axis=0)
-    if sort:
+    if config.sort:
         shape_arrayA = shape_array[:, :, 0]
         shape_array_rest = shape_array[:, :, 1:]
         shape_array_rest.sort(axis=-1)
         shape_array_rest = shape_array_rest[:, :, ::-1]
         shape_array =  np.concatenate((np.expand_dims(shape_arrayA, axis=2), shape_array_rest), axis=2)
     print(f'label range: {shape_array.min()}-{shape_array.max()}')
-    shape_label = torch.tensor(shape_array).float().to(device)
-    # if 'cnn' in model_type:
-    #     image_array = np.stack(dataframe['noised image'], axis=0)
-    #     shape_input = torch.tensor(image_array).float()
+    shape_label = torch.tensor(shape_array).float()
+    if config.logpolar:
+        # image_array = np.stack(dataframe['noised_image'], axis=0)
+        # image_array -= image_array.min()
+        # image_array /= image_array.max()
+        # print(f'pixel range: {image_array.min()}-{image_array.max()}')
+        # nex, w, h = image_array.shape
+        # # image_array = image_array.reshape(nex, -1)
+        # image_input = torch.tensor(image_array).float()
+        # # shape_input = torch.tensor(image_array).float()
+        # xy_array = np.stack(dataframe['glimpse_coords'], axis=0)
+        # xx = xy_array[:, :, 0]
+        # yy = xy_array[:, :, 1]
+        # xx_input = torch.tensor(xx).float()
+        # yy_input = torch.tensor(yy).float()
+        glimpse_array = np.stack(dataframe['logpolar_pixels'], axis=0)
+    else:
+        glimpse_array = np.stack(dataframe['noi_glimpse_pixels'], axis=0)
+    glimpse_array -= glimpse_array.min()
+    glimpse_array /= glimpse_array.max()
+    # print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
+
+    shape_input = torch.tensor(glimpse_array).float()
+
     #     shape_input = torch.unsqueeze(shape_input, 1)  # 1 channel
     # else:
 
-    glimpse_array = np.stack(dataframe['noi glimpse pixels'], axis=0)
-    glimpse_array -= glimpse_array.min()
-    glimpse_array /= glimpse_array.max()
-    print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
-
-    shape_input = torch.tensor(glimpse_array).float().to(device)
-
-    if target_type == 'A_vs_notA':
-        pass
-    else:
-        target = shape_label
-
     # collapse over glimpses
-    shape_input = shape_input.view((-1, 36))
-    if 'cnn' in model_type:
+    nex, n_glimpses, height, width = shape_input.shape
+    nrows = nex * n_glimpses
+    if 'cnn' in config.model_type:
         # reshape for conv layers
-        shape_input = shape_input.view((-1, 6, 6)).unsqueeze(1)
-    shape_label = shape_label.view((-1, 25))
+        shape_input = shape_input.view((nrows, height, width)).unsqueeze(1)
+    else:
+        shape_input = shape_input.view((nrows, height*width))
+    # if not 'logpolar' in model_type:
+    shape_label = shape_label.view((nrows, 25))
 
     if not(torch.isfinite(shape_input).all() and torch.isfinite(shape_label).all()):
         print('Found NaNs in the inputs or targets.')
         exit()
+    # if 'logpolar' in model_type:
+    #     dset = TensorDataset(image_input, xx_input, yy_input, shape_label)
+    # else:
     dset = TensorDataset(shape_input, shape_label)
     # loader = DataLoader(dset, batch_size=BATCH_SIZE, shuffle=True)
     return dset
 
 def get_model(config, device):
-    input_size = 36
-    layer_width = 1024 # config["layer_width"]
-    n_layers = 2 # config["n_layers"]
+    input_size = 42*48 if config.logpolar else 36
+    layer_width = 128 #1024 # config["layer_width"]
+    # n_layers = 2 # config["n_layers"]
     output_size = 25
-    drop = 0.5
+    drop = config.dropout
+    penult_size = 8
     if config.model_type == 'mlp':
-        model = mod.MLP(input_size, layer_width, n_layers, output_size, drop)
+        model = mod.MLP(input_size, layer_width, penult_size, output_size, drop)
+    elif config.model_type == 'basic_mlp':
+        model = mod.BasicMLP(input_size, layer_width, penult_size, output_size, drop)
     elif config.model_type == 'cnn':
         width = 6; height = 6
-        penult_size = 4
         model = mod.ConvNet(width, height, penult_size, output_size, dropout=drop)
+    elif 'logpolar' in config.model_type:
+        # model = mod.MLP(input_size, layer_width, penult_size, output_size, drop)
+        model = mod.LogPolarBasicMLP(input_size, layer_width, penult_size, output_size, device, drop)
+    else:
+        print(f'Model {config.model_type} not implemented.')
+        exit()
     model.to(device)
+
+    print('Params to learn:')
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            print(f"\t {name} {param.shape}")
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f'Total number of trainable model params: {total_params}')
     return model
 
 
@@ -514,22 +708,24 @@ def get_config():
 
     parser.add_argument('--shape_input', type=str, default='symbolic', help='Which format to use for what pathway (symbolic, parametric, tetris, or char)')
     parser.add_argument('--same', action='store_true', default=False)
-    parser.add_argument('--distract', action='store_true', default=False)
-    parser.add_argument('--distract_corner', action='store_true', default=False)
-    parser.add_argument('--random', action='store_true', default=False)
+
+    # parser.add_argument('--distract', action='store_true', default=False)
+    # parser.add_argument('--distract_corner', action='store_true', default=False)
+    # parser.add_argument('--random', action='store_true', default=False)
+    parser.add_argument('--challenge', type=str, default='')
     parser.add_argument('--solarize', action='store_true', default=False)
     parser.add_argument('--rep', type=int, default=0)
     parser.add_argument('--n_epochs', type=int, default=10)
     # parser.add_argument('--tetris', action='store_true', default=False)
     parser.add_argument('--no_cuda', action='store_true', default=False)
-    # parser.add_argument('--preglimpsed', type=str, default=None)
     # parser.add_argument('--use_schedule', action='store_true', default=False)
     parser.add_argument('--dropout', type=float, default=0.0)
     # parser.add_argument('--drop_rnn', type=float, default=0.1)
     # parser.add_argument('--wd', type=float, default=0) # 1e-6
     # parser.add_argument('--lr', type=float, default=0.01)
-    # parser.add_argument('--debug', action='store_true', default=False)
+    parser.add_argument('--logpolar', action='store_true', default=False)
     parser.add_argument('--sort', action='store_true', default=False)
+    # parser.add_argument('--preglimpsed', type=str, default=None)
     config = parser.parse_args()
     # Convert string input argument into a list of indices
     if config.train_shapes[0].isnumeric():
@@ -539,9 +735,9 @@ def get_config():
         for j, test_set in enumerate(config.test_shapes):
             config.test_shapes[j] = [int(i) for i in test_set]
     elif config.train_shapes[0].isalpha():
-        letter_map = {'A':0, 'B':1, 'C':2, 'D':3, 'E':4, 'F':5, 'G':6, 'H':7,
-                      'J':8, 'K':9, 'N':10, 'O':11, 'P':12, 'R':13, 'S':14,
-                      'U':15, 'Z':16}
+        letter_map = {'A':0, 'B':1, 'C':2, 'D':3, 'E':4, 'F':5, 'G':6, 'H':7, 'I':8,
+                      'J':9, 'K':10, 'N':11, 'O':12, 'P':13, 'R':14, 'S':15,
+                      'U':16, 'Z':17}
         config.shapestr = config.train_shapes.copy()
         config.testshapestr = config.test_shapes.copy()
         config.train_shapes = [letter_map[i] for i in config.train_shapes]
@@ -705,16 +901,18 @@ def main():
 
     model_desc = f'ventral_{model_type}{act}_hsize-{config.h_size}_{config.shape_input}'
     same = 'same' if config.same else ''
-    if config.distract:
-        challenge = '_distract'
-    elif config.random:
-        challenge = '_random'
-    else:
-        challenge = ''
+    # if config.distract:
+    #     challenge = '_distract'
+    # elif config.random:
+    #     challenge = '_random'
+    # else:
+    #     challenge = ''
+    challenge = config.challenge
     solar = 'solarized_' if config.solarize else ''
+    transform = 'logpolar_' if config.logpolar else 'gw6_'
     sort = 'sort_' if config.sort else ''
     shapes = ''.join([str(i) for i in config.shapestr])
-    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_diff-{min_pass}-{max_pass}_grid{config.grid}_lum-{config.lums}_trainshapes-{shapes}{same}{challenge}_gw6_{train_size}'
+    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_diff-{min_pass}-{max_pass}_grid{config.grid}_policy-cheat+jitter_lum-{config.lums}_trainshapes-{shapes}{same}_{challenge}_{transform}{train_size}'
     train_desc = f'loss-{config.loss}_opt-{config.opt}_drop{drop}_{sort}{n_epochs}eps_rep{config.rep}'
     base_name = f'{model_desc}_{data_desc}_{train_desc}'
     config.base_name = base_name
@@ -730,12 +928,12 @@ def main():
 
     # Prepare datasets
     trainset, testset = load_data(config, device)
-    trainloader = torch.utils.data.DataLoader(
+    trainloader = DataLoader(
         trainset,
         batch_size=int(BATCH_SIZE),
         shuffle=True,
         num_workers=0)
-    testloader = torch.utils.data.DataLoader(
+    testloader = DataLoader(
         testset,
         batch_size=int(BATCH_SIZE),
         shuffle=True,
@@ -743,7 +941,6 @@ def main():
     loaders = [trainloader, testloader]
 
     # Prepare model and optimizer
-
     model = get_model(config, device)
     if config.opt == 'SGD':
         opt = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
@@ -753,12 +950,12 @@ def main():
     # scheduler = StepLR(opt, step_size=config.n_epochs/20, gamma=0.7)
 
     # Train model
-    results = train_model(model, opt, scheduler, loaders, config)
+    results = train_model(model, opt, scheduler, loaders, config, device)
 
     print('Saving trained model and results files...')
-    print(f'{model_dir}/ventral_{base_name}_ep-{n_epochs}.pt')
-    torch.save(model.state_dict(), f'{model_dir}/ventral_{base_name}_ep-{n_epochs}.pt')
-    results.to_csv(f'{results_dir}/ventral_{base_name}_ep-{n_epochs}.csv')
+    print(f'{model_dir}/{base_name}_ep-{n_epochs}.pt')
+    torch.save(model, f'{model_dir}/{base_name}_ep-{n_epochs}.pt')
+    results.to_csv(f'{results_dir}/{base_name}_ep-{n_epochs}.csv')
 
 
 

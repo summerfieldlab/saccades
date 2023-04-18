@@ -7,6 +7,7 @@ from scipy.stats import special_ortho_group, multivariate_normal
 from prettytable import PrettyTable
 from modules import RNN, ConvNet, MultRNN, MultiplicativeLayer
 import ventral_models as vmod
+from skimage.transform import warp_polar, rotate
 # TRAIN_SHAPES = [0,  2,  4,  5,  8,  9, 14, 15, 16]
 TRAIN_SHAPES = [0, 2, 4, 5, 9, 10, 15, 16, 17]
 imsize = (48, 42)
@@ -61,7 +62,9 @@ def choose_model(config, model_dir):
     elif 'pixel' in shape_format:
         sh_sz = 2 if '+' in shape_format else 1
 
-        sh_sz = (6 * 6) * 2
+        # sh_sz = (6 * 6) * 2
+    elif 'logpolar' in shape_format:
+        sh_sz = height * width
     else:
         sh_sz = 6 * 6
     if '2channel' in shape_format:
@@ -80,9 +83,9 @@ def choose_model(config, model_dir):
             model = NumAsMapsum(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif 'ventral' in model_type:
         model = PretrainedVentral(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
-    elif 'glimpsing' in model_type:
-        salience_size = (42, 36)
-        model = Glimpsing(salience_size, hidden_size, map_size, output_size, **mod_args).to(device)
+    # elif 'glimpsing' in model_type:
+    #     salience_size = (42, 36)
+    #     model = Glimpsing(salience_size, hidden_size, map_size, output_size, **mod_args).to(device)
     elif 'mlp' in model_type:
         in_size = height * width
         model = FeedForward(in_size, hidden_size, map_size, output_size, **mod_args).to(device)
@@ -180,55 +183,66 @@ def soft_argmax(voxels, device):
 	return coords
 
 # %%
-class Glimpsing(nn.Module):
-    def __init__(self, salience_size, hidden_size, map_size, output_size, **kwargs):
-        super().__init__()
-        self.device = kwargs['device']
-        self.height, self.width = salience_size
-        self.glimpse_width = 6
-        self.half_glim = self.glimpse_width // 2
-        pix_size = self.glimpse_width**2
-        self.where_look_x = nn.Linear(hidden_size + self.height*self.width, self.width)
-        self.where_look_y = nn.Linear(hidden_size + self.height*self.width, self.height)
+# class LogPolarGlimpsing(nn.Module):
+#     def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
+#         super().__init__()
+#         self.pretrained_ventral = PretrainedVentral(pix_size, hidden_size, map_size, output_size, **kwargs)
+#         self.initHidden = self.pretrained_ventral.initHidden
+
+#     def forward(self, x, coords, hidden):
+#         warped = warp_polar(im, scaling='log', radius=10, center=glimpsec[0])
+
+
+
+# class Glimpsing(nn.Module):
+#     def __init__(self, salience_size, hidden_size, map_size, output_size, **kwargs):
+#         super().__init__()
+#         self.device = kwargs['device']
+#         self.height, self.width = salience_size
+#         self.glimpse_width = 6
+#         self.half_glim = self.glimpse_width // 2
+#         pix_size = self.glimpse_width**2
+#         self.where_look_x = nn.Linear(hidden_size + self.height*self.width, self.width)
+#         self.where_look_y = nn.Linear(hidden_size + self.height*self.width, self.height)
         
-        self.Softmax = nn.LogSoftmax(dim=1)
-        self.pretrained_ventral = PretrainedVentral(pix_size, hidden_size, map_size, output_size, **kwargs)
-        self.initHidden = self.pretrained_ventral.initHidden
+#         self.Softmax = nn.LogSoftmax(dim=1)
+#         self.pretrained_ventral = PretrainedVentral(pix_size, hidden_size, map_size, output_size, **kwargs)
+#         self.initHidden = self.pretrained_ventral.initHidden
     
-    def forward(self, image, saliency, hidden):
-        pre_glimpse = torch.cat((hidden, saliency.view(hidden.shape[0], -1)), dim=1)
-        x = self.where_look_x(pre_glimpse)
-        N, H = x.shape
-        x = soft_argmax(x.view(N, 1, H, 1, 1), self.device)[:,:,0]  # Take first dim because 1D argmax
-        y = self.where_look_y(pre_glimpse)
-        N, H = y.shape
-        y = soft_argmax(y.view(N, 1, H, 1, 1), self.device)[:,:,0] # Take first dim because 1D argmax
-        glimpse_contents = self.extract_glimpse(x, y, image)
-        input_ = torch.cat((x, y, glimpse_contents), dim=1)
-        num, shape, map_, hidden = self.pretrained_ventral(input_, hidden)
-        return num, shape, map_, hidden
+#     def forward(self, image, saliency, hidden):
+#         pre_glimpse = torch.cat((hidden, saliency.view(hidden.shape[0], -1)), dim=1)
+#         x = self.where_look_x(pre_glimpse)
+#         N, H = x.shape
+#         x = soft_argmax(x.view(N, 1, H, 1, 1), self.device)[:,:,0]  # Take first dim because 1D argmax
+#         y = self.where_look_y(pre_glimpse)
+#         N, H = y.shape
+#         y = soft_argmax(y.view(N, 1, H, 1, 1), self.device)[:,:,0] # Take first dim because 1D argmax
+#         glimpse_contents = self.extract_glimpse(x, y, image)
+#         input_ = torch.cat((x, y, glimpse_contents), dim=1)
+#         num, shape, map_, hidden = self.pretrained_ventral(input_, hidden)
+#         return num, shape, map_, hidden
     
-    def extract_glimpse(self, x, y, image):
-        """
-        In the spatial (4-D) case, for input with shape (N,C,Hin,Win) and grid with shape (N,Hout,Wout,2)
-        """
+#     def extract_glimpse(self, x, y, image):
+#         """
+#         In the spatial (4-D) case, for input with shape (N,C,Hin,Win) and grid with shape (N,Hout,Wout,2)
+#         """
 
-        hg = self.half_glim
-        N, nch, Hin, Win = image.shape
-        x = torch.stack((x-2.5, x-1.5, x-0.5, x+0.5, x+1.5, x+2.5), dim=-1)
-        x -= self.width/2
-        x /= self.width/2
-        y = torch.stack((y-2.5, y-1.5, y-0.5, y+0.5, y+1.5, y+2.5), dim=-1)
-        y -= self.height/2
-        y /= self.height/2
-        grid = torch.stack((x, y)).view(N, 6, 6, 2)
+#         hg = self.half_glim
+#         N, nch, Hin, Win = image.shape
+#         x = torch.stack((x-2.5, x-1.5, x-0.5, x+0.5, x+1.5, x+2.5), dim=-1)
+#         x -= self.width/2
+#         x /= self.width/2
+#         y = torch.stack((y-2.5, y-1.5, y-0.5, y+0.5, y+1.5, y+2.5), dim=-1)
+#         y -= self.height/2
+#         y /= self.height/2
+#         grid = torch.stack((x, y)).view(N, 6, 6, 2)
 
-        # theta = 
-        # size = (N, 1, self.glimpse_width, self.glimpse_width)
-        # grid = nn.functional.affine_grid(theta, size)
-        glimpse_pixels = nn.functional.grid_sample(image.view(N, 1, Hin, Win), grid)
-        # glimpse_pixels = image[y - hg: y + hg, x - hg: x + hg].flatten()
-        return glimpse_pixels.flatten()
+#         # theta = 
+#         # size = (N, 1, self.glimpse_width, self.glimpse_width)
+#         # grid = nn.functional.affine_grid(theta, size)
+#         glimpse_pixels = nn.functional.grid_sample(image.view(N, 1, Hin, Win), grid)
+#         # glimpse_pixels = image[y - hg: y + hg, x - hg: x + hg].flatten()
+#         return glimpse_pixels.flatten()
 
 
 
@@ -268,13 +282,14 @@ class PretrainedVentral(nn.Module):
         self.finetune = kwargs['finetune']
         self.sort = kwargs['sort']
         no_pretrain = kwargs['no_pretrain']
+        penult_size = 8
         if self.train_on == 'xy':
             shape_rep_len = 0
         elif self.sort:
             shape_rep_len = 2
         else:
             # shape_rep_len = 8
-            shape_rep_len = 4
+            shape_rep_len = penult_size
             # shape_rep_len = len(TRAIN_SHAPES)
         if self.finetune:
             drop = 0.25
@@ -282,24 +297,24 @@ class PretrainedVentral(nn.Module):
             drop = 0
         ventral_output_size = 25
         # output_size = 6
-        if 'mlp' in ventral_file:
-            penult_size = 8
+        if 'mlp' in ventral_file or 'logpolar' in ventral_file:
             layer_width = 1024
             # self.ventral = vmod.MLP(pix_size, 1024, 3, ventral_output_size, drop=drop)
             self.ventral = vmod.BasicMLP(pix_size, layer_width, penult_size, ventral_output_size, drop=drop)
             self.cnn = False
         elif 'cnn' in ventral_file:
             self.cnn = True
-            if self.whole_im:
+            if self.whole_im or 'logpolar' in ventral_file:
                 self.width = 42; self.height = 48
             else:
                 self.width = 6; self.height = 6
-            penult_size = 4
             self.ventral = vmod.ConvNet(self.width, self.height, penult_size, ventral_output_size, dropout=drop)
         if not no_pretrain:
             print('Loading saved ventral model parameters...')
             try:  # Try loading the whole model first, this is the way to go in case we make changes to the ventral model
                 self.ventral = torch.load(ventral_file)
+                if hasattr(self.ventral, 'penult_size'):
+                    assert self.ventral.penult_size == penult_size
             except:  # Otherwise just load the state variables. Assumes the same architecture as initialized above.
                 self.ventral.load_state_dict(torch.load(ventral_file))
         # self.ventral.eval()

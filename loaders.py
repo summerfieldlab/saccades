@@ -33,10 +33,12 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     challenge = '_' + config.challenge if config.challenge != '' else ''
     # distract = '_distract' if config.distract else ''
     solar = 'solarized_' if solarize else ''
+    transform = 'logpolar_' if 'logpolar' in config.shape_input else 'gw6_'
     policy = config.policy
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_{solar}{n_glimpses}{size}.pkl'
     # fname_gw = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_lum{lums}_gw6_{solar}{n_glimpses}{size}.pkl'
-    fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_gw6_{solar}{n_glimpses}{size}.pkl'
+    # fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_gw6_{solar}{n_glimpses}{size}.pkl'
+    fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}.pkl'
 
     if os.path.exists(fname_gw):
         print(f'Loading saved dataset {fname_gw}')
@@ -123,7 +125,7 @@ def get_loader(dataset, config, batch_size=None):
             image_input = torch.unsqueeze(image_input, 1)  # 1 channel
         else:  # flatten
             image_array = np.stack(dataset['noised_image'], axis=0)
-            nex, w, h = image_array.shape
+            nex, h, w = image_array.shape
             image_array = image_array.reshape(nex, -1)
             image_input = torch.tensor(image_array).float().to(config.device)
 
@@ -143,6 +145,13 @@ def get_loader(dataset, config, batch_size=None):
                 # remove distractor shape
                 shape_array[:, :, 0] = 0
             shape_input = torch.tensor(shape_array).float().to(config.device)
+        elif 'logpolar' in shape_format:
+            glimpse_array = np.stack(dataset['logpolar_pixels'], axis=0)
+            nex, n_glimpse, h, w = glimpse_array.shape
+            glimpse_array -= glimpse_array.min()
+            glimpse_array /= glimpse_array.max()
+            print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
+            shape_input = torch.tensor(glimpse_array).float().view((nex, n_glimpse, -1))
     
     ### XY LOCATION INPUT ###
     if train_on == 'both' or train_on == 'xy':
@@ -153,7 +162,9 @@ def get_loader(dataset, config, batch_size=None):
         norm_xy_array = xy_array * 1.2
         # norm_xy_array = xy_array / 21
         # xy = torch.tensor(dataset['xy']).float().to(config.device)
-        xy = torch.tensor(norm_xy_array).float().to(config.device)
+        xy = torch.tensor(norm_xy_array).float()
+        if 'logpolar' not in shape_format:
+            xy = xy.to(config.device)
     
     # Create merged input (or not)
     if config.whole_image:
@@ -178,6 +189,8 @@ def get_loader(dataset, config, batch_size=None):
     ### PREPARE LOADER ###
     if config.whole_image:    
         dset = TensorDataset(input, count_num, dist_num, count_loc, pass_count)
+    elif model_type == 'logpolar_glimpsing':
+        dset = TensorDataset(image_input, xy, count_num, dist_num, count_loc, pass_count)
     else:  
         
         dset = TensorDataset(input, count_num, dist_num, count_loc, shape_label, pass_count)

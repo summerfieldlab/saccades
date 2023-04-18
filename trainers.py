@@ -84,127 +84,110 @@ class Trainer():
         self.criterion_bce_count = nn.BCEWithLogitsLoss(pos_weight=pos_weight_count)
         self.criterion_bce_full_noreduce = nn.BCEWithLogitsLoss(pos_weight=pos_weight_full, reduction='none')
         self.criterion_bce_count_noreduce = nn.BCEWithLogitsLoss(pos_weight=pos_weight_count, reduction='none')
-        n_glimpses = config.n_glimpses
-        # n_glimpses = config.max_num
-        # if config.distract or config.distract_corner or config.random:
-        # if config.challenge != '':
-            # n_glimpses += 2
         n_epochs = config.n_epochs
-        recurrent_iterations = config.n_iters
-        cross_entropy = config.cross_entropy
-        nonsymbolic = True if config.shape_input == 'parametric' else False
 
-        train_loss = np.zeros((n_epochs,))
+        train_loss = np.zeros((n_epochs + 1,))
         # train_map_loss = np.zeros((n_epochs,))
-        train_count_map_loss = np.zeros((n_epochs,))
-        train_dist_map_loss = np.zeros((n_epochs,))
-        train_full_map_loss = np.zeros((n_epochs,))
-        train_count_num_loss = np.zeros((n_epochs,))
-        train_dist_num_loss = np.zeros((n_epochs,))
-        train_all_num_loss = np.zeros((n_epochs,))
-        train_sh_loss = np.zeros((n_epochs,))
-        train_acc_count = np.zeros((n_epochs,))
-        train_acc_dist = np.zeros((n_epochs,))
-        train_acc_all = np.zeros((n_epochs,))
+        train_count_map_loss = np.zeros((n_epochs + 1,))
+        train_dist_map_loss = np.zeros((n_epochs + 1,))
+        train_full_map_loss = np.zeros((n_epochs + 1,))
+        train_count_num_loss = np.zeros((n_epochs + 1,))
+        train_dist_num_loss = np.zeros((n_epochs + 1,))
+        train_all_num_loss = np.zeros((n_epochs + 1,))
+        train_sh_loss = np.zeros((n_epochs + 1,))
+        train_acc_count = np.zeros((n_epochs + 1,))
+        train_acc_dist = np.zeros((n_epochs + 1,))
+        train_acc_all = np.zeros((n_epochs + 1,))
         n_test_sets = len(config.test_shapes) * len(config.lum_sets)
-        test_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
+        test_loss = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
         # test_map_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
-        test_full_map_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
-        test_count_map_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
-        test_dist_map_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
-        test_count_num_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
-        test_dist_num_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
-        test_all_num_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
-        test_sh_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
-        test_acc_count = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
-        test_acc_dist = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
-        test_acc_all = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
-        
-        savethisep = False
-        threshold = 51
-        if config.save_act:
-            print('Saving untrained activations...')
-            self.save_activations(self.model, self.test_loaders, base_name + '_init', config)
+        test_full_map_loss = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
+        test_count_map_loss = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
+        test_dist_map_loss = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
+        test_count_num_loss = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
+        test_dist_num_loss = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
+        test_all_num_loss = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
+        test_sh_loss = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
+        test_acc_count = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
+        test_acc_dist = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
+        test_acc_all = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
         test_results = pd.DataFrame()
-        tr_accuracy = 0
-        for ep in range(n_epochs):
-            # if ep == 50 and config.save_act:
-            if tr_accuracy > threshold:
-                savethisep = True
-                threshold += 25 # This will be 51,76, and then 101 so we'll save at 51 and 76
-            if config.save_act and savethisep:
-                print(f'Saving midway activations at {threshold-26}% accuracy...')
-                self.save_activations(self.model, self.test_loaders, f'{base_name}_acc{threshold-26}', config)
-                savethisep = False
-            epoch_timer = Timer()
 
+        ###### ASSESS PERFORMANCE BEFORE TRAINING #####
+        ep_tr_loss, ep_tr_num_loss, tr_accuracy, ep_tr_sh_loss, ep_tr_map_loss, _, _ = self.test(self.train_loader, 0)
+        train_count_num_loss[0] = ep_tr_num_loss
+        train_acc_count[0] = tr_accuracy
+        train_count_map_loss[0], train_full_map_loss[0] = ep_tr_map_loss
+        train_loss[0] = ep_tr_loss  # optimized loss
+        train_sh_loss[0] = ep_tr_sh_loss
+        shape_lum = product(config.test_shapes, config.lum_sets)
+        for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(self.test_loaders, shape_lum)):
+            epoch_te_loss, epoch_te_num_loss, te_accuracy, epoch_te_sh_loss, epoch_te_map_loss, epoch_df, _ = self.test(test_loader, 0)
+            epoch_df['train shapes'] = str(config.train_shapes)
+            epoch_df['test shapes'] = str(test_shapes)
+            epoch_df['test lums'] = str(lums)
+            epoch_df['repetition'] = config.rep
+            test_results = pd.concat((test_results, epoch_df), ignore_index=True)
+            test_count_num_loss[ts][0] = epoch_te_num_loss
+            test_acc_count[ts][0] = te_accuracy
+            test_count_map_loss[ts][0], test_full_map_loss[ts][0] = epoch_te_map_loss
+            test_loss[ts][0] = epoch_te_loss
+            test_sh_loss[ts][0] = epoch_te_sh_loss
+        print(f'Before Training:')
+        print(f'Train (Count/Dist/All) Num Loss={train_count_num_loss[0]:.4}/{train_dist_num_loss[0]:.4}/{train_all_num_loss[0]:.4} \t Accuracy={train_acc_count[0]:.3}%/{train_acc_dist[0]:.3}%/{train_acc_all[0]:.3}')
+        print(f'Train (Count/Dist/All) Map Loss={train_count_map_loss[0]:.4}/{train_dist_map_loss[0]:.4}/{train_full_map_loss[0]:.4}')
+        print(f'Test (Count/Dist/All) Num Loss={test_count_num_loss[-1][0]:.4}/{test_dist_num_loss[-1][0]:.4}/{test_all_num_loss[-1][0]:.4} \t Accuracy={test_acc_count[-1][0]:.3}%/{test_acc_dist[-1][0]:.3}%/{test_acc_all[-1][0]:.3}')
+        print(f'Test (Count/Dist/All) Map Loss={test_count_map_loss[-1][0]:.4}/{test_dist_map_loss[-1][0]:.4}/{test_full_map_loss[-1][0]:.4}')
+        
+        # savethisep = False
+        # threshold = 51
+        # if config.save_act:
+        #     print('Saving untrained activations...')
+        #     self.save_activations(self.model, self.test_loaders, base_name + '_init', config)
+        
+        tr_accuracy = 0
+        for ep in range(1, n_epochs + 1):
+            # if ep == 50 and config.save_act:
+            # if tr_accuracy > threshold:
+            #     savethisep = True
+            #     threshold += 25 # This will be 51,76, and then 101 so we'll save at 51 and 76
+            # if config.save_act and savethisep:
+            #     print(f'Saving midway activations at {threshold-26}% accuracy...')
+            #     self.save_activations(self.model, self.test_loaders, f'{base_name}_acc{threshold-26}', config)
+            #     savethisep = False
+            epoch_timer = Timer()
 
             ###### TRAIN ######
             ep_tr_loss, ep_tr_num_loss, tr_accuracy, ep_tr_sh_loss, ep_tr_map_loss = self.train(self.train_loader, ep)
-            if type(ep_tr_num_loss) is tuple:
-                (ep_tr_count_num_loss, ep_tr_dist_num_loss, ep_tr_all_num_loss) = ep_tr_num_loss
-                train_count_num_loss[ep] = ep_tr_count_num_loss
-                train_dist_num_loss[ep] = ep_tr_dist_num_loss
-                train_all_num_loss[ep] = ep_tr_all_num_loss
-                (tr_acc_count, tr_acc_dist, tr_acc_all) = tr_accuracy
-                train_acc_count[ep] = tr_acc_count
-                train_acc_dist[ep] = tr_acc_dist
-                train_acc_all[ep] = tr_acc_all
-                (ep_tr_count_map_loss, ep_tr_dist_map_loss, ep_tr_all_map_loss) = ep_tr_map_loss
-                train_count_map_loss[ep] = ep_tr_count_map_loss
-                train_dist_map_loss[ep] = ep_tr_dist_map_loss
-                train_full_map_loss[ep] = ep_tr_all_map_loss
-            else:
-                train_count_num_loss[ep] = ep_tr_num_loss
-                train_acc_count[ep] = tr_accuracy
-                train_count_map_loss[ep], train_full_map_loss[ep] = ep_tr_map_loss
-
-            # optimized loss
-            train_loss[ep] = ep_tr_loss
+            train_count_num_loss[ep] = ep_tr_num_loss
+            train_acc_count[ep] = tr_accuracy
+            train_count_map_loss[ep], train_full_map_loss[ep] = ep_tr_map_loss
+            train_loss[ep] = ep_tr_loss  # optimized loss
             train_sh_loss[ep] = ep_tr_sh_loss
-            # train_map_loss[ep] = ep_tr_map_loss
-            confs = [None for _ in self.test_loaders]
 
             ##### TEST ######
+            confs = [None for _ in self.test_loaders]
             shape_lum = product(config.test_shapes, config.lum_sets)
             for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(self.test_loaders, shape_lum)):
                 epoch_te_loss, epoch_te_num_loss, te_accuracy, epoch_te_sh_loss, epoch_te_map_loss, epoch_df, conf = self.test(test_loader, ep)
-
                 epoch_df['train shapes'] = str(config.train_shapes)
                 epoch_df['test shapes'] = str(test_shapes)
                 epoch_df['test lums'] = str(lums)
                 epoch_df['repetition'] = config.rep
                 test_results = pd.concat((test_results, epoch_df), ignore_index=True)
-
-
-                if type(epoch_te_num_loss) is tuple:
-                    (ep_te_count_num_loss, ep_te_dist_num_loss, ep_te_all_num_loss)= epoch_te_num_loss
-                    test_count_num_loss[ts][ep] = ep_te_count_num_loss
-                    test_dist_num_loss[ts][ep] = ep_te_dist_num_loss
-                    test_all_num_loss[ts][ep] = ep_te_all_num_loss
-                    (ep_te_count_map_loss, ep_te_dist_map_loss, ep_te_all_map_loss)= epoch_te_map_loss
-                    test_count_map_loss[ts][ep] = ep_te_count_map_loss
-                    test_dist_map_loss[ts][ep] = ep_te_dist_map_loss
-                    test_full_map_loss[ts][ep] = ep_te_all_map_loss
-
-                else:
-                    test_count_num_loss[ts][ep] = epoch_te_num_loss
-                    test_acc_count[ts][ep] = te_accuracy
-                    test_count_map_loss[ts][ep], test_full_map_loss[ts][ep] = epoch_te_map_loss
-
-                # test_map_loss[ts][ep] = epoch_te_map_loss
+                test_count_num_loss[ts][ep] = epoch_te_num_loss
+                test_acc_count[ts][ep] = te_accuracy
+                test_count_map_loss[ts][ep], test_full_map_loss[ts][ep] = epoch_te_map_loss
                 test_loss[ts][ep] = epoch_te_loss
                 test_sh_loss[ts][ep] = epoch_te_sh_loss
                 confs[ts] = conf
-                # base_name_test = base_name + f'_test-shapes-{test_shapes}_lums-{lums}'
-                base_name_test = base_name
 
             if not ep % 50 or ep == n_epochs - 1 or ep==1:
                 train_num_losses = (train_count_num_loss, train_dist_num_loss, train_all_num_loss)
                 train_map_losses = (train_count_map_loss, train_dist_map_loss, train_full_map_loss)
                 train_accs = (train_acc_count, train_acc_dist, train_acc_all)
                 train_losses = (train_num_losses, train_map_losses, train_sh_loss)
-                self.plot_performance(test_results, train_losses, train_accs, confs, ep, config)
+                self.plot_performance(test_results, train_losses, train_accs, confs, ep + 1, config)
             epoch_timer.stop_timer()
             if isinstance(test_loss, list):
                 print(f'Epoch {ep}. LR={self.optimizer.param_groups[0]["lr"]:.4}')
@@ -259,6 +242,7 @@ class Trainer():
         test_results = pd.DataFrame()
         # for i, (input, target, locations, shape_label, pass_count) in enumerate(loader):
         for i, (input, target, num_dist, all_loc, shape_label, pass_count) in enumerate(loader):
+            input = input.to(device)
             input_dim = input.shape[0]
             n_glimpses = input.shape[1]
             batch_results = pd.DataFrame()
@@ -342,6 +326,7 @@ class Trainer():
 
         for i, (input, target, num_dist, locations, shape_label, _) in enumerate(loader):
             # assert all(locations.sum(dim=1) == target)
+            input = input.to(config.device)
             n_glimpses = input.shape[1]
             seq_len = input.shape[1]
             if self.shuffle:
@@ -561,10 +546,11 @@ class Trainer():
             glimpse_coords = np.zeros((test_size, n_glimpses, 2))
             numerosity = np.zeros((test_size,))
             dist_num = np.zeros((test_size,))
-            predicted_num = np.zeros((test_size, 6))
+            predicted_num = np.zeros((test_size, model.output_size))
             correct = np.zeros((test_size,))
             # Loop through minibatches
             for i, (input_, target, num_dist, all_loc, shape_label, pass_count) in enumerate(test_loader):
+                input = input.to(device)
                 batch_size = input_.shape[0]
                 numerosity[start: start + batch_size] = target.cpu().detach().numpy()
                 dist_num[start: start + batch_size] = num_dist.cpu().detach().numpy()
@@ -707,6 +693,7 @@ class FeedForwardTrainer(Trainer):
         test_results = pd.DataFrame()
         # for i, (input, target, locations, shape_label, pass_count) in enumerate(loader):
         for i, (input, target, num_dist, all_loc, pass_count) in enumerate(loader):
+            input = input.to(config.device)
             batch_results = pd.DataFrame()
             pred_num, map, _ = self.model(input)
 
@@ -771,6 +758,7 @@ class FeedForwardTrainer(Trainer):
         count_map_epoch_loss = 0
         shape_epoch_loss = 0
         for i, (input, target, _, locations, _) in enumerate(loader):
+            input = input.to(self.config.device)
             # import pdb;pdb.set_trace()
             # assert all(locations.sum(dim=1) == target)
             self.model.zero_grad()
@@ -824,6 +812,7 @@ class RecurrentTrainer(Trainer):
         test_results = pd.DataFrame()
         # for i, (input, target, locations, shape_label, pass_count) in enumerate(loader):
         for i, (input, target, num_dist, all_loc, pass_count) in enumerate(loader):
+            input = input.to(config.device)
             input_dim = input.shape[0]
             n_glimpses = config.n_glimpses
             batch_results = pd.DataFrame()
@@ -895,6 +884,7 @@ class RecurrentTrainer(Trainer):
         count_map_epoch_loss = 0
         shape_epoch_loss = 0
         for i, (input, target, _, locations, _) in enumerate(loader):
+            input = input.to(self.config.device)
             # assert all(locations.sum(dim=1) == target)
             self.model.zero_grad()
             input_dim = input.shape[0]

@@ -1,12 +1,14 @@
 """Add pseudo images containing numeric characters to toy dataset."""
 import os
+import argparse
 import numpy as np
 import pandas as pd
 from itertools import product
 from matplotlib import pyplot as plt
 from scipy.io import savemat
 from scipy.stats import multivariate_normal
-import argparse
+from skimage.transform import warp_polar
+
 import toy_model_data as toy
 from letters import get_alphabet
 CHAR_WIDTH = 4
@@ -68,6 +70,7 @@ def get_solarized_noise(image, fg_lum, bg_lum):
     # dict = {0: np.random.normal(loc=bg_lum, scale=0.1), 1: np.random.normal(loc=fg_lum, scale=0.1)}
     solarized = np.vectorize(dict.get)(image)
     noised = np.vectorize(np.random.normal)(loc=solarized, scale=0.05)
+    noised = np.float32(noised)
     return noised
 
 def get_overlap(char_set):
@@ -134,7 +137,6 @@ def add_char_glimpses(data, conf):
         object_xy_coords = CENTROID_ARRAY[np.where(row.locations)[0]]
         # Calculate saliency map
         # Saliency map should be the size of the image WITHOUT the added border
-        # import pdb;pdb.set_trace()
         image_size = (PIXEL_HEIGHT, PIXEL_WIDTH)
         saliency = get_saliency(object_xy_coords, noise_level, image_size)
         data.at[i, 'saliency'] = saliency
@@ -223,6 +225,67 @@ def add_char_glimpses(data, conf):
         #     plt.gca().add_patch(box)
         #
     return data
+
+
+def add_logpolar_glimpses(data, conf):
+    glim_wid = conf.glimpse_wid
+    lums = conf.luminances
+    half_glim = glim_wid//2
+    data['glimpse_coords'] = None
+    data['luminances'] = None
+    data['noised_image'] = None
+    data['centre_fixation'] = None
+    data['logpolar_pixels'] = None
+    for i in range(len(data)):
+        if not i % 10:
+            print(f'Synthesizing image {i}', end='\r')
+        row = data.iloc[i]
+        # Coordinates in 1x1 space
+        object_xy_coords = CENTROID_ARRAY[np.where(row.locations)[0]]
+        # Calculate saliency map
+        # Saliency map should be the size of the image WITHOUT the added border
+        image_size = (PIXEL_HEIGHT, PIXEL_WIDTH)
+        object_pixel_coords = [MAP_SCALE_PIXEL[tuple(xy)] for xy in object_xy_coords]
+        # Shape indices for the objects
+        object_shapes = [row['shape_map'][obj] for obj in np.where(row.locations)[0]]
+
+        # Insert the specified shapes into the image at the specified locations
+        image = np.zeros(image_size, dtype=np.float32)
+        for shape_idx, (x,y) in zip(object_shapes, object_pixel_coords):
+                image[y:y+CHAR_HEIGHT:, x:x+CHAR_WIDTH] = chars[shape_idx]
+
+        # Convert scaled glimpse coordinates to pixel coordinates
+        scaled_glimpse_coords = row.xy.copy()
+        scaled_glimpse_coords[:, 0] = scaled_glimpse_coords[:, 0]*PIXEL_WIDTH
+        scaled_glimpse_coords[:, 1] = scaled_glimpse_coords[:, 1]*PIXEL_HEIGHT
+        glimpse_coords = np.round(scaled_glimpse_coords).astype(int)
+        data.at[i, 'glimpse_coords'] = glimpse_coords
+        imsize = [PIXEL_HEIGHT+glim_wid, PIXEL_WIDTH+glim_wid]
+        image_wbord = np.zeros(imsize, dtype=np.float32)
+        image_wbord[half_glim:-half_glim,half_glim:-half_glim] = image
+        # data.at[i, 'bw image'] = image_wbord
+        glimpse_coords += half_glim
+        
+        # Solarize and add Gaussian noise
+        fg, bg = np.random.choice(lums, size=2, replace=False)
+        # ensure that the difference between the foreground and background
+        # is at least 0.2, which is the smallest difference in the test sets
+        while abs(fg - bg) < 0.2:
+            fg, bg = np.random.choice(lums, size=2, replace=False)
+        data.at[i, 'luminances'] = [fg, bg]
+        noised = get_solarized_noise(image_wbord, fg, bg)
+        data.at[i, 'noised_image'] = noised
+
+        # Warp noised image to generaye log-polar glimpses
+        # Fixed gaze at the centre
+        centre = [size//2 for size in imsize]
+        fixation = warp_polar(noised, scaling='log', output_shape=imsize, center=centre, mode='edge')  # rows, cols
+        data.at[i, 'centre_fixation'] = fixation
+        # Glimpses
+        lp_glimpses = [warp_polar(noised, scaling='log', output_shape=imsize, center=(y, x), mode='edge') for x, y in glimpse_coords]
+        data.at[i, 'logpolar_pixels'] = lp_glimpses
+    return data
+
 
 def get_saliency(object_xy_coords, noise_level, image_size):
     cov = [[noise_level/2, 0], [0, noise_level/2]]
@@ -403,7 +466,7 @@ def add_chars(fname):
     return data
 
 
-def process_args(conf):
+def define_globals(conf):
     """Set global variables and convert strings to ints."""
     global GRID, POSSIBLE_CENTROIDS, GRID_SIZE, CENTROID_ARRAY
     global PIXEL_HEIGHT, PIXEL_WIDTH, MAP_SCALE_PIXEL
@@ -426,13 +489,14 @@ def process_args(conf):
     GRID_SIZE = len(POSSIBLE_CENTROIDS)
     CENTROID_ARRAY = np.array(POSSIBLE_CENTROIDS)
 
+def process_args(conf):
     if isinstance(conf.shapes[0], str):
         if conf.shapes[0].isnumeric():
             conf.shapes = [int(i) for i in conf.shapes]
         elif conf.shapes[0].isalpha():
-            letter_map = {'A':0, 'B':1, 'C':2, 'D':3, 'E':4, 'F':5, 'G':6, 'H':7,
-                          'J':8, 'K':9, 'N':10, 'O':11, 'P':12, 'R':13, 'S':14,
-                          'U':15, 'Z':16}
+            letter_map = {'A':0, 'B':1, 'C':2, 'D':3, 'E':4, 'F':5, 'G':6, 'H':7, 'I':8,
+                          'J':9, 'K':10, 'N':11, 'O':12, 'P':13, 'R':14, 'S':15,
+                          'U':16, 'Z':17}
             conf.shapes = [letter_map[i] for i in conf.shapes]
     return conf
 
@@ -440,7 +504,7 @@ def process_args(conf):
 def main():
     parser = argparse.ArgumentParser(description='PyTorch network settings')
     parser.add_argument('--min_pass', type=int, default=0)
-    parser.add_argument('--max_pass', type=int, default=6)
+    parser.add_argument('--max_pass', type=int, default=13)
     parser.add_argument('--min_num', type=int, default=2)
     parser.add_argument('--max_num', type=int, default=7)
     parser.add_argument('--shapes', type=list, default=[0, 1, 2, 3, 5, 6, 7, 8], help='string of numerals 0123 or letters ABCD')
@@ -454,6 +518,7 @@ def main():
     parser.add_argument('--grid', type=int, default=9)
     parser.add_argument('--challenge', type=str, default=None)
     parser.add_argument('--no_glimpse', action='store_true', default=False)
+    parser.add_argument('--logpolar', action='store_true', default=False)
     # parser.add_argument('--distract', action='store_true', default=False)
     # parser.add_argument('--distract_corner', action='store_true', default=False)
     # parser.add_argument('--random', action='store_true', default=False)
@@ -463,7 +528,8 @@ def main():
 
     same = 'same' if conf.same else ''
     challenge = f'_{conf.challenge}' if conf.challenge is not None else ''
-    solar = 'solarized_' if conf.solarize else ''
+    # solar = 'solarized_' if conf.solarize else ''
+    transform = 'logpolar_' if conf.logpolar else f'gw{conf.glimpse_wid}_'
     shapes = ''.join(conf.shapes)
     if conf.no_glimpse:
         n_glimpses = 'nogl'
@@ -474,8 +540,11 @@ def main():
     policy = conf.policy
     # fname_gw = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_lum{conf.luminances}_gw{conf.glimpse_wid}_{solar}{n_glimpses}{conf.size}.pkl'
     # fname = f'toysets/toy_dataset_num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_diff{conf.min_pass}-{conf.max_pass}_{shapes}{same}{challenge}_grid{conf.grid}_{n_glimpses}{conf.size}.pkl'
-    fname_gw = f'toysets/num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_{shapes}{same}{challenge}_grid{conf.grid}_policy-{policy}_lum{conf.luminances}_gw{conf.glimpse_wid}_{solar}{n_glimpses}{conf.size}.pkl'
-    fname = f'toysets/num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_{shapes}{same}{challenge}_grid{conf.grid}_policy-{policy}_{n_glimpses}{conf.size}.pkl'
+    # base = f'num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_{shapes}{same}{challenge}_grid{conf.grid}_policy-{policy}_{n_glimpses}{conf.size}'
+    fname_gw = f'toysets/num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_{shapes}{same}{challenge}_grid{conf.grid}_policy-{policy}_lum{conf.luminances}_{transform}{n_glimpses}{conf.size}'
+    # fname = f'toysets/{base}.pkl'
+    if not os.path.exists(fname_gw):
+        os.mkdir(fname_gw)
     
     
     # if os.path.exists(fname):
@@ -483,16 +552,26 @@ def main():
     #     data = pd.read_pickle(fname)
     # else:
     print('Generating new dataset')
-    data = toy.generate_dataset(conf)
-    # data.to_pickle(fname) # a bit silly that I save this dataset and then load it in the next step only to then save another version with the images filled in, just the way the development went but could be refactored to not do this
-    conf = process_args(conf)  # this get's called in generate_dataset, does it need to be called twize? there's got to be a better way
-    glimpse = False if conf.no_glimpse else True
-    # data = add_char_glimpses(data, conf.glimpse_wid, conf.solarize, conf.luminances)
-    data = add_char_glimpses(data, conf)
+    define_globals(conf)
+    conf = process_args(conf)  
+    data = toy.generate_dataset(conf)  # Generate toy version, apply symbolic model
+    if conf.logpolar:
+        data = add_logpolar_glimpses(data, conf)
+    else:
+        data = add_char_glimpses(data, conf)  # Add image/pixels/glimpse contents
+    
+    # Save example images for viewing
+    sample = np.random.choice(np.arange(len(data)), 10)
+
+    for idx in sample:
+        plt.matshow(data.iloc[idx]['noised_image'], vmin=0, vmax=1, cmap='Greys')
+        plt.axis('off')
+        plt.savefig(f'{fname_gw}/example_{idx}.png', bbox_inches='tight', dpi=300)    
+    
     # data = add_char_glimpses_2channel(data, conf.glimpse_wid, conf.solarize, conf.luminances)
     # fname = f'toysets/toy_dataset_nl-{noise_level}_diff-{min_pass_count}-{max_pass_count}_{shapes_set}_{size}_tetris.pkl'
-    print(f'Saving {fname_gw}')
-    data.to_pickle(fname_gw)
+    print(f'Saving {fname_gw}.pkl')
+    data.to_pickle(fname_gw + '.pkl')
     # dict_for_mat = {name: col.values for name, col in data.items()}
     # savemat(f'toysets/stimuli/grid9.mat', dict_for_mat)
 

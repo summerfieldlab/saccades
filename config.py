@@ -30,11 +30,13 @@ def get_base_name(config):
     model_desc = f'{model_type}{detach}{act}{pretrain}_hsize-{config.h_size}_input-{train_on}{kernel}_{config.shape_input}'
     same = 'same' if config.same else ''
     challenge = config.challenge
-    solar = 'solarized_' if config.solarize else ''
+    # solar = 'solarized_' if config.solarize else ''
+    transform = 'logpolar_' if config.shape_input == 'logpolar' else 'gw6_'
     shapes = ''.join([str(i) for i in config.shapestr])
     sort = 'sort_' if config.sort else ''
     policy = config.policy
-    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_grid{config.grid}_policy-{policy}_trainshapes-{shapes}{same}_{challenge}_gw6_{solar}{n_glimpses}{train_size}'
+
+    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_grid{config.grid}_policy-{policy}_trainshapes-{shapes}{same}_{challenge}_{transform}{n_glimpses}{train_size}'
     # train_desc = f'loss-{use_loss}_niters-{n_iters}_{n_epochs}eps'
     withshape = '+shape' if config.learn_shape else ''
     train_desc = f'loss-{use_loss}{withshape}_opt-{config.opt}_drop{drop}_{sort}count-{target_type}_{n_epochs}eps_rep{config.rep}'
@@ -72,7 +74,7 @@ def get_config():
     parser.add_argument('--test_shapes', nargs='*', type=list, default=[[0, 1, 2, 3, 5, 6, 7, 8], [4]])
     parser.add_argument('--detach', action='store_true', default=False)
     parser.add_argument('--learn_shape', action='store_true', default=False, help='for the parametric shape rep, whether to additional train to produce symbolic shape labels')
-    parser.add_argument('--shape_input', type=str, default='symbolic', help='Which format to use for what pathway (symbolic, parametric, tetris, or char)')
+    parser.add_argument('--shape_input', type=str, default='symbolic', help='Which format to use for what pathway (symbolic, parametric, tetris, char, noise, logpolar)')
     parser.add_argument('--same', action='store_true', default=False)
     parser.add_argument('--challenge', type=str, default='')
     parser.add_argument('--no_solarize', action='store_true', default=False)

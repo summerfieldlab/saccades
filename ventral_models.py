@@ -3,11 +3,52 @@ import math
 import torch
 from torch import nn
 from scipy.stats import special_ortho_group
+from skimage.transform import warp_polar
+from utils import Timer
 # from modules import RNN, MultRNN, MultiplicativeLayer
+
+class LogPolarBasicMLP(nn.Module):
+    def __init__(self, input_size, layer_width, penult_size, output_size, device, drop=0.5):
+        super().__init__()
+        self.device = device
+        self.imsize = (48, 42)
+        self.layer0 = nn.Linear(input_size, layer_width)
+        self.layer1 = nn.Linear(layer_width, layer_width)
+        self.layer2 = nn.Linear(layer_width, layer_width)
+        self.drop_layer = nn.Dropout(p=drop)
+        self.layer3 = nn.Linear(layer_width, 100)
+        self.layer4 = nn.Linear(100, penult_size)
+        self.out = nn.Linear(penult_size, output_size)
+        self.LReLU = nn.LeakyReLU(0.1)
+
+    def warp(self, batch_of_img, xx, yy):
+        nex, h, w = batch_of_img.shape
+        warped_batch = np.zeros((nex, h*w))
+        for i, (img, x, y) in enumerate(zip(batch_of_img, xx, yy)):
+            warped = warp_polar(torch.squeeze(img), scaling='log', output_shape=self.imsize, center=(y.numpy(), x.numpy()), mode='edge')
+            warped_batch[i] = warped.flatten()
+        warped_batch = torch.from_numpy(warped_batch).float().to(self.device)
+        return warped_batch
+
+    def forward(self, im, xx, yy):
+        # warped = warp_polar(torch.squeeze(im), scaling='log', output_shape=self.imsize, center=(yy.numpy(), xx.numpy()), mode='edge')
+        # warped = torch.from_numpy(warped.flatten()).unsqueeze(0).to(self.device)
+        # timer = Timer()
+        warped = self.warp(im, xx, yy)
+        # timer.stop_timer()
+        x = self.LReLU(self.layer0(warped))
+        x = self.LReLU(self.layer1(x))
+        x = self.LReLU(self.layer2(x))
+        x = self.drop_layer(x)
+        x = self.LReLU(self.layer3(x))
+        x = self.LReLU(self.layer4(x))
+        pred = self.out(x)
+        return pred, x
 
 class BasicMLP(nn.Module):
     def __init__(self, input_size, layer_width, penult_size, output_size, drop=0.5):
         super().__init__()
+        self.penult_size = penult_size
         self.layer0 = nn.Linear(input_size, layer_width)
         self.layer1 = nn.Linear(layer_width, layer_width)
         self.layer2 = nn.Linear(layer_width, layer_width)
