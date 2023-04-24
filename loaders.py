@@ -2,6 +2,7 @@ import os
 from itertools import product
 import numpy as np
 import pandas as pd
+import xarray as xr
 import torch
 from torch.utils.data import TensorDataset, DataLoader
 
@@ -38,11 +39,13 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_{solar}{n_glimpses}{size}.pkl'
     # fname_gw = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_lum{lums}_gw6_{solar}{n_glimpses}{size}.pkl'
     # fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_gw6_{solar}{n_glimpses}{size}.pkl'
-    fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}.pkl'
+    # fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}.pkl'
+    fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}.nc'
 
     if os.path.exists(fname_gw):
         print(f'Loading saved dataset {fname_gw}')
-        data = pd.read_pickle(fname_gw)
+        # data = pd.read_pickle(fname_gw)
+        data = xr.open_dataset(fname_gw)
     # elif os.path.exists(fname):
     #     print(f'Loading saved dataset {fname}')
     #     data = pd.read_pickle(fname)
@@ -63,35 +66,36 @@ def get_loader(dataset, config, batch_size=None):
     shape_format = config.shape_input
     model_type = config.model_type
     target_type = config.target_type
+    n_glimpses = config.n_glimpses
     convolutional = True if config.model_type in ['cnn', 'bigcnn'] else False
 
     ### NUMBER LABEL ###
     if target_type == 'all':
-        total_num = dataset['locations'].apply(sum)
+        total_num = np.sum(dataset['locations'].values, axis=1)
         target = torch.tensor(total_num).long().to(config.device)
         count_num = target
-        if 'numerosity_dist' in dataset.columns:
-            dist_num = torch.tensor(dataset['numerosity_dist']).long().to(config.device)
+        if 'numerosity_dist' in dataset:
+            dist_num = torch.tensor(dataset['numerosity_dist'].values).long().to(config.device)
         else:
-            notA = dataset['locations_to_count'].apply(sum)
+            notA = np.sum(dataset['locations_to_count'].values, axis=1)
             dist_num = torch.tensor(count_num - notA).long().to(config.device)
     elif 'unique' in config.challenge:
-        count_num = torch.tensor(dataset['num_unique']).long().to(config.device)
+        count_num = torch.tensor(dataset['num_unique'].values).long().to(config.device)
         dist_num = torch.zeros_like(count_num).long().to(config.device)
     else:
-        if 'numerosity_dist' in dataset.columns:
-            count_num = torch.tensor(dataset['numerosity_target']).long().to(config.device)
-            dist_num = torch.tensor(dataset['numerosity_dist']).long().to(config.device)
+        if 'numerosity_dist' in dataset:
+            count_num = torch.tensor(dataset['numerosity_target'].values).long().to(config.device)
+            dist_num = torch.tensor(dataset['numerosity_dist'].values).long().to(config.device)
         else:
-            count_num = torch.tensor(dataset['numerosity']).long().to(config.device)
+            count_num = torch.tensor(dataset['numerosity'].values).long().to(config.device)
             dist_num = torch.zeros_like(count_num).long().to(config.device)
 
     ### INTEGRATION SCORE ###
-    pass_count = torch.tensor(dataset['pass_count']).float().to(config.device)
+    pass_count = torch.tensor(dataset['pass_count'].values).float().to(config.device)
     
     ### SHAPE LABEL ###
-    dataset['shape1'] = dataset['shape']
-    shape_array = np.stack(dataset['shape'], axis=0)
+    # dataset['shape1'] = dataset['shape']
+    shape_array = dataset['shape'].values
     if config.sort:
         shape_arrayA = shape_array[:, :, 0] # Distractor
         shape_array_rest = shape_array[:, :, 1:] # Everything else
@@ -102,16 +106,16 @@ def get_loader(dataset, config, batch_size=None):
 
     ### MAP LABEL ###
     # true_loc = torch.tensor(dataset['locations']).float().to(config.device)
-    if 'locations_count' in dataset.columns:
-        count_loc = torch.tensor(dataset['locations_count']).float().to(config.device)
-        dist_loc = torch.tensor(dataset['locations_distract']).float().to(config.device)
-        all_loc = torch.tensor(dataset['locations']).float().to(config.device)
+    if 'locations_count' in dataset:
+        count_loc = torch.tensor(dataset['locations_count'].values).float().to(config.device)
+        dist_loc = torch.tensor(dataset['locations_distract'].values).float().to(config.device)
+        all_loc = torch.tensor(dataset['locations'].values).float().to(config.device)
         true_loc = (all_loc, count_loc)
-    elif 'locations_to_count' in dataset.columns:
-        count_loc = torch.tensor(dataset['locations_to_count']).float().to(config.device)
-        all_loc = torch.tensor(dataset['locations']).float().to(config.device)
+    elif 'locations_to_count' in dataset:
+        count_loc = torch.tensor(dataset['locations_to_count'].values).float().to(config.device)
+        all_loc = torch.tensor(dataset['locations'].values).float().to(config.device)
     else:
-        all_loc = torch.tensor(dataset['locations']).float().to(config.device)
+        all_loc = torch.tensor(dataset['locations'].values).float().to(config.device)
         count_loc = all_loc
     
     if target_type == 'all':
@@ -119,12 +123,11 @@ def get_loader(dataset, config, batch_size=None):
 
     ### IMAGE INPUT ###
     if config.whole_image:
+        image_array = dataset['noised_image'].values
         if convolutional:
-            image_array = np.stack(dataset['noised_image'], axis=0)
             image_input = torch.tensor(image_array).float().to(config.device)
             image_input = torch.unsqueeze(image_input, 1)  # 1 channel
         else:  # flatten
-            image_array = np.stack(dataset['noised_image'], axis=0)
             nex, h, w = image_array.shape
             image_array = image_array.reshape(nex, -1)
             image_input = torch.tensor(image_array).float().to(config.device)
@@ -132,10 +135,7 @@ def get_loader(dataset, config, batch_size=None):
     ### PIXEL/SHAPE INPUT ###
     if train_on == 'both' or train_on =='shape':
         if shape_format == 'noise':
-            try:
-                glimpse_array = np.stack(dataset['noi_glimpse_pixels'], axis=0)
-            except:
-                glimpse_array = np.stack(dataset['noi glimpse pixels'], axis=0)
+            glimpse_array = dataset['noi_glimpse_pixels'].values
             glimpse_array -= glimpse_array.min()
             glimpse_array /= glimpse_array.max()
             print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
@@ -146,16 +146,26 @@ def get_loader(dataset, config, batch_size=None):
                 shape_array[:, :, 0] = 0
             shape_input = torch.tensor(shape_array).float().to(config.device)
         elif 'logpolar' in shape_format:
-            glimpse_array = np.stack(dataset['logpolar_pixels'], axis=0)
-            nex, n_glimpse, h, w = glimpse_array.shape
-            glimpse_array -= glimpse_array.min()
-            glimpse_array /= glimpse_array.max()
-            print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
-            shape_input = torch.tensor(glimpse_array).float().view((nex, n_glimpse, -1))
+            if 'centre' in shape_format or 'center' in shape_format:
+                logpolar_centre = dataset['centre_fixation'].values
+                logpolar_centre -= logpolar_centre.min()
+                logpolar_centre /= logpolar_centre.max()
+                nex, h, w = logpolar_centre.shape
+                # As if repeating the same glimpse but without allocating that memory
+                shape_input = torch.tensor(logpolar_centre).unsqueeze(1).expand(nex, n_glimpses, h, w)
+            else:
+                glimpse_array = dataset['logpolar_pixels'].values
+                nex, n_gl, h, w = glimpse_array.shape
+                assert n_glimpses == n_gl
+                glimpse_array -= glimpse_array.min()
+                glimpse_array /= glimpse_array.max()
+                print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
+                shape_input = torch.tensor(glimpse_array)
+            shape_input = shape_input.float().view((nex, n_glimpses, -1))
     
     ### XY LOCATION INPUT ###
     if train_on == 'both' or train_on == 'xy':
-        xy_array = np.stack(dataset['xy'], axis=0)
+        xy_array = dataset['xy'].values
         # xy_array = np.stack(dataset['glimpse coords'], axis=0)
         # norm_xy_array = xy_array/20
         # xy should now already be the original scaled xy between 0 and 1. No need to rescale (since alphabetic)
@@ -174,19 +184,10 @@ def get_loader(dataset, config, batch_size=None):
     elif train_on == 'shape':
         input = shape_input
     elif train_on == 'both' and 'glimpsing' not in model_type:
-        if outer:
-            assert shape_format != 'parametric'  # not implemented outer with nonsymbolic
-            # dataset['shape.t'] = dataset['shape'].apply(lambda x: np.transpose(x))
-            # kernel = np.outer(sh, xy) for sh, xy in zip
-            def get_outer(xy, shape):
-                return [np.outer(x,s).flatten() for x, s in zip(xy, shape)]
-            dataset['kernel'] = dataset.apply(lambda x: get_outer(x.xy, x.shape1), axis=1)
-            kernel = torch.tensor(dataset['kernel']).float().to(config.device)
-            input = torch.cat((xy, shape_input, kernel), dim=-1)
-        else:
-            input = torch.cat((xy, shape_input), dim=-1)
+        input = torch.cat((xy, shape_input), dim=-1)
 
     ### PREPARE LOADER ###
+    dataset.close()
     if config.whole_image:    
         dset = TensorDataset(input, count_num, dist_num, count_loc, pass_count)
     elif model_type == 'logpolar_glimpsing':
@@ -428,15 +429,15 @@ def get_loader(dataset, config, batch_size=None):
 def choose_loader(config):
     train_size = config.train_size
     test_size = config.test_size
-    try:
+    # try:
         # config.lum_sets = [[0.1, 0.5, 0.9], [0.2, 0.4, 0.6, 0.8]]
-        config.lum_sets = [[0.1, 0.4, 0.7], [0.3, 0.6, 0.9]]
-        trainset = get_dataset(train_size, config.shapestr, config, [0.1, 0.4, 0.7], solarize=config.solarize)
-        testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
-    except:
-        config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
-        trainset = get_dataset(train_size, config.shapestr, config, [0.0, 0.5, 1.0], solarize=config.solarize)
-        testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
+    config.lum_sets = [[0.1, 0.4, 0.7], [0.3, 0.6, 0.9]]
+    trainset = get_dataset(train_size, config.shapestr, config, [0.1, 0.4, 0.7], solarize=config.solarize)
+    testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
+    # except:
+    #     config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
+    #     trainset = get_dataset(train_size, config.shapestr, config, [0.0, 0.5, 1.0], solarize=config.solarize)
+    #     testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
     
     # train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type, target_type)
     # test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type, target_type) for testset in testsets]
