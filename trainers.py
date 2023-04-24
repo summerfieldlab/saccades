@@ -139,22 +139,21 @@ class Trainer():
         print(f'Test (Count/Dist/All) Num Loss={test_count_num_loss[-1][0]:.4}/{test_dist_num_loss[-1][0]:.4}/{test_all_num_loss[-1][0]:.4} \t Accuracy={test_acc_count[-1][0]:.3}%/{test_acc_dist[-1][0]:.3}%/{test_acc_all[-1][0]:.3}')
         print(f'Test (Count/Dist/All) Map Loss={test_count_map_loss[-1][0]:.4}/{test_dist_map_loss[-1][0]:.4}/{test_full_map_loss[-1][0]:.4}')
         
-        # savethisep = False
-        # threshold = 51
-        # if config.save_act:
-        #     print('Saving untrained activations...')
-        #     self.save_activations(self.model, self.test_loaders, base_name + '_init', config)
+        savethisep = False
+        threshold = 51
+        if config.save_act:
+            print('Saving untrained activations...')
+            self.save_activations(self.model, self.test_loaders, base_name + '_init', config)
         
         tr_accuracy = 0
         for ep in range(1, n_epochs + 1):
-            # if ep == 50 and config.save_act:
-            # if tr_accuracy > threshold:
-            #     savethisep = True
-            #     threshold += 25 # This will be 51,76, and then 101 so we'll save at 51 and 76
-            # if config.save_act and savethisep:
-            #     print(f'Saving midway activations at {threshold-26}% accuracy...')
-            #     self.save_activations(self.model, self.test_loaders, f'{base_name}_acc{threshold-26}', config)
-            #     savethisep = False
+            if tr_accuracy > threshold:
+                savethisep = True
+                threshold += 25 # This will be 51,76, and then 101 so we'll save at 51 and 76
+            if config.save_act and savethisep:
+                print(f'Saving midway activations at {threshold-26}% accuracy...')
+                self.save_activations(self.model, self.test_loaders, f'{base_name}_acc{threshold-26}', config)
+                savethisep = False
             epoch_timer = Timer()
 
             ###### TRAIN ######
@@ -391,7 +390,7 @@ class Trainer():
         # accuracy = data.groupby(['epoch', 'pass count']).mean()
         accuracy = data.groupby(['epoch', 'test shapes', 'test lums', 'pass count']).mean(numeric_only=True)
 
-        plt.plot(train_acc_count[:ep + 1], ':', color='green', label='training accuracy')
+        plt.plot(train_acc_count[:ep], ':', color='green', label='training accuracy')
         sns.lineplot(data=accuracy, x='epoch', hue='test shapes',
                     style='test lums', y='accuracy', alpha=0.7)
         plt.legend()
@@ -550,7 +549,7 @@ class Trainer():
             correct = np.zeros((test_size,))
             # Loop through minibatches
             for i, (input_, target, num_dist, all_loc, shape_label, pass_count) in enumerate(test_loader):
-                input = input.to(device)
+                input_ = input_.to(device)
                 batch_size = input_.shape[0]
                 numerosity[start: start + batch_size] = target.cpu().detach().numpy()
                 dist_num[start: start + batch_size] = num_dist.cpu().detach().numpy()
