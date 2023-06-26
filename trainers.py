@@ -17,31 +17,37 @@ criterion_noreduce = nn.CrossEntropyLoss(reduction='none')
 criterion_mse = nn.MSELoss()
 criterion_mse_noreduce = nn.MSELoss(reduction='none')
 
-def choose_trainer(model, loaders, config):
-    if config.model_type in ['cnn', 'bigcnn', 'mlp']:
+model_dir = 'models/logpolar'
+results_dir = 'results/logpolar'
+fig_dir = 'figures/logpolar'
+
+def choose_trainer(model, loaders, test_xarray, config):
+    if config.model_type in ['cnn', 'bigcnn', 'mlp', 'unserial']:
         if 'distract' in config.challenge:
             print('Using FeedForwardTrainerDistract class')
-            trainer = FeedForwardTrainerDistract(model, loaders, config)
+            trainer = FeedForwardTrainerDistract(model, loaders, test_xarray, config)
         else:
             print('Using FeedForwardTrainer class')
-            trainer = FeedForwardTrainer(model, loaders, config)
+            trainer = FeedForwardTrainer(model, loaders, test_xarray, config)
     elif 'recurrent_control' in config.model_type:
         if 'distract' in config.challenge:
-            trainer = RecurrentTrainerDistract(model, loaders, config)
+            trainer = RecurrentTrainerDistract(model, loaders, test_xarray, config)
         else:
-            trainer = RecurrentTrainer(model, loaders, config)
+            trainer = RecurrentTrainer(model, loaders, test_xarray, config)
     elif 'distract' in config.challenge:
         print('Using TrainerDistract class')
-        trainer = TrainerDistract(model, loaders, config)
+        trainer = TrainerDistract(model, loaders, test_xarray, config)
     else:
         print('Using Trainer class')
-        trainer = Trainer(model, loaders, config)
+        trainer = Trainer(model, loaders, test_xarray, config)
     return trainer
 
 class Trainer():
-    def __init__(self, model, loaders, config):
+    def __init__(self, model, loaders, test_xarray, config):
         self.model = model
         self.train_loader, self.test_loaders = loaders
+        self.valid_set = test_xarray['validation']
+        self.OOD_set = test_xarray['OOD']
         self.config = config
         # Set up optimizer and scheduler
         if config.opt == 'SGD':
@@ -68,7 +74,9 @@ class Trainer():
             self.ticks = list(range(config.max_num - config.min_num + 1))
             self.ticklabels = [str(tick + config.min_num) for tick in self.ticks]
             self.to_subtract = config.min_num
-        
+        if config.save_act:
+            # Load image metadata for testsets to be saved with activations
+            self.image_metadata = [pd.read_pickle(f'{loader.filename}.pkl') for loader in self.test_loaders]
     
     def train_network(self):
         config = self.config
@@ -121,11 +129,16 @@ class Trainer():
         train_loss[0] = ep_tr_loss  # optimized loss
         train_sh_loss[0] = ep_tr_sh_loss
         shape_lum = product(config.test_shapes, config.lum_sets)
-        for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(self.test_loaders, shape_lum)):
+        # for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(self.test_loaders, shape_lum)):
+        for ts, test_loader in enumerate(self.test_loaders):
             epoch_te_loss, epoch_te_num_loss, te_accuracy, epoch_te_sh_loss, epoch_te_map_loss, epoch_df, _ = self.test(test_loader, 0)
             epoch_df['train shapes'] = str(config.train_shapes)
-            epoch_df['test shapes'] = str(test_shapes)
-            epoch_df['test lums'] = str(lums)
+            # epoch_df['test shapes'] = str(test_shapes)
+            # epoch_df['test lums'] = str(lums)
+            epoch_df['test shapes'] = str(test_loader.shapes)
+            epoch_df['test lums'] = str(test_loader.lums)
+            epoch_df['testset'] = test_loader.testset
+            epoch_df['viewing'] = test_loader.viewing
             epoch_df['repetition'] = config.rep
             test_results = pd.concat((test_results, epoch_df), ignore_index=True)
             test_count_num_loss[ts][0] = epoch_te_num_loss
@@ -166,12 +179,14 @@ class Trainer():
 
             ##### TEST ######
             confs = [None for _ in self.test_loaders]
-            shape_lum = product(config.test_shapes, config.lum_sets)
-            for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(self.test_loaders, shape_lum)):
+            # shape_lum = product(config.test_shapes, config.lum_sets)
+            for ts, test_loader in enumerate(self.test_loaders):
                 epoch_te_loss, epoch_te_num_loss, te_accuracy, epoch_te_sh_loss, epoch_te_map_loss, epoch_df, conf = self.test(test_loader, ep)
                 epoch_df['train shapes'] = str(config.train_shapes)
-                epoch_df['test shapes'] = str(test_shapes)
-                epoch_df['test lums'] = str(lums)
+                epoch_df['test shapes'] = str(test_loader.shapes)  # str(test_shapes)
+                epoch_df['test lums'] = str(test_loader.lums)  # str(lums)
+                epoch_df['testset'] = test_loader.testset
+                epoch_df['viewing'] = test_loader.viewing
                 epoch_df['repetition'] = config.rep
                 test_results = pd.concat((test_results, epoch_df), ignore_index=True)
                 test_count_num_loss[ts][ep] = epoch_te_num_loss
@@ -193,8 +208,9 @@ class Trainer():
                 print(f'Train (Count/Dist/All) Num Loss={train_count_num_loss[ep]:.4}/{train_dist_num_loss[ep]:.4}/{train_all_num_loss[ep]:.4} \t Accuracy={train_acc_count[ep]:.3}%/{train_acc_dist[ep]:.3}%/{train_acc_all[ep]:.3}')
                 # Shape loss: {train_sh_loss[ep]:.4}')
                 print(f'Train (Count/Dist/All) Map Loss={train_count_map_loss[ep]:.4}/{train_dist_map_loss[ep]:.4}/{train_full_map_loss[ep]:.4}')
-                print(f'Test (Count/Dist/All) Num Loss={test_count_num_loss[-1][ep]:.4}/{test_dist_num_loss[-1][ep]:.4}/{test_all_num_loss[-1][ep]:.4} \t Accuracy={test_acc_count[-1][ep]:.3}%/{test_acc_dist[-1][ep]:.3}%/{test_acc_all[-1][ep]:.3}')
-                print(f'Test (Count/Dist/All) Map Loss={test_count_map_loss[-1][ep]:.4}/{test_dist_map_loss[-1][ep]:.4}/{test_full_map_loss[-1][ep]:.4}')
+                print(f'Test (Count/Dist/All) Num Loss={test_count_num_loss[-2][ep]:.4}/{test_dist_num_loss[-2][ep]:.4}/{test_all_num_loss[-2][ep]:.4} \t Accuracy={test_acc_count[-2][ep]:.3}%/{test_acc_dist[-2][ep]:.3}%/{test_acc_all[-2][ep]:.3}')
+                print(f'Test (Count/Dist/All) Map Loss={test_count_map_loss[-2][ep]:.4}/{test_dist_map_loss[-2][ep]:.4}/{test_full_map_loss[-2][ep]:.4}')
+                # -2 to get ood_free
             # else:
             #     print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]:.4} \t (Train/Test) Num Loss={train_num_loss[ep]:.4}/{test_num_loss[ep]:.4}/ \t Accuracy={train_acc[ep]:.3}%/{test_acc[ep]:.3}% \t Shape loss: {train_sh_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
         
@@ -240,7 +256,7 @@ class Trainer():
         confusion_matrix = None
         test_results = pd.DataFrame()
         # for i, (input, target, locations, shape_label, pass_count) in enumerate(loader):
-        for i, (input, target, num_dist, all_loc, shape_label, pass_count) in enumerate(loader):
+        for i, (_, input, target, num_dist, all_loc, shape_label, pass_count) in enumerate(loader):
             input = input.to(device)
             input_dim = input.shape[0]
             n_glimpses = input.shape[1]
@@ -323,7 +339,7 @@ class Trainer():
         count_map_epoch_loss = 0
         shape_epoch_loss = 0
 
-        for i, (input, target, num_dist, locations, shape_label, _) in enumerate(loader):
+        for i, (_, input, target, num_dist, locations, shape_label, _) in enumerate(loader):
             # assert all(locations.sum(dim=1) == target)
             input = input.to(config.device)
             n_glimpses = input.shape[1]
@@ -388,18 +404,21 @@ class Trainer():
 
         (train_acc_count, _, _) = train_acc
         # accuracy = data.groupby(['epoch', 'pass count']).mean()
-        accuracy = data.groupby(['epoch', 'test shapes', 'test lums', 'pass count']).mean(numeric_only=True)
+        # accuracy = data.groupby(['epoch', 'test shapes', 'test lums', 'pass count']).mean(numeric_only=True)
+        accuracy = data.groupby(['epoch', 'testset', 'viewing']).mean(numeric_only=True)
 
         plt.plot(train_acc_count[:ep], ':', color='green', label='training accuracy')
-        sns.lineplot(data=accuracy, x='epoch', hue='test shapes',
-                    style='test lums', y='accuracy', alpha=0.7)
+        # sns.lineplot(data=accuracy, x='epoch', hue='test shapes',
+        #             style='test lums', y='accuracy', alpha=0.7)
+        sns.lineplot(data=accuracy, x='epoch', hue='testset',
+                    style='viewing', y='accuracy', alpha=0.7)
         plt.legend()
         plt.grid()
         title = f'{config.model_type} trainon-{config.train_on} train_shapes-{config.train_shapes}'
         plt.title(title)
         plt.ylim([0, 102])
         plt.ylabel('Accuracy on number task')
-        plt.savefig(f'figures/toy/letters/accuracy_{base_name}.png', dpi=300)
+        plt.savefig(f'{fig_dir}/accuracy_{base_name}.png', dpi=300)
         plt.close()
 
         # by integration score plot
@@ -450,9 +469,8 @@ class Trainer():
             # ax2 = ax.twinx()
             # ax2.set_yticks(ticks, np.sum(confs[i], axis=1))
         fig.tight_layout()
-        plt.savefig(f'figures/toy/letters/confusion_{self.config.base_name}.png', dpi=300)
+        plt.savefig(f'{fig_dir}/confusion_{self.config.base_name}.png', dpi=300)
         plt.close()
-
 
     def make_loss_plot(self, data, train_losses, ep, config):
         # train_num_loss, train_full_map_loss, _, train_sh_loss = train_losses
@@ -462,9 +480,11 @@ class Trainer():
         ## PLOT LOSS FOR BOTH OBJECTIVES
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=[9,9], sharex=True)
         # sns.lineplot(data=data, x='epoch', y='num loss', hue='pass count', ax=ax1)
-        ax1.plot(train_num_loss[:ep + 1], ':', color='green', label='training loss')
-        sns.lineplot(data=data, x='epoch', y='num loss', hue='test shapes',
-                    style='test lums', ax=ax1, legend=False, alpha=0.7)
+        ax1.plot(train_num_loss[:ep], ':', color='green', label='training loss')
+        # sns.lineplot(data=data, x='epoch', y='num loss', hue='test shapes',
+        #             style='test lums', ax=ax1, legend=False, alpha=0.7)
+        sns.lineplot(data=data, x='epoch', y='num loss', hue='testset',
+                    style='viewing', ax=ax1, legend=False, alpha=0.7)
 
         # ax1.legend(title='Integration Difficulty')
         ax1.set_ylabel('Number Loss')
@@ -479,19 +499,23 @@ class Trainer():
         # plt.close()
 
         # sns.lineplot(data=data, x='epoch', y='map loss', hue='pass count', ax=ax2, estimator='mean')
-        ax2.plot(train_count_map_loss[:ep + 1], ':', color='green', label='training loss')
-        sns.lineplot(data=data, x='epoch', y='full map loss', hue='test shapes',
-                    style='test lums', ax=ax2, estimator='mean', legend=False, alpha=0.7)
+        ax2.plot(train_count_map_loss[:ep], ':', color='green', label='training loss')
+        # sns.lineplot(data=data, x='epoch', y='full map loss', hue='test shapes',
+        #             style='test lums', ax=ax2, estimator='mean', legend=False, alpha=0.7)
+        sns.lineplot(data=data, x='epoch', y='full map loss', hue='testset',
+                    style='viewing', ax=ax2, estimator='mean', legend=False, alpha=0.7)
         ax2.set_ylabel('Count Map Loss')
         # plt.title(title)
         ylim = ax2.get_ylim()
         ax2.set_ylim([-0.05, ylim[1]])
         ax2.grid()
 
-        ax3.plot(train_sh_loss[:ep + 1], ':', color='green', label='training loss')
+        ax3.plot(train_sh_loss[:ep], ':', color='green', label='training loss')
         if 'shape loss' in data.columns:
-            sns.lineplot(data=data, x='epoch', y='shape loss', hue='test shapes',
-                        style='test lums', ax=ax3, estimator='mean', alpha=0.7)
+            # sns.lineplot(data=data, x='epoch', y='shape loss', hue='test shapes',
+            #             style='test lums', ax=ax3, estimator='mean', alpha=0.7)
+            sns.lineplot(data=data, x='epoch', y='shape loss', hue='testset',
+                        style='viewing', ax=ax3, estimator='mean', alpha=0.7)
         ax3.set_ylabel('Shape Loss')
         # plt.title(title)
         ylim = ax3.get_ylim()
@@ -500,7 +524,7 @@ class Trainer():
         fig.tight_layout()
         # ax2.legend(title='Integration Difficulty')
         ax3.legend()
-        plt.savefig(f'figures/toy/letters/loss_{config.base_name}.png', dpi=300)
+        plt.savefig(f'{fig_dir}/loss_{config.base_name}.png', dpi=300)
         plt.close()
 
     @torch.no_grad()
@@ -522,10 +546,10 @@ class Trainer():
         softmax = nn.Softmax(dim=1)
         shape_lum = product(config.test_shapes, config.lum_sets)
         n_glimpses = config.n_glimpses
-        test_names = ['validation', 'new-luminances', 'new-shapes', 'new_both']
-        sets_to_save = [0, 3]
+        # test_names = ['validation', 'new-luminances', 'new-shapes', 'new_both']
+        test_names = ['val_free', 'val_fixed', 'ood_free', 'ood_fixed']
+        sets_to_save = [0, 2]
         # 
-        
         for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(test_loaders, shape_lum)):
         # only save new-both test set for now
         # ts = 3
@@ -540,17 +564,19 @@ class Trainer():
                 premap_act = np.zeros((test_size, model.fc1_size))
             else:
                 hidden_act = np.zeros((test_size, n_glimpses, config.h_size))
-                premap_act = np.zeros((test_size, n_glimpses, config.h_size))
-                penult_act = np.zeros((test_size, n_glimpses, config.grid**2))
+                # premap_act = np.zeros((test_size, n_glimpses, config.h_size))
+                # penult_act = np.zeros((test_size, n_glimpses, config.grid**2))
             glimpse_coords = np.zeros((test_size, n_glimpses, 2))
             numerosity = np.zeros((test_size,))
             dist_num = np.zeros((test_size,))
             predicted_num = np.zeros((test_size, model.output_size))
             correct = np.zeros((test_size,))
+            index = np.zeros((test_size,))
             # Loop through minibatches
-            for i, (input_, target, num_dist, all_loc, shape_label, pass_count) in enumerate(test_loader):
+            for i, (ind, input_, target, num_dist, all_loc, shape_label, pass_count) in enumerate(test_loader):
                 input_ = input_.to(device)
                 batch_size = input_.shape[0]
+                index[start: start + batch_size] = ind.numpy()
                 numerosity[start: start + batch_size] = target.cpu().detach().numpy()
                 dist_num[start: start + batch_size] = num_dist.cpu().detach().numpy()
                 if is_cnn:
@@ -563,34 +589,58 @@ class Trainer():
                     for t in range(n_glimpses):
                         pred_num, _, _, hidden, premap, penult = model(input_[:, t, :], hidden)
                         hidden_act[start: start + batch_size, t] = hidden.cpu().detach().numpy()
-                        premap_act[start: start + batch_size, t] = premap.cpu().detach().numpy()
-                        penult_act[start: start + batch_size, t] = penult.cpu().detach().numpy()
+                        # premap_act[start: start + batch_size, t] = premap.cpu().detach().numpy()
+                        # penult_act[start: start + batch_size, t] = penult.cpu().detach().numpy()
 
                 pred = pred_num.argmax(dim=1, keepdim=True)
                 predicted_num[start: start + batch_size] = softmax(pred_num).cpu().detach().numpy()
                 correct[start: start + batch_size] = pred.eq(target.view_as(pred)).cpu().detach().numpy().squeeze()
-
+                
                 start += batch_size
+            # Retrieve image metadata in order for this epoch
+            image_data = self.image_metadata[ts]
+            target_locations = image_data.target_coords_scaled[index].values
+            distractor_locations = image_data.distract_coords_scaled[index].values
+            
             # Save to file
             savename = f'activations/{basename}_test-{test_names[ts]}'
             if is_cnn:
                 # Compressed numpy
                 np.savez(savename, numerosity=numerosity, num_distractor=dist_num, 
                         act_premap=premap_act, 
-                        predicted_num=predicted_num, correct=correct)
+                        predicted_num=predicted_num, correct=correct, 
+                        target_locations=target_locations,
+                        distractor_locations=distractor_locations)
                 to_save = {'numerosity':numerosity, 'num_distractor':dist_num, 
                         'act_premap':premap_act, 
-                        'predicted_num':predicted_num, 'correct':correct}
+                        'predicted_num':predicted_num, 'correct':correct, 
+                        'target_locations': target_locations,
+                        'distractor_locations': distractor_locations}
             else:
+                # Put into pandas dataframe
+                # import pdb;pdb.set_trace()
+                # image_data.loc(index)
+                # variables = [index, numerosity, dist_num, hidden_act, predicted_num, correct, glimpse_coords]
+                # columns=['index', 'numerosity', 'num_distractor', 'act_hidden', 'predicted_num', 'correct', 'glimpse_xy']
+                # df = pd.DataFrame(columns=columns)
+                # for var, col in zip(variables, columns): df[col] = var
+                # df = df.join(image_data)
+                
                 # Compressed numpy
                 np.savez(savename, numerosity=numerosity, num_distractor=dist_num, 
-                        act_hidden=hidden_act, act_premap=premap_act, 
-                        act_penult=penult_act, predicted_num=predicted_num, correct=correct,
-                        glimpse_xy=glimpse_coords)
+                        act_hidden=hidden_act, 
+                        # act_premap=premap_act, act_penult=penult_act, 
+                        predicted_num=predicted_num, correct=correct,
+                        glimpse_xy=glimpse_coords, 
+                        target_locations=target_locations,
+                        distractor_locations=distractor_locations)
                 to_save = {'numerosity':numerosity, 'num_distractor':dist_num, 
-                            'act_hidden':hidden_act, 'act_premap':premap_act, 
-                            'act_penult':penult_act, 'predicted_num':predicted_num, 'correct':correct,
-                            'glimpse_xy':glimpse_coords}
+                            'act_hidden':hidden_act, 
+                            # 'act_premap':premap_act, 'act_penult':penult_act, 
+                            'predicted_num':predicted_num, 'correct':correct,
+                            'glimpse_xy':glimpse_coords, 
+                            'target_locations': target_locations,
+                            'distractor_locations': distractor_locations}
             # MATLAB
             savemat(savename + '.mat', to_save)
 
@@ -636,48 +686,52 @@ class Trainer():
 
 
 class TrainerDistract(Trainer):
-    def __init__(self, model, loaders, config):
-        super().__init__(model, loaders, config)
+    def __init__(self, model, loaders, test_xarray, config):
+        super().__init__(model, loaders, test_xarray, config)
     
     def update_confusion(self, target, pred, num_dist, confusion_matrix):
         if confusion_matrix is None:
             confusion_matrix = np.zeros((3, self.nclasses-self.config.min_num, self.nclasses-self.config.min_num))
-        for dist in [0, 1, 2]:
+        
+        # for dist in [0, 1, 2]:
+        for i, dist in enumerate(torch.unique(num_dist)):
             ind = num_dist == dist
             target_subset = target[ind]
             pred_subset = pred[ind]
             for j in range(target_subset.shape[0]):
                 label = target_subset[j]
-                confusion_matrix[dist, label-self.config.min_num, pred_subset[j]-self.config.min_num] += 1
+                confusion_matrix[i, label-self.config.min_num, pred_subset[j]-self.config.min_num] += 1
         return confusion_matrix
 
     def plot_confusion(self, confs):
-        fig, axs = plt.subplots(3, 4, figsize=(19, 16))
+        distractor_set = [1, 2, 3]
+        fig, axs = plt.subplots(len(distractor_set), 4, figsize=(19, 16))
         
         maxes = [mat.max() for mat in confs]
         vmax = max(maxes)
         # axs = axs.flatten()
-        for dist in [0, 1, 2]:
+        
+        for j, dist in enumerate(distractor_set):
             shape_lum = product(self.config.test_shapes, self.config.lum_sets)
             for i, (shape, lum) in enumerate(shape_lum):
         # for i, (ax, (shape, lum)) in enumerate(zip(axs, shape_lum)):
-                axs[dist, i].matshow(confs[i][dist, :, :], cmap='Greys', vmin=0, vmax=vmax)
-                axs[dist, i].set_aspect('equal', adjustable='box')
-                axs[dist, i].set_title(f'dist={dist} shapes={shape} lums={lum}')
-                axs[dist, i].set_xticks(self.ticks, self.ticklabels)
-                axs[dist, i].set_xlabel('Predicted Class')
-                axs[dist, i].set_ylabel('True Class')
-                axs[dist, i].set_yticks(self.ticks, self.ticklabels)
+                axs[j, i].matshow(confs[i][j, :, :], cmap='Greys', vmin=0, vmax=vmax)
+                axs[j, i].set_aspect('equal', adjustable='box')
+                axs[j, i].set_title(f'dist={dist} shapes={shape} lums={lum}')
+                axs[j, i].set_xticks(self.ticks, self.ticklabels)
+                axs[j, i].set_xlabel('Predicted Class')
+                axs[j, i].set_ylabel('True Class')
+                axs[j, i].set_yticks(self.ticks, self.ticklabels)
             # ax2 = ax.twinx()
             # ax2.set_yticks(ticks, np.sum(confs[i], axis=1))
         fig.tight_layout()
-        plt.savefig(f'figures/toy/letters/confusion_{self.config.base_name}.png', dpi=300)
+        plt.savefig(f'{fig_dir}/confusion_{self.config.base_name}.png', dpi=300)
         plt.close()
 
 
 class FeedForwardTrainer(Trainer):
-    def __init__(self, model, loaders, config):
-        super().__init__(model, loaders, config)
+    def __init__(self, model, loaders, test_xarray, config):
+        super().__init__(model, loaders, test_xarray, config)
     
     @torch.no_grad()
     def test(self, loader, ep):
@@ -691,7 +745,7 @@ class FeedForwardTrainer(Trainer):
         confusion_matrix = None
         test_results = pd.DataFrame()
         # for i, (input, target, locations, shape_label, pass_count) in enumerate(loader):
-        for i, (input, target, num_dist, all_loc, pass_count) in enumerate(loader):
+        for i, (_, input, target, num_dist, all_loc, pass_count) in enumerate(loader):
             input = input.to(config.device)
             batch_results = pd.DataFrame()
             pred_num, map, _ = self.model(input)
@@ -756,9 +810,8 @@ class FeedForwardTrainer(Trainer):
         # map_epoch_loss = 0
         count_map_epoch_loss = 0
         shape_epoch_loss = 0
-        for i, (input, target, _, locations, _) in enumerate(loader):
+        for i, (_, input, target, _, locations, _) in enumerate(loader):
             input = input.to(self.config.device)
-            # import pdb;pdb.set_trace()
             # assert all(locations.sum(dim=1) == target)
             self.model.zero_grad()
             pred_num, map, _ = self.model(input)
@@ -790,13 +843,13 @@ class FeedForwardTrainer(Trainer):
         # TODO
     
 class FeedForwardTrainerDistract(FeedForwardTrainer, TrainerDistract):
-    def __init__(self, model, loaders, config):
-        super().__init__(model, loaders, config)
+    def __init__(self, model, loaders, test_xarray, config):
+        super().__init__(model, loaders, test_xarray, config)
     
     
 class RecurrentTrainer(Trainer):
-    def __init__(self, model, loaders, config):
-        super().__init__(model, loaders, config)
+    def __init__(self, model, loaders, test_xarray, config):
+        super().__init__(model, loaders, test_xarray, config)
     
     @torch.no_grad()
     def test(self, loader, ep):
@@ -810,7 +863,7 @@ class RecurrentTrainer(Trainer):
         confusion_matrix = None
         test_results = pd.DataFrame()
         # for i, (input, target, locations, shape_label, pass_count) in enumerate(loader):
-        for i, (input, target, num_dist, all_loc, pass_count) in enumerate(loader):
+        for i, (_, input, target, num_dist, all_loc, pass_count) in enumerate(loader):
             input = input.to(config.device)
             input_dim = input.shape[0]
             n_glimpses = config.n_glimpses
@@ -882,7 +935,7 @@ class RecurrentTrainer(Trainer):
         # map_epoch_loss = 0
         count_map_epoch_loss = 0
         shape_epoch_loss = 0
-        for i, (input, target, _, locations, _) in enumerate(loader):
+        for i, (_, input, target, _, locations, _) in enumerate(loader):
             input = input.to(self.config.device)
             # assert all(locations.sum(dim=1) == target)
             self.model.zero_grad()
@@ -917,5 +970,5 @@ class RecurrentTrainer(Trainer):
 
 
 class RecurrentTrainerDistract(RecurrentTrainer, TrainerDistract):
-    def __init__(self, model, loaders, config):
-        super().__init__(model, loaders, config)
+    def __init__(self, model, loaders, test_xarray, config):
+        super().__init__(model, loaders, test_xarray, config)

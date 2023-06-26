@@ -41,7 +41,8 @@ def choose_model(config, model_dir):
                 'n_classes':n_classes, 'dropout': drop, 'grid': config.grid,
                 'n_shapes':n_shapes, 'ventral':ventral, 'train_on':config.train_on,
                 'finetune': finetune, 'device':device, 'sort':config.sort,
-                'no_pretrain': config.no_pretrain, 'whole':whole_im}
+                'no_pretrain': config.no_pretrain, 'whole':whole_im,
+                'n_glimpses': config.n_glimpses}
     
     hidden_size = mod_args['h_size']
     output_size = mod_args['n_classes'] + 1
@@ -83,6 +84,8 @@ def choose_model(config, model_dir):
             model = NumAsMapsum(in_sz, hidden_size, output_size, **mod_args).to(device)
     elif 'ventral' in model_type:
         model = PretrainedVentral(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+    elif 'unserial' in model_type:
+        model = UnserialControl(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     # elif 'glimpsing' in model_type:
     #     salience_size = (42, 36)
     #     model = Glimpsing(salience_size, hidden_size, map_size, output_size, **mod_args).to(device)
@@ -269,6 +272,47 @@ class FeedForward(nn.Module):
         map = self.LReLU(self.layer5(x))
         out = self.layer6(map)
         return out, map, x
+
+
+class UnserialControl(nn.Module):
+    def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        self.output_size = output_size
+        self.train_on = kwargs['train_on']
+        self.whole_im = kwargs['whole']
+        self.finetune = kwargs['finetune']
+        self.sort = kwargs['sort']
+        self.n_glimpses = kwargs['n_glimpses']
+        par_in_size = hidden_size if  self.train_on == 'both' else hidden_size//2
+        
+        self.ventral = FeedForward(pix_size*self.n_glimpses, hidden_size, hidden_size, hidden_size//2, **kwargs)
+        self.dorsal = FeedForward(2*self.n_glimpses, hidden_size, hidden_size, hidden_size//2, **kwargs)
+        self.parietal = FeedForward(par_in_size, hidden_size, map_size, output_size, **kwargs)
+
+    def forward(self, x):
+        if self.train_on == 'shape':
+            pix = x
+        elif self.train_on == 'xy':
+            xy = x
+        else:
+            xy = x[:, :2*self.n_glimpses]  # xy coords are first two input features
+            pix = x[:, 2*self.n_glimpses:]
+
+        if self.train_on != 'xy':
+            ventral_out, _, _ = self.ventral(pix) # for BCE experiment
+
+            if self.train_on == 'both':
+                # x = torch.concat((xy, shape_rep.detach().clone()), dim=1)
+                dorsal_out, _, _ = self.dorsal(xy)
+                parietal_in = torch.cat((dorsal_out, ventral_out), dim=1)
+                
+            elif self.train_on == 'shape':
+                parietal_in = ventral_out
+        elif self.train_on == 'xy':
+            parietal_in = dorsal_out
+        num, map_, premap = self.parietal(parietal_in)
+        # num, shape, map_, hidden, premap, penult = self.rnn(x, hidden)
+        return num, map_, premap
 
 
 class PretrainedVentral(nn.Module):

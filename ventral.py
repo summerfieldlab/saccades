@@ -5,6 +5,7 @@ from itertools import product
 import numpy as np
 from matplotlib import pyplot as plt
 import pandas as pd
+import xarray as xr
 import seaborn as sns
 import torch
 from torch import nn
@@ -565,11 +566,13 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
     # fname_gw = f'{home}/toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}_{challenge}_grid{config.grid}_lum{lums}_gw6_{solar}{size}.pkl'
     # fname = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_{solar}12_{size}.pkl'
     transform = 'logpolar_' if config.logpolar else f'gw6_'
-    fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-cheat+jitter_lum{lums}_{transform}12_{size}.pkl'
+    # fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-cheat+jitter_lum{lums}_{transform}12_{size}.pkl'
+    fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-cheat+jitter_lum{lums}_{transform}12_{size}.nc'
     
     if os.path.exists(fname_gw):
         print(f'Loading saved dataset {fname_gw}')
-        data = pd.read_pickle(fname_gw)
+        # data = pd.read_pickle(fname_gw)
+        data = xr.open_dataset(fname_gw)
     # elif os.path.exists(fname):
     #     print(f'Loading saved dataset {fname}')
     #     data = pd.read_pickle(fname)
@@ -595,8 +598,8 @@ def get_dataset(dataframe, config, device):
     Returns:
         DataLoader: _description_
     """
-    dataframe['shape1'] = dataframe['shape']
-    shape_array = np.stack(dataframe['shape'], axis=0)
+    # dataframe['shape1'] = dataframe['shape']
+    shape_array = dataframe['shape'].values
     if config.sort:
         shape_arrayA = shape_array[:, :, 0]
         shape_array_rest = shape_array[:, :, 1:]
@@ -619,13 +622,13 @@ def get_dataset(dataframe, config, device):
         # yy = xy_array[:, :, 1]
         # xx_input = torch.tensor(xx).float()
         # yy_input = torch.tensor(yy).float()
-        glimpse_array = np.stack(dataframe['logpolar_pixels'], axis=0)
+        glimpse_array = dataframe['logpolar_pixels'].values
     else:
-        glimpse_array = np.stack(dataframe['noi_glimpse_pixels'], axis=0)
-    glimpse_array -= glimpse_array.min()
-    glimpse_array /= glimpse_array.max()
+        glimpse_array = dataframe['noi_glimpse_pixels'].values
+    # glimpse_array -= glimpse_array.min()
+    # glimpse_array /= glimpse_array.max()
     # print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
-
+    dataframe.close()
     shape_input = torch.tensor(glimpse_array).float()
 
     #     shape_input = torch.unsqueeze(shape_input, 1)  # 1 channel
@@ -650,6 +653,7 @@ def get_dataset(dataframe, config, device):
     # else:
     dset = TensorDataset(shape_input, shape_label)
     # loader = DataLoader(dset, batch_size=BATCH_SIZE, shuffle=True)
+    
     return dset
 
 def get_model(config, device):

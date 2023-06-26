@@ -31,7 +31,7 @@ def get_base_name(config):
     same = 'same' if config.same else ''
     challenge = config.challenge
     # solar = 'solarized_' if config.solarize else ''
-    transform = 'logpolar_' if config.shape_input == 'logpolar' else 'gw6_'
+    transform = f'{config.shape_input}_' if 'logpolar' in config.shape_input else 'gw6_'
     shapes = ''.join([str(i) for i in config.shapestr])
     sort = 'sort_' if config.sort else ''
     policy = config.policy

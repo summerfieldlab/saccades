@@ -31,9 +31,12 @@ def main(config):
     timer = Timer()
 
     # make sure all results directories exist
-    model_dir = 'models/toy/letters'
-    results_dir = 'results/toy/letters'
-    fig_dir = 'figures/toy/letters'
+    # model_dir = 'models/toy/letters'
+    # results_dir = 'results/toy/letters'
+    # fig_dir = 'figures/toy/letters'
+    model_dir = 'models/logpolar'
+    results_dir = 'results/logpolar'
+    fig_dir = 'figures/logpolar'
     dir_list = [model_dir, results_dir, fig_dir]
     for directory in dir_list:
         if not os.path.exists(directory):
@@ -47,9 +50,9 @@ def main(config):
         if ui == 'y':
             config.rep += 1
     config.base_name = base_name
-    loaders = choose_loader(config)
+    loaders, test_xarray = choose_loader(config)
     model = choose_model(config, model_dir)
-    trainer = choose_trainer(model, loaders, config)
+    trainer = choose_trainer(model, loaders, test_xarray, config)
 
     # Train model and save trained model
     model, results = trainer.train_network()
@@ -87,7 +90,9 @@ def main(config):
     df_train['epoch'] = np.arange(config.n_epochs + 1)
     df_train['rnn iterations'] = config.n_iters
     df_train['dataset'] = 'train'
-    for ts, (test_shapes, test_lums) in enumerate(product(config.test_shapes, config.lum_sets)):
+    _, test_loaders = loaders
+    # for ts, (test_shapes, test_lums) in enumerate(product(config.test_shapes, config.lum_sets)):
+    for ts, loader in enumerate(test_loaders):
         # df_test_list[ts]['loss'] = test_loss[ts]
         df_test_list[ts]['count num loss'] = test_count_num_loss[ts]
         df_test_list[ts]['dist num loss'] = test_dist_num_loss[ts]
@@ -100,9 +105,10 @@ def main(config):
         df_test_list[ts]['accuracy count'] = test_acc_count[ts]
         df_test_list[ts]['accuracy dist'] = test_acc_dist[ts]
         df_test_list[ts]['accuracy all'] = test_acc_all[ts]
-        df_test_list[ts]['dataset'] = f'test {test_shapes} {test_lums}'
-        df_test_list[ts]['test shapes'] = str(test_shapes)
-        df_test_list[ts]['test lums'] = str(test_lums)
+        df_test_list[ts]['dataset'] = loader.testset
+        df_test_list[ts]['viewing'] = loader.viewing
+        df_test_list[ts]['test shapes'] = str(loader.shapes)
+        df_test_list[ts]['test lums'] = str(loader.lums)
         df_test_list[ts]['epoch'] = np.arange(config.n_epochs + 1)
 
     np.save(f'{results_dir}/confusion_{base_name}', confs)

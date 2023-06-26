@@ -40,26 +40,27 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     # fname_gw = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_lum{lums}_gw6_{solar}{n_glimpses}{size}.pkl'
     # fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_gw6_{solar}{n_glimpses}{size}.pkl'
     # fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}.pkl'
-    fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}.nc'
-
+    # fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}.nc'
+    datadir = 'datasets/image_sets'
+    fname_gw = f'{datadir}/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}'
     if os.path.exists(fname_gw):
         print(f'Loading saved dataset {fname_gw}')
         # data = pd.read_pickle(fname_gw)
-        data = xr.open_dataset(fname_gw)
+        data = xr.open_dataset(fname_gw + '.nc')
     # elif os.path.exists(fname):
     #     print(f'Loading saved dataset {fname}')
     #     data = pd.read_pickle(fname)
     else:
-        print(f'{fname_gw} does not exist. Exiting.')
+        print(f'{fname_gw}.nc does not exist. Exiting.')
         raise FileNotFoundError
         # print('Generating new dataset')
         # data = save_dataset(fname_gw, noise_level, size, pass_count_range, num_range, shapes_set, same)
-
+    data['filename'] = fname_gw
 
     return data
 
 
-def get_loader(dataset, config, batch_size=None):
+def get_loader(dataset, config, batch_size=None, fixed=False):
     train_on = config.train_on
     cross_entropy_loss = config.cross_entropy
     outer = config.outer
@@ -95,7 +96,8 @@ def get_loader(dataset, config, batch_size=None):
     
     ### SHAPE LABEL ###
     # dataset['shape1'] = dataset['shape']
-    shape_array = dataset['shape'].values
+    # shape_array = dataset['shape'].values
+    shape_array = dataset['symbolic_shape'].values
     if config.sort:
         shape_arrayA = shape_array[:, :, 0] # Distractor
         shape_array_rest = shape_array[:, :, 1:] # Everything else
@@ -146,7 +148,7 @@ def get_loader(dataset, config, batch_size=None):
                 shape_array[:, :, 0] = 0
             shape_input = torch.tensor(shape_array).float().to(config.device)
         elif 'logpolar' in shape_format:
-            if 'centre' in shape_format or 'center' in shape_format:
+            if 'centre' in shape_format or 'center' in shape_format or fixed:
                 logpolar_centre = dataset['centre_fixation'].values
                 logpolar_centre -= logpolar_centre.min()
                 logpolar_centre /= logpolar_centre.max()
@@ -157,24 +159,31 @@ def get_loader(dataset, config, batch_size=None):
                 glimpse_array = dataset['logpolar_pixels'].values
                 nex, n_gl, h, w = glimpse_array.shape
                 assert n_glimpses == n_gl
-                glimpse_array -= glimpse_array.min()
-                glimpse_array /= glimpse_array.max()
+                # glimpse_array -= glimpse_array.min()
+                # glimpse_array /= glimpse_array.max()
                 print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
                 shape_input = torch.tensor(glimpse_array)
-            shape_input = shape_input.float().view((nex, n_glimpses, -1))
+            if 'unserial' in model_type:
+                shape_input = shape_input.float().reshape((nex, -1))
+            else:
+                shape_input = shape_input.float().view((nex, n_glimpses, -1))
     
     ### XY LOCATION INPUT ###
     if train_on == 'both' or train_on == 'xy':
-        xy_array = dataset['xy'].values
+        # xy_array = dataset['xy'].values
+        xy_array = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
         # xy_array = np.stack(dataset['glimpse coords'], axis=0)
         # norm_xy_array = xy_array/20
         # xy should now already be the original scaled xy between 0 and 1. No need to rescale (since alphabetic)
-        norm_xy_array = xy_array * 1.2
+        # norm_xy_array = xy_array * 1.2
         # norm_xy_array = xy_array / 21
         # xy = torch.tensor(dataset['xy']).float().to(config.device)
-        xy = torch.tensor(norm_xy_array).float()
+        # xy = torch.tensor(norm_xy_array).float()
+        xy = torch.tensor(xy_array).float()
         if 'logpolar' not in shape_format:
             xy = xy.to(config.device)
+        if 'unserial' in model_type:
+            xy = xy.view((nex, -1))
     
     # Create merged input (or not)
     if config.whole_image:
@@ -185,21 +194,29 @@ def get_loader(dataset, config, batch_size=None):
         input = shape_input
     elif train_on == 'both' and 'glimpsing' not in model_type:
         input = torch.cat((xy, shape_input), dim=-1)
+    
+    # Get image IDs (for joining with activations later)
+    index = torch.tensor(dataset.image.values).int()
 
     ### PREPARE LOADER ###
-    dataset.close()
+    
+    # Include the index as image ID to be able to match to image metadata
     if config.whole_image:    
-        dset = TensorDataset(input, count_num, dist_num, count_loc, pass_count)
+        dset = TensorDataset(index, input, count_num, dist_num, count_loc, pass_count)
     elif model_type == 'logpolar_glimpsing':
-        dset = TensorDataset(image_input, xy, count_num, dist_num, count_loc, pass_count)
+        dset = TensorDataset(index, image_input, xy, count_num, dist_num, count_loc, pass_count)
+    elif 'unserial' in model_type:
+        dset = TensorDataset(index, input, count_num, dist_num, count_loc, pass_count)
     else:  
-        
-        dset = TensorDataset(input, count_num, dist_num, count_loc, shape_label, pass_count)
+        dset = TensorDataset(index, input, count_num, dist_num, count_loc, shape_label, pass_count)
         # dset = TensorDataset(input, count_num, dist_num, count_loc, shape_label, pass_count)
         # dset = TensorDataset(input, target, all_loc, shape_label, pass_count)
         # dset = TensorDataset(input, target, true_loc, None, shape_label, pass_count)
     bs = config.batch_size if batch_size is None else batch_size
     loader = DataLoader(dset, batch_size=bs, shuffle=True)
+    loader.filename = dataset.filename.data
+    dataset.close()
+    
     return loader
 
 
@@ -432,8 +449,12 @@ def choose_loader(config):
     # try:
         # config.lum_sets = [[0.1, 0.5, 0.9], [0.2, 0.4, 0.6, 0.8]]
     config.lum_sets = [[0.1, 0.4, 0.7], [0.3, 0.6, 0.9]]
+    # Get xarrays
     trainset = get_dataset(train_size, config.shapestr, config, [0.1, 0.4, 0.7], solarize=config.solarize)
-    testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
+    # testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
+    validation_set = get_dataset(test_size, config.shapestr, config, [0.1, 0.4, 0.7], solarize=config.solarize)
+    OOD_set = get_dataset(test_size, config.testshapestr[-1], config, config.lum_sets[-1], solarize=config.solarize)
+    test_xarray = {'validation': validation_set, 'OOD': OOD_set}
     # except:
     #     config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
     #     trainset = get_dataset(train_size, config.shapestr, config, [0.0, 0.5, 1.0], solarize=config.solarize)
@@ -443,7 +464,28 @@ def choose_loader(config):
     # test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type, target_type) for testset in testsets]
     train_loader = get_loader(trainset, config)
     # Large batch size for test loader to test quicker
-    test_loaders = [get_loader(testset, config, batch_size=2500) for testset in testsets]
+    # test_loaders = [get_loader(testset, config, batch_size=2500) for testset in testsets]
+    val_free = get_loader(validation_set, config, batch_size=2500, fixed=False)
+    val_free.testset = 'validation'
+    val_free.viewing = 'free'
+    val_free.shapes = config.shapestr
+    val_free.lums = [0.1, 0.4, 0.7]
+    val_fixed = get_loader(validation_set, config, batch_size=2500, fixed=True)
+    val_fixed.testset = 'validation'
+    val_fixed.viewing = 'fixed'
+    val_fixed.shapes = config.shapestr
+    val_fixed.lums = [0.1, 0.4, 0.7]
+    ood_free = get_loader(OOD_set, config, batch_size=2500, fixed=False)
+    ood_free.testset = 'ood'
+    ood_free.viewing = 'free'
+    ood_free.shapes = config.testshapestr[-1]
+    ood_free.lums = config.lum_sets[-1]
+    ood_fixed = get_loader(OOD_set, config, batch_size=2500, fixed=True)
+    ood_fixed.testset = 'ood'
+    ood_fixed.viewing = 'fixed'
+    ood_fixed.shapes = config.testshapestr[-1]
+    ood_fixed.lums = config.lum_sets[-1]
+    test_loaders = [val_free, val_fixed, ood_free, ood_fixed]
     
     loaders = [train_loader, test_loaders]
-    return loaders
+    return loaders, test_xarray
