@@ -1,4 +1,5 @@
 import os
+import gc
 from itertools import product
 import numpy as np
 import pandas as pd
@@ -60,7 +61,7 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     return data
 
 
-def get_loader(dataset, config, batch_size=None, fixed=False):
+def get_loader(dataset, config, batch_size=None, gaze=None):
     train_on = config.train_on
     cross_entropy_loss = config.cross_entropy
     outer = config.outer
@@ -135,6 +136,7 @@ def get_loader(dataset, config, batch_size=None, fixed=False):
             image_input = torch.tensor(image_array).float().to(config.device)
 
     ### PIXEL/SHAPE INPUT ###
+    # TODO this is a bit messy and at risk of developing a bug
     if train_on == 'both' or train_on =='shape':
         if shape_format == 'noise':
             glimpse_array = dataset['noi_glimpse_pixels'].values
@@ -148,21 +150,59 @@ def get_loader(dataset, config, batch_size=None, fixed=False):
                 shape_array[:, :, 0] = 0
             shape_input = torch.tensor(shape_array).float().to(config.device)
         elif 'logpolar' in shape_format:
-            if 'centre' in shape_format or 'center' in shape_format or fixed:
+            if 'centre' in shape_format or 'center' in shape_format or gaze=='fixed':
                 logpolar_centre = dataset['centre_fixation'].values
                 logpolar_centre -= logpolar_centre.min()
                 logpolar_centre /= logpolar_centre.max()
                 nex, h, w = logpolar_centre.shape
                 # As if repeating the same glimpse but without allocating that memory
                 shape_input = torch.tensor(logpolar_centre).unsqueeze(1).expand(nex, n_glimpses, h, w)
-            else:
+            elif gaze=='free':
                 glimpse_array = dataset['logpolar_pixels'].values
+                glimpse_array -= glimpse_array.min()
+                glimpse_array /= glimpse_array.max()
                 nex, n_gl, h, w = glimpse_array.shape
                 assert n_glimpses == n_gl
                 # glimpse_array -= glimpse_array.min()
                 # glimpse_array /= glimpse_array.max()
                 print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
                 shape_input = torch.tensor(glimpse_array)
+            elif 'mixed' in shape_format:
+                # Take first half free viewing, second half centre fixated
+                glimpse_array = dataset['logpolar_pixels'].values
+                glimpse_array -= glimpse_array.min()
+                glimpse_array /= glimpse_array.max()
+                nex, n_gl, h, w = glimpse_array.shape
+                assert n_glimpses == n_gl
+                free = glimpse_array[::2]
+                del glimpse_array
+                free = torch.tensor(free)
+                
+                # Fixed central fixation
+                logpolar_centre = dataset['centre_fixation'].values
+                logpolar_centre -= logpolar_centre.min()
+                logpolar_centre /= logpolar_centre.max()
+                fixed = logpolar_centre[1::2]
+                nex2, h, w = fixed.shape
+                del logpolar_centre
+                fixed = torch.tensor(fixed).unsqueeze(1).expand(nex2, n_glimpses, h, w)
+                
+                # Merge free and fixed
+                shape_input = torch.empty((nex, n_gl, h, w))
+                shape_input[::2] = free
+                shape_input[1::2] = fixed
+
+            else:
+                glimpse_array = dataset['logpolar_pixels'].values
+                glimpse_array -= glimpse_array.min()
+                glimpse_array /= glimpse_array.max()
+                nex, n_gl, h, w = glimpse_array.shape
+                assert n_glimpses == n_gl
+                # glimpse_array -= glimpse_array.min()
+                # glimpse_array /= glimpse_array.max()
+                print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
+                shape_input = torch.tensor(glimpse_array)
+                
             if 'unserial' in model_type:
                 shape_input = shape_input.float().reshape((nex, -1))
             else:
@@ -465,22 +505,22 @@ def choose_loader(config):
     train_loader = get_loader(trainset, config)
     # Large batch size for test loader to test quicker
     # test_loaders = [get_loader(testset, config, batch_size=2500) for testset in testsets]
-    val_free = get_loader(validation_set, config, batch_size=2500, fixed=False)
+    val_free = get_loader(validation_set, config, batch_size=2500, gaze='free')
     val_free.testset = 'validation'
     val_free.viewing = 'free'
     val_free.shapes = config.shapestr
     val_free.lums = [0.1, 0.4, 0.7]
-    val_fixed = get_loader(validation_set, config, batch_size=2500, fixed=True)
+    val_fixed = get_loader(validation_set, config, batch_size=2500, gaze='fixed')
     val_fixed.testset = 'validation'
     val_fixed.viewing = 'fixed'
     val_fixed.shapes = config.shapestr
     val_fixed.lums = [0.1, 0.4, 0.7]
-    ood_free = get_loader(OOD_set, config, batch_size=2500, fixed=False)
+    ood_free = get_loader(OOD_set, config, batch_size=2500, gaze='free')
     ood_free.testset = 'ood'
     ood_free.viewing = 'free'
     ood_free.shapes = config.testshapestr[-1]
     ood_free.lums = config.lum_sets[-1]
-    ood_fixed = get_loader(OOD_set, config, batch_size=2500, fixed=True)
+    ood_fixed = get_loader(OOD_set, config, batch_size=2500, gaze='fixed')
     ood_fixed.testset = 'ood'
     ood_fixed.viewing = 'fixed'
     ood_fixed.shapes = config.testshapestr[-1]

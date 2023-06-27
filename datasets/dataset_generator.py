@@ -345,8 +345,8 @@ class DatasetGenerator():
         locations_2count = [1 if i in to_count else 0 for i in range(self.grid_size)]
         locations_dist = [1 if i in distractors else 0 for i in range(self.grid_size)]
         # these won't be exactly correct because of the small outerborder.
-        target_scaled_coords = [self.possible_centroids[target] for target in to_count]
-        distractor_scaled_coords = [self.possible_centroids[distract] for distract in distractors]
+        target_coords_1x1 = [self.possible_centroids[target] for target in to_count]
+        distract_coords_1x1 = [self.possible_centroids[distract] for distract in distractors]
         example_dict = {'glimpse_coords_1x1': xy_coords, 'symbolic_shape': shape_coords,
                         'numerosity_target': num,
                         'numerosity_dist': len(distractors),
@@ -367,8 +367,8 @@ class DatasetGenerator():
                         'initial_candidates': initial_candidates,
                         'initial_filled_locations': initial_filled_locations,
                         'shape_hist': shape_hist,
-                        'target_scaled_coords': target_scaled_coords,
-                        'distractor_scaled_coords': distractor_scaled_coords
+                        'target_coords_1x1': target_coords_1x1,
+                        'distract_coords_1x1': distract_coords_1x1
                         }
         return example_dict
 
