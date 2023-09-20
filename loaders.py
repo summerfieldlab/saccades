@@ -44,7 +44,8 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     # fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}.nc'
     datadir = 'datasets/image_sets'
     fname_gw = f'{datadir}/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}'
-    if os.path.exists(fname_gw):
+    
+    if os.path.exists(fname_gw + '.nc'):
         print(f'Loading saved dataset {fname_gw}')
         # data = pd.read_pickle(fname_gw)
         data = xr.open_dataset(fname_gw + '.nc')
@@ -136,12 +137,13 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
             image_input = torch.tensor(image_array).float().to(config.device)
 
     ### PIXEL/SHAPE INPUT ###
+    # Don't normalize if you want to test transfer to OOD luminance values
     # TODO this is a bit messy and at risk of developing a bug
     if train_on == 'both' or train_on =='shape':
         if shape_format == 'noise':
             glimpse_array = dataset['noi_glimpse_pixels'].values
-            glimpse_array -= glimpse_array.min()
-            glimpse_array /= glimpse_array.max()
+            # glimpse_array -= glimpse_array.min()
+            # glimpse_array /= glimpse_array.max()
             print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
             shape_input = torch.tensor(glimpse_array).float().to(config.device)
         elif 'symbolic' in shape_format: # symbolic shape input
@@ -152,15 +154,21 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
         elif 'logpolar' in shape_format:
             if 'centre' in shape_format or 'center' in shape_format or gaze=='fixed':
                 logpolar_centre = dataset['centre_fixation'].values
-                logpolar_centre -= logpolar_centre.min()
-                logpolar_centre /= logpolar_centre.max()
+                # logpolar_centre -= logpolar_centre.min()
+                # logpolar_centre /= logpolar_centre.max()
                 nex, h, w = logpolar_centre.shape
                 # As if repeating the same glimpse but without allocating that memory
                 shape_input = torch.tensor(logpolar_centre).unsqueeze(1).expand(nex, n_glimpses, h, w)
+            elif 'human' in shape_format:
+                glimpse_array = dataset['humanlike_logpolar_pixels'].values
+                nex, n_gl, h, w = glimpse_array.shape
+                assert n_glimpses == n_gl
+                print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
+                shape_input = torch.tensor(glimpse_array)
             elif gaze=='free':
                 glimpse_array = dataset['logpolar_pixels'].values
-                glimpse_array -= glimpse_array.min()
-                glimpse_array /= glimpse_array.max()
+                # glimpse_array -= glimpse_array.min()
+                # glimpse_array /= glimpse_array.max()
                 nex, n_gl, h, w = glimpse_array.shape
                 assert n_glimpses == n_gl
                 # glimpse_array -= glimpse_array.min()
@@ -170,8 +178,8 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
             elif 'mixed' in shape_format:
                 # Take first half free viewing, second half centre fixated
                 glimpse_array = dataset['logpolar_pixels'].values
-                glimpse_array -= glimpse_array.min()
-                glimpse_array /= glimpse_array.max()
+                # glimpse_array -= glimpse_array.min()
+                # glimpse_array /= glimpse_array.max()
                 nex, n_gl, h, w = glimpse_array.shape
                 assert n_glimpses == n_gl
                 free = glimpse_array[::2]
@@ -180,8 +188,8 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
                 
                 # Fixed central fixation
                 logpolar_centre = dataset['centre_fixation'].values
-                logpolar_centre -= logpolar_centre.min()
-                logpolar_centre /= logpolar_centre.max()
+                # logpolar_centre -= logpolar_centre.min()
+                # logpolar_centre /= logpolar_centre.max()
                 fixed = logpolar_centre[1::2]
                 nex2, h, w = fixed.shape
                 del logpolar_centre
@@ -194,8 +202,8 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
 
             else:
                 glimpse_array = dataset['logpolar_pixels'].values
-                glimpse_array -= glimpse_array.min()
-                glimpse_array /= glimpse_array.max()
+                # glimpse_array -= glimpse_array.min()
+                # glimpse_array /= glimpse_array.max()
                 nex, n_gl, h, w = glimpse_array.shape
                 assert n_glimpses == n_gl
                 # glimpse_array -= glimpse_array.min()
@@ -210,9 +218,12 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
     
     ### XY LOCATION INPUT ###
     if train_on == 'both' or train_on == 'xy':
-        # xy_array = dataset['xy'].values
-        xy_array = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
-        # xy_array = np.stack(dataset['glimpse coords'], axis=0)
+        if 'human' in shape_format:
+            xy_array = dataset['humanlike_coords'].values
+        else:
+            # xy_array = dataset['xy'].values
+            xy_array = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
+            # xy_array = np.stack(dataset['glimpse coords'], axis=0)
         # norm_xy_array = xy_array/20
         # xy should now already be the original scaled xy between 0 and 1. No need to rescale (since alphabetic)
         # norm_xy_array = xy_array * 1.2
