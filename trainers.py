@@ -8,7 +8,7 @@ from scipy.io import savemat
 import torch
 from torch import nn
 from torch.optim import SGD, Adam
-from torch.optim.lr_scheduler import StepLR
+from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
 
 from utils import Timer
 
@@ -56,10 +56,11 @@ class Trainer():
             self.optimizer = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=config.wd)
         elif config.opt == 'Adam':
             # start_lr = 0.01 if config.use_loss == 'num' else 0.001
-            start_lr = 0.001
+            start_lr = 0.0001
             self.optimizer = Adam(model.parameters(), weight_decay=config.wd, amsgrad=True, lr=start_lr)
         # scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)
-        self.scheduler = StepLR(self.optimizer, step_size=config.n_epochs/20, gamma=0.7)
+        # self.scheduler = StepLR(self.optimizer, step_size=config.n_epochs/20, gamma=0.7)
+        self.scheduler = ReduceLROnPlateau(self.optimizer, 'min', verbose=True, patience=5)
 
         self.shuffle = True
 
@@ -106,6 +107,7 @@ class Trainer():
         train_acc_count = np.zeros((n_epochs + 1,))
         train_acc_dist = np.zeros((n_epochs + 1,))
         train_acc_all = np.zeros((n_epochs + 1,))
+        train_acc_map = np.zeros((n_epochs + 1,))
         n_test_sets = len(config.test_shapes) * len(config.lum_sets)
         test_loss = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
         # test_map_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
@@ -148,9 +150,9 @@ class Trainer():
             test_sh_loss[ts][0] = epoch_te_sh_loss
         print(f'Before Training:')
         print(f'Train (Count/Dist/All) Num Loss={train_count_num_loss[0]:.4}/{train_dist_num_loss[0]:.4}/{train_all_num_loss[0]:.4} \t Accuracy={train_acc_count[0]:.3}%/{train_acc_dist[0]:.3}%/{train_acc_all[0]:.3}')
-        # print(f'Train (Count/Dist/All) Map Loss={train_count_map_loss[0]:.4}/{train_dist_map_loss[0]:.4}/{train_full_map_loss[0]:.4}')
+        print(f'Train (Count/Dist/All) Map Loss={train_count_map_loss[0]:.4}/{train_dist_map_loss[0]:.4}/{train_full_map_loss[0]:.4}')
         print(f'Test (Count/Dist/All) Num Loss={test_count_num_loss[-1][0]:.4}/{test_dist_num_loss[-1][0]:.4}/{test_all_num_loss[-1][0]:.4} \t Accuracy={test_acc_count[-1][0]:.3}%/{test_acc_dist[-1][0]:.3}%/{test_acc_all[-1][0]:.3}')
-        # print(f'Test (Count/Dist/All) Map Loss={test_count_map_loss[-1][0]:.4}/{test_dist_map_loss[-1][0]:.4}/{test_full_map_loss[-1][0]:.4}')
+        print(f'Test (Count/Dist/All) Map Loss={test_count_map_loss[-1][0]:.4}/{test_dist_map_loss[-1][0]:.4}/{test_full_map_loss[-1][0]:.4}')
         
         savethisep = False
         threshold = 51
@@ -170,10 +172,11 @@ class Trainer():
             epoch_timer = Timer()
 
             ###### TRAIN ######
-            ep_tr_loss, ep_tr_num_loss, tr_accuracy, ep_tr_sh_loss, ep_tr_map_loss = self.train(self.train_loader, ep)
+            ep_tr_loss, ep_tr_num_loss, tr_accuracy, ep_tr_sh_loss, ep_tr_map_loss, map_acc = self.train(self.train_loader, ep)
             train_count_num_loss[ep] = ep_tr_num_loss
             train_acc_count[ep] = tr_accuracy
             train_count_map_loss[ep], train_full_map_loss[ep] = ep_tr_map_loss
+            train_acc_map[ep] = map_acc
             train_loss[ep] = ep_tr_loss  # optimized loss
             train_sh_loss[ep] = ep_tr_sh_loss
 
@@ -188,20 +191,24 @@ class Trainer():
                 epoch_df['testset'] = test_loader.testset
                 epoch_df['viewing'] = test_loader.viewing
                 epoch_df['repetition'] = config.rep
-                test_results = pd.concat((test_results, epoch_df), ignore_index=True)
+                test_results = pd.concat((test_results, epoch_df), ignore_index=True) # detailed 
+                
                 test_count_num_loss[ts][ep] = epoch_te_num_loss
                 test_acc_count[ts][ep] = te_accuracy
                 test_count_map_loss[ts][ep], test_full_map_loss[ts][ep] = epoch_te_map_loss
                 test_loss[ts][ep] = epoch_te_loss
                 test_sh_loss[ts][ep] = epoch_te_sh_loss
+                test_losses = (test_loss, test_count_num_loss, test_count_map_loss, test_sh_loss)
+                test_accs = test_acc_count
                 confs[ts] = conf
 
             if not ep % 50 or ep == n_epochs - 1 or ep==1:
                 train_num_losses = (train_count_num_loss, train_dist_num_loss, train_all_num_loss)
                 train_map_losses = (train_count_map_loss, train_dist_map_loss, train_full_map_loss)
-                train_accs = (train_acc_count, train_acc_dist, train_acc_all)
+                train_accs = (train_acc_count, train_acc_dist, train_acc_all, train_acc_map)
                 train_losses = (train_num_losses, train_map_losses, train_sh_loss)
-                self.plot_performance(test_results, train_losses, train_accs, confs, ep + 1, config)
+                # self.plot_performance(test_results, train_losses, train_accs, confs, ep + 1, config)
+                self.plot_performance_quick(test_losses, test_accs, train_losses, train_accs, confs, ep + 1, config)
             epoch_timer.stop_timer()
             if isinstance(test_loss, list):
                 print(f'Epoch {ep}. LR={self.optimizer.param_groups[0]["lr"]:.4}')
@@ -211,9 +218,11 @@ class Trainer():
                 # print(f'Test (Count/Dist/All) Num Loss={test_count_num_loss[-2][ep]:.4}/{test_dist_num_loss[-2][ep]:.4}/{test_all_num_loss[-2][ep]:.4} \t Accuracy={test_acc_count[-2][ep]:.3}%/{test_acc_dist[-2][ep]:.3}%/{test_acc_all[-2][ep]:.3}')
                 # print(f'Test (Count/Dist/All) Map Loss={test_count_map_loss[-2][ep]:.4}/{test_dist_map_loss[-2][ep]:.4}/{test_full_map_loss[-2][ep]:.4}')
                 # -2 to get ood_free
-                print(f'Train Loss={train_count_num_loss[ep]:.4} \t Accuracy={train_acc_count[ep]:.3}%')
+                print(f'Train Loss={train_loss[ep]:.4} \t Accuracy={train_acc_count[ep]:.3}% \t Map Accuracy={train_acc_map[ep]:.3}%' )
                 print(f'Test Val (Free/Fixed) Loss={test_count_num_loss[0][ep]:.4}/{test_count_num_loss[1][ep]:.4} \t Accuracy={test_acc_count[0][ep]:.3}%/{test_acc_count[1][ep]:.3}%')
                 print(f'Test OOD (Free/Fixed) Loss={test_count_num_loss[2][ep]:.4}/{test_count_num_loss[3][ep]:.4} \t Accuracy={test_acc_count[2][ep]:.3}%/{test_acc_count[3][ep]:.3}%')
+                print(f'Test Val (Free/Fixed) Map Loss={test_count_map_loss[0][ep]:.4}/{test_count_map_loss[1][ep]:.4} ')
+                print(f'Test OOD (Free/Fixed) Map Loss={test_count_map_loss[2][ep]:.4}/{test_count_map_loss[3][ep]:.4} ')
 
             # else:
             #     print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]:.4} \t (Train/Test) Num Loss={train_num_loss[ep]:.4}/{test_num_loss[ep]:.4}/ \t Accuracy={train_acc[ep]:.3}%/{test_acc[ep]:.3}% \t Shape loss: {train_sh_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
@@ -311,7 +320,8 @@ class Trainer():
             count_map_epoch_loss += map_loss_to_add
             # class-specific analysis and confusion matrix
             # c = (pred.squeeze() == target)
-            confusion_matrix = self.update_confusion(target, pred, num_dist, confusion_matrix)
+            if self.config.use_loss != 'map':
+                confusion_matrix = self.update_confusion(target, pred, num_dist, confusion_matrix)
 
         # These two lines should be the same
         # map_epoch_loss / len(loader.dataset)
@@ -337,6 +347,7 @@ class Trainer():
         noreduce = False
         config = self.config
         correct = 0
+        correct_map = 0
         epoch_loss = 0
         num_epoch_loss = 0
         # map_epoch_loss = 0
@@ -377,21 +388,25 @@ class Trainer():
             self.optimizer.step()
 
             correct += pred.eq(target.view_as(pred)).sum().item()
+            correct_map += (torch.round(torch.sigmoid(map)).eq(locations)*1.0).mean().item()
+            
+            
             epoch_loss += loss.item()
             num_epoch_loss += num_loss.item()
             # if not isinstance(map_loss_to_add, int):
                 # map_loss_to_add = map_loss_to_add.item()
             count_map_epoch_loss += map_loss_to_add
-            # count_map_epoch_loss += count_map_loss_to_add
-        self.scheduler.step()
+            # count_map_epoch_loss += count_map_loss_to_add 
         accuracy = 100. * (correct/len(loader.dataset))
+        map_acc = 100 * (correct_map/(len(loader)))
         epoch_loss /= len(loader)
         num_epoch_loss /= len(loader)
+        self.scheduler.step(epoch_loss)
         # full_map_epoch_loss /= len(loader)
         count_map_epoch_loss /= len(loader)
         map_epoch_loss = (count_map_epoch_loss, -1)
         shape_epoch_loss /= len(loader) * n_glimpses
-        return epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss, map_epoch_loss
+        return epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss, map_epoch_loss, map_acc
 
     def plot_performance(self, test_results, train_losses, train_acc, confs, ep, config):
 
@@ -440,7 +455,68 @@ class Trainer():
 
         # acc_on_difficult = accuracy.loc[ep, 5.0]['accuracy']
         # print(f'Testset {ts}, Accuracy on level 5 difficulty: {acc_on_difficult}')
-        self.plot_confusion(confs)
+        if self.config.use_loss != 'map':
+            self.plot_confusion(confs)
+            
+    def plot_performance_quick(self, test_losses, test_accs, train_losses, train_acc, confs, ep, config):
+
+        base_name = config.base_name
+        # test_results['accuracy'] = test_results['correct'].astype(int)*100
+        # # data = test_results[test_results['test shapes'] == str(test_shapes) and test_results['test lums'] == str(lums)]
+        # data = test_results
+        # max_pass = max(data['pass count'].max(), 6)
+        # data = data[data['pass count'] < max_pass]
+        # self.make_loss_plot_quick(test_losses, train_losses, ep, config)
+        # sns.countplot(data=test_results[test_results['correct']==True], x='epoch', hue='pass count')
+        # plt.savefig(f'figures/toy/test_correct_{base_name}.png', dpi=300)
+        # plt.close()
+
+        (train_acc_count, _, _, train_map_acc) = train_acc
+        # accuracy = data.groupby(['epoch', 'pass count']).mean()
+        # accuracy = data.groupby(['epoch', 'test shapes', 'test lums', 'pass count']).mean(numeric_only=True)
+        # accuracy = data.groupby(['epoch', 'testset', 'viewing']).mean(numeric_only=True)
+        fig, (ax1, ax2) = plt.subplots(1,2)
+        ax1.plot(train_acc_count[:ep], ':', color='green', label='training accuracy')
+        # sns.lineplot(data=accuracy, x='epoch', hue='test shapes',
+        #             style='test lums', y='accuracy', alpha=0.7)
+        # sns.lineplot(data=accuracy, x='epoch', hue='testset',
+        #             style='viewing', y='accuracy', alpha=0.7)
+        ax1.plot(test_accs[0][:ep], label='Validation')
+        ax1.plot(test_accs[1][:ep], label='OOD')
+        ax1.set_title('Number')
+        ax1.legend()
+        ax1.grid()
+        # title = f'{config.model_type} trainon-{config.train_on} train_shapes-{config.train_shapes}'
+        # plt.title(title)
+        ax1.set_ylim([0, 102])
+        # ax1.set_ylabel('Accuracy on number task')
+        
+        ax2.plot(train_map_acc[1:ep], ':', color='green', label='training accuracy')
+        ax2.set_ylim([0, 102])
+        ax2.grid()
+        ax2.set_title('Map')
+        # ax2.set_ylabel('Accuracy on map task')
+        plt.tight_layout()
+        plt.savefig(f'{fig_dir}/accuracy_{base_name}.png', dpi=300)
+        plt.close()
+
+        # by integration score plot
+        # accuracy = accuracy[]
+        # plt.plot(train_acc_count[:ep + 1], ':', color='green', label='training accuracy')
+        # sns.lineplot(data=accuracy, x='epoch', hue='pass count',
+        #              y='accuracy', alpha=0.7)
+        # plt.legend()
+        # plt.grid()
+        # plt.title(title)
+        # plt.ylim([0, 102])
+        # plt.ylabel('Accuracy on number task')
+        # plt.savefig(f'figures/toy/letters/accuracy_byintegration_{base_name}.png', dpi=300)
+        # plt.close()
+
+        # acc_on_difficult = accuracy.loc[ep, 5.0]['accuracy']
+        # print(f'Testset {ts}, Accuracy on level 5 difficulty: {acc_on_difficult}')
+        if self.config.use_loss != 'map':
+            self.plot_confusion(confs)
 
     def update_confusion(self, target, pred, num_dist, confusion_matrix):
         if confusion_matrix is None:
@@ -785,7 +861,8 @@ class FeedForwardTrainer(Trainer):
             num_epoch_loss += num_loss.mean().item()
             count_map_epoch_loss += map_loss_to_add
             # class-specific analysis and confusion matrix
-            confusion_matrix = self.update_confusion(target, pred, num_dist, confusion_matrix)
+            if self.config.use_loss != 'map':
+                confusion_matrix = self.update_confusion(target, pred, num_dist, confusion_matrix)
 
         # These two lines should be the same
         # map_epoch_loss / len(loader.dataset)
@@ -831,9 +908,10 @@ class FeedForwardTrainer(Trainer):
                 # map_loss_to_add = map_loss_to_add.item()
             count_map_epoch_loss += map_loss_to_add
             # count_map_epoch_loss += count_map_loss_to_add
-        self.scheduler.step()
+        
         accuracy = 100. * (correct/len(loader.dataset))
         epoch_loss /= i+1
+        self.scheduler.step(epoch_loss)
         num_epoch_loss /= i+1
         # full_map_epoch_loss /= len(loader)
         count_map_epoch_loss /= i+1
@@ -910,7 +988,8 @@ class RecurrentTrainer(Trainer):
             num_epoch_loss += num_loss.mean().item()
             count_map_epoch_loss += map_loss_to_add
             # class-specific analysis and confusion matrix
-            confusion_matrix = self.update_confusion(target, pred, num_dist, confusion_matrix)
+            if self.config.use_loss != 'map':
+                confusion_matrix = self.update_confusion(target, pred, num_dist, confusion_matrix)
 
         # These two lines should be the same
         # map_epoch_loss / len(loader.dataset)
@@ -962,9 +1041,10 @@ class RecurrentTrainer(Trainer):
                 # map_loss_to_add = map_loss_to_add.item()
             count_map_epoch_loss += map_loss_to_add
             # count_map_epoch_loss += count_map_loss_to_add
-        self.scheduler.step()
+        
         accuracy = 100. * (correct/len(loader.dataset))
         epoch_loss /= i+1
+        self.scheduler.step(epoch_loss)
         num_epoch_loss /= i+1
         # full_map_epoch_loss /= len(loader)
         count_map_epoch_loss /= i+1

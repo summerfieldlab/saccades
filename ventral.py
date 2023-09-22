@@ -1,7 +1,14 @@
+"""Train a ventral module on individual glimpses.
+
+Some functions are from when I used raytune to do a parameter search, but then 
+others were used to train the final configured model(s) that were saved and used 
+later.
+"""
 import os
 import argparse
 from argparse import Namespace
 from itertools import product
+import gc
 import numpy as np
 from matplotlib import pyplot as plt
 import pandas as pd
@@ -24,7 +31,6 @@ from utils import Timer
 # from prettytable import PrettyTable
 import ventral_models as mod
 
-from count_unique import Timer
 
 mom = 0.9
 # wd = 0.0001
@@ -45,6 +51,7 @@ criterion_bce = nn.BCEWithLogitsLoss()
 
 
 def train_ventral(config, cla, n_epochs):
+    """For Raytune."""
     # net = Net(config["l1"], config["l2"])
 
     device = "cpu"
@@ -159,9 +166,9 @@ def load_data(config, device):
     # lums = [0.1, 0.2, 0.4, 0.5, 0.6, 0.8, 0.9]
     lums = config.lums
     trainframe = get_dataframe(train_size, config.shapestr, config, lums, solarize=True)
-    trainset = get_dataset(trainframe, config, device)
+    trainset = get_dataset_pd(trainframe, config, device)
     testframe = get_dataframe(test_size, config.testshapestr[0], config, lums, solarize=True)
-    testset = get_dataset(testframe, config, device)
+    testset = get_dataset_pd(testframe, config, device)
     # try:
     #     config.lum_sets = [[0.1, 0.5, 0.9], [0.2, 0.4, 0.6, 0.8]]
     #     trainframe = get_dataframe(train_size, config.shapestr, config, [0.1, 0.5, 0.9], solarize=config.solarize)
@@ -177,6 +184,7 @@ def load_data(config, device):
     return trainset, testset
 
 def te_accuracy(net, cla, device="cpu"):
+    """For Raytune."""
     trainset, testset = load_data(cla)
 
     testloader = torch.utils.data.DataLoader(
@@ -245,7 +253,6 @@ def train_model(model, optimizer, scheduler, loaders, config, device):
     df_test['epoch'] = np.arange(config.n_epochs + 1)
     results = pd.concat((df_train, df_test))
     return results
-
 
 
 def train_one_epoch(train_loader, model, optimizer, which_loss, sort, device):
@@ -567,15 +574,15 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
     # fname = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_{solar}12_{size}.pkl'
     transform = 'logpolar_' if config.logpolar else f'gw6_'
     # fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-cheat+jitter_lum{lums}_{transform}12_{size}.pkl'
-    fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-cheat+jitter_lum{lums}_{transform}12_{size}.nc'
+    fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-{config.policy}_lum{lums}_{transform}12_{size}'
     
-    if os.path.exists(fname_gw):
-        print(f'Loading saved dataset {fname_gw}')
+    if os.path.exists(fname_gw+'.nc'):
+        print(f'Loading saved dataset {fname_gw}.nc')
         # data = pd.read_pickle(fname_gw)
-        data = xr.open_dataset(fname_gw)
-    # elif os.path.exists(fname):
-    #     print(f'Loading saved dataset {fname}')
-    #     data = pd.read_pickle(fname)
+        data = xr.open_dataset(fname_gw+'.nc')
+    elif os.path.exists(fname_gw+'.pkl'):
+        print(f'Loading saved dataset {fname_gw}.pkl')
+        data = pd.read_pickle(fname_gw+'.pkl')
     else:
         print(f'{fname_gw} does not exist. Exiting.')
         raise FileNotFoundError
@@ -585,8 +592,7 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
 
     return data
 
-
-def get_dataset(dataframe, config, device):
+def get_dataset_pd(dataframe, config, device):
     """_summary_
 
     Args:
@@ -599,7 +605,13 @@ def get_dataset(dataframe, config, device):
         DataLoader: _description_
     """
     # dataframe['shape1'] = dataframe['shape']
-    shape_array = dataframe['shape'].values
+    
+    if config.policy == 'humanlike':
+        shape_array = np.stack(dataframe['shape_coords_humanlike'].values)
+        # import pdb;pdb.set_trace()
+    else:
+        shape_array = dataframe['shape'].values
+    # dataframe['shape'] = []
     if config.sort:
         shape_arrayA = shape_array[:, :, 0]
         shape_array_rest = shape_array[:, :, 1:]
@@ -622,7 +634,99 @@ def get_dataset(dataframe, config, device):
         # yy = xy_array[:, :, 1]
         # xx_input = torch.tensor(xx).float()
         # yy_input = torch.tensor(yy).float()
-        glimpse_array = dataframe['logpolar_pixels'].values
+        if config.policy == 'humanlike':
+            glimpse_array = np.stack(dataframe['humanlike_logpolar_pixels'].values)
+        else:
+            glimpse_array = np.stack(dataframe['logpolar_pixels'].values)
+    else:
+        glimpse_array = np.stack(dataframe['noi_glimpse_pixels'].values)
+    print('after stacking')
+    # glimpse_array -= glimpse_array.min()
+    # glimpse_array /= glimpse_array.max()
+    # print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
+    # dataframe.close()
+    shape_input = torch.tensor(glimpse_array).float()
+    dataframe = []  # free memory
+    # Returns the number of
+    # objects it has collected
+    # and deallocated
+    collected = gc.collect()
+    
+    # Prints Garbage collector
+    # as 0 object
+    print("Garbage collector: collected",
+          "%d objects." % collected)
+
+    #     shape_input = torch.unsqueeze(shape_input, 1)  # 1 channel
+    # else:
+
+    # collapse over glimpses
+    nex, n_glimpses, height, width = shape_input.shape
+    nrows = nex * n_glimpses
+    if 'cnn' in config.model_type:
+        # reshape for conv layers
+        shape_input = shape_input.view((nrows, height, width)).unsqueeze(1)
+    else:
+        shape_input = shape_input.view((nrows, height*width))
+    # if not 'logpolar' in model_type:
+    shape_label = shape_label.view((nrows, 25))
+
+    if not(torch.isfinite(shape_input).all() and torch.isfinite(shape_label).all()):
+        print('Found NaNs in the inputs or targets.')
+        exit()
+    # if 'logpolar' in model_type:
+    #     dset = TensorDataset(image_input, xx_input, yy_input, shape_label)
+    # else:
+    dset = TensorDataset(shape_input, shape_label)
+    # loader = DataLoader(dset, batch_size=BATCH_SIZE, shuffle=True)
+    
+    return dset
+
+def get_dataset_xr(dataframe, config, device):
+    """_summary_
+
+    Args:
+        dataset (DataFrame): _description_
+        shape_format (str): _description_
+        model_type (str): _description_
+        target_type (str): _description_
+
+    Returns:
+        DataLoader: _description_
+    """
+    # dataframe['shape1'] = dataframe['shape']
+    
+    if config.policy == 'humanlike':
+        shape_array = dataframe['shape_coords_humanlike'].values
+        import pdb;pdb.set_trace()
+    else:
+        shape_array = dataframe['shape'].values
+    if config.sort:
+        shape_arrayA = shape_array[:, :, 0]
+        shape_array_rest = shape_array[:, :, 1:]
+        shape_array_rest.sort(axis=-1)
+        shape_array_rest = shape_array_rest[:, :, ::-1]
+        shape_array =  np.concatenate((np.expand_dims(shape_arrayA, axis=2), shape_array_rest), axis=2)
+    print(f'label range: {shape_array.min()}-{shape_array.max()}')
+    shape_label = torch.tensor(shape_array).float()
+    if config.logpolar:
+        # image_array = np.stack(dataframe['noised_image'], axis=0)
+        # image_array -= image_array.min()
+        # image_array /= image_array.max()
+        # print(f'pixel range: {image_array.min()}-{image_array.max()}')
+        # nex, w, h = image_array.shape
+        # # image_array = image_array.reshape(nex, -1)
+        # image_input = torch.tensor(image_array).float()
+        # # shape_input = torch.tensor(image_array).float()
+        # xy_array = np.stack(dataframe['glimpse_coords'], axis=0)
+        # xx = xy_array[:, :, 0]
+        # yy = xy_array[:, :, 1]
+        # xx_input = torch.tensor(xx).float()
+        # yy_input = torch.tensor(yy).float()
+        if config.policy == 'humanlike':
+            glimpse_array = dataframe['humanlike_logpolar_pixels'].values
+        else:
+            glimpse_array = dataframe['logpolar_pixels'].values
     else:
         glimpse_array = dataframe['noi_glimpse_pixels'].values
     # glimpse_array -= glimpse_array.min()
@@ -729,7 +833,8 @@ def get_config():
     # parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--logpolar', action='store_true', default=False)
     parser.add_argument('--sort', action='store_true', default=False)
-    # parser.add_argument('--preglimpsed', type=str, default=None)
+    parser.add_argument('--policy', type=str, default='humanlike')
+    
     config = parser.parse_args()
     # Convert string input argument into a list of indices
     if config.train_shapes[0].isnumeric():
@@ -752,6 +857,7 @@ def get_config():
 
 
 def raymain(num_samples=10, max_num_epochs=10, gpus_per_trial=0.5):
+    """For Raytune."""
     # Process input arguments
     config = get_config()
     # model_type = config.model_type
@@ -916,7 +1022,7 @@ def main():
     transform = 'logpolar_' if config.logpolar else 'gw6_'
     sort = 'sort_' if config.sort else ''
     shapes = ''.join([str(i) for i in config.shapestr])
-    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_diff-{min_pass}-{max_pass}_grid{config.grid}_policy-cheat+jitter_lum-{config.lums}_trainshapes-{shapes}{same}_{challenge}_{transform}{train_size}'
+    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_diff-{min_pass}-{max_pass}_grid{config.grid}_policy-{config.policy}_lum-{config.lums}_trainshapes-{shapes}{same}_{challenge}_{transform}{train_size}'
     train_desc = f'loss-{config.loss}_opt-{config.opt}_drop{drop}_{sort}{n_epochs}eps_rep{config.rep}'
     base_name = f'{model_desc}_{data_desc}_{train_desc}'
     config.base_name = base_name

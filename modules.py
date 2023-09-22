@@ -157,6 +157,9 @@ class MultRNN(nn.Module):
     Sutskever, I., Martens, J., & Hinton, G. (2011). Generating text with
     recurrent neural networks. Proceedings of the 28th International Conference
     on Machine Learning, ICML 2011, 1017–1024.
+    
+    Consider also 
+    On Multiplicative Integration with Recurrent Neural Networks (NIPS 2016) Yuhuai Wu, Saizheng Zhang, Ying Zhang, Yoshua Bengio, Russ R. Salakhutdinov
     """
     def __init__(self, input_size, hidden_size, factor_size, output_size, small_weights):
         super().__init__()
@@ -169,7 +172,7 @@ class MultRNN(nn.Module):
         self.gain = 5/3
         self.params = [self.i2f, self.h2f, self.f2h, self.i2h, self.h2o]
         self.small_weights = small_weights
-        self.init_params()
+        # self.init_params()
 
     def forward(self, x_t,  h_tm1):
         # zTU = a.t @ self.i2ha.weight
@@ -213,7 +216,7 @@ class MultiplicativeLayer(nn.Module):
         self.W = nn.Parameter(torch.zeros((z_size, out_size, x_size)))
         self.params = [self.U.weight, self.V.weight, self.W]
         self.small_weights = small_weights
-        self.init_params()
+        # self.init_params()
 
     def init_params(self):
         for par in self.params:
@@ -221,7 +224,6 @@ class MultiplicativeLayer(nn.Module):
                 nn.init.normal_(par, mean=0, std=0.1)
             else:
                 nn.init.kaiming_uniform_(par, a=math.sqrt(5), nonlinearity='leaky_relu')
-
 
     def forward(self, x, z):
         # zTU = z.t @ self.U
@@ -243,3 +245,77 @@ class MultiplicativeLayer(nn.Module):
         W_primex = torch.einsum('ij,ikj->ik', x, W_prime)
         y = W_primex + b_prime
         return y
+    
+class SparseLinear(nn.Module):
+    r"""Applies a linear transformation to the incoming data: :math:`y = xA^T + b`
+
+    This module supports :ref:`TensorFloat32<tf32_on_ampere>`.
+
+    On certain ROCm devices, when using float16 inputs this module will use :ref:`different precision<fp16_on_mi200>` for backward.
+
+    Args:
+        in_features: size of each input sample
+        out_features: size of each output sample
+        bias: If set to ``False``, the layer will not learn an additive bias.
+            Default: ``True``
+
+    Shape:
+        - Input: :math:`(*, H_{in})` where :math:`*` means any number of
+          dimensions including none and :math:`H_{in} = \text{in\_features}`.
+        - Output: :math:`(*, H_{out})` where all but the last dimension
+          are the same shape as the input and :math:`H_{out} = \text{out\_features}`.
+
+    Attributes:
+        weight: the learnable weights of the module of shape
+            :math:`(\text{out\_features}, \text{in\_features})`. The values are
+            initialized from :math:`\mathcal{U}(-\sqrt{k}, \sqrt{k})`, where
+            :math:`k = \frac{1}{\text{in\_features}}`
+        bias:   the learnable bias of the module of shape :math:`(\text{out\_features})`.
+                If :attr:`bias` is ``True``, the values are initialized from
+                :math:`\mathcal{U}(-\sqrt{k}, \sqrt{k})` where
+                :math:`k = \frac{1}{\text{in\_features}}`
+
+    Examples::
+
+        >>> m = nn.Linear(20, 30)
+        >>> input = torch.randn(128, 20)
+        >>> output = m(input)
+        >>> print(output.size())
+        torch.Size([128, 30])
+    """
+    __constants__ = ['in_features', 'out_features']
+    in_features: int
+    out_features: int
+    weight: torch.Tensor
+
+    def __init__(self, in_features: int, out_features: int, bias: bool = True,
+                 device=None, dtype=None) -> None:
+        factory_kwargs = {'device': device, 'dtype': dtype}
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.weight = torch.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
+        if bias:
+            self.bias = torch.Parameter(torch.empty(out_features, **factory_kwargs))
+        else:
+            self.register_parameter('bias', None)
+        self.reset_parameters()
+
+    def reset_parameters(self) -> None:
+        # Setting a=sqrt(5) in kaiming_uniform is the same as initializing with
+        # uniform(-1/sqrt(in_features), 1/sqrt(in_features)). For details, see
+        # https://github.com/pytorch/pytorch/issues/57109
+        nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
+        if self.bias is not None:
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
+            bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0
+            nn.init.uniform_(self.bias, -bound, bound)
+
+    def forward(self, input: torch.Tensor) -> torch.Tensor:
+        # return F.linear(input, self.weight, self.bias)
+        return torch.sparse.mm(input, self.weight) + self.bias
+
+    def extra_repr(self) -> str:
+        return 'in_features={}, out_features={}, bias={}'.format(
+            self.in_features, self.out_features, self.bias is not None
+        )

@@ -46,7 +46,7 @@ def main(config):
     # Load data, init model and trainer
     base_name = get_base_name(config)
     if os.path.isfile(f'{fig_dir}/accuracy_{base_name}.png'):
-        ui = input(f"{base_name} exists. Would you like to increment rep counter? (y/n) If no, previous results will be overwritten.")
+        ui = input(f"{base_name} exists. Would you like to increment rep counter? (y/n) If no, previous results will be overwritten.  ")
         if ui == 'y':
             config.rep += 1
     config.base_name = base_name
@@ -58,7 +58,7 @@ def main(config):
     model, results = trainer.train_network()
     print('Saving trained model and results files...')
     # torch.save(model.state_dict(), f'{model_dir}/toy_model_{base_name}_ep-{config.n_epochs}.pt')
-    torch.save(model, f'{model_dir}/toy_model_{base_name}_ep-{config.n_epochs}.pt')
+    torch.save(model, f'{model_dir}/{base_name}_ep-{config.n_epochs}.pt')
 
     # Organize and save results
     train_losses, train_accs, test_losses, test_accs, confs, test_results = results

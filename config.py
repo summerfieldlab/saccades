@@ -27,7 +27,7 @@ def get_base_name(config):
     n_glimpses = f'{config.n_glimpses}_' if config.n_glimpses is not None else ''
     detach = '-detach' if config.detach else ''
     pretrain = '-nopretrain' if config.no_pretrain else ''
-    model_desc = f'{model_type}{detach}{act}{pretrain}_hsize-{config.h_size}_input-{train_on}{kernel}_{config.shape_input}'
+
     same = 'same' if config.same else ''
     challenge = config.challenge
     # solar = 'solarized_' if config.solarize else ''
@@ -35,8 +35,11 @@ def get_base_name(config):
     shapes = ''.join([str(i) for i in config.shapestr])
     sort = 'sort_' if config.sort else ''
     policy = config.policy
-
-    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_grid{config.grid}_policy-{policy}_trainshapes-{shapes}{same}_{challenge}_{transform}{n_glimpses}{train_size}'
+    
+    # model_desc = f'{model_type}{detach}{act}{pretrain}_hsize-{config.h_size}_input-{train_on}{kernel}_{config.shape_input}'
+    model_desc = f'{model_type}{detach}{pretrain}_hsize-{config.h_size}_input-{train_on}{kernel}_{config.shape_input}'
+    # data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_grid{config.grid}_policy-{policy}_trainshapes-{shapes}{same}_{challenge}_{transform}{n_glimpses}{train_size}'
+    data_desc = f'num{min_num}-{max_num}_policy-{policy}_trainshapes-{shapes}{same}_{challenge}_{transform}{n_glimpses}{train_size}'
     # train_desc = f'loss-{use_loss}_niters-{n_iters}_{n_epochs}eps'
     withshape = '+shape' if config.learn_shape else ''
     train_desc = f'loss-{use_loss}{withshape}_opt-{config.opt}_drop{drop}_{sort}count-{target_type}_{n_epochs}eps_rep{config.rep}'
@@ -62,6 +65,7 @@ def get_config():
     parser.add_argument('--use_loss', type=str, default='both', help='num, map or both')
     parser.add_argument('--ventral', type=str, default=None)  
     parser.add_argument('--outer', action='store_true', default=False)
+    parser.add_argument('--place_code', action='store_true', default=False)
     parser.add_argument('--h_size', type=int, default=25)
     parser.add_argument('--min_pass', type=int, default=0)
     parser.add_argument('--max_pass', type=int, default=6)
@@ -76,10 +80,10 @@ def get_config():
     parser.add_argument('--learn_shape', action='store_true', default=False, help='for the parametric shape rep, whether to additional train to produce symbolic shape labels')
     parser.add_argument('--shape_input', type=str, default='symbolic', help='Which format to use for what pathway (symbolic, parametric, tetris, char, noise, logpolar)')
     parser.add_argument('--same', action='store_true', default=False)
-    parser.add_argument('--challenge', type=str, default='')
+    parser.add_argument('--challenge', type=str, default='', help='Which images/task to train on')
     parser.add_argument('--no_solarize', action='store_true', default=False)
     parser.add_argument('--n_glimpses', type=int, default=None)
-    parser.add_argument('--rep', type=int, default=0)
+    parser.add_argument('--rep', type=int, default=0, help='Identifier to distinguish between repetitions of the same experiment.')
     parser.add_argument('--opt', type=str, default='SGD')
     # parser.add_argument('--tetris', action='store_true', default=False)
     parser.add_argument('--no_cuda', action='store_true', default=False)
@@ -94,7 +98,7 @@ def get_config():
     parser.add_argument('--no_pretrain', action='store_true', default=False)
     parser.add_argument('--whole_image', action='store_true', default=False)
     parser.add_argument('--batch_size', type=int, default=512)
-    parser.add_argument('--policy', type=str, default='cheat+jitter')
+    parser.add_argument('--policy', type=str, default='cheat+jitter', help='humanlike or cheat+jitter or cheat') 
     parser.add_argument('--gpu', type=int, default=0, help='which gpu to use')
     config = parser.parse_args()
     config.solarize = False if config.no_solarize else True

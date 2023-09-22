@@ -55,6 +55,7 @@ class DatasetGeneratorJulian(DatasetGenerator):
         data['logpolar_pixels'] = None
         data['target_coords_scaled'] = None
         data['distract_coords_scaled'] = None
+        data['image_filename'] = None
         for i in range(len(data)):
             filename = f'image_{i}.png'
             if not i % 10:
@@ -135,9 +136,11 @@ class DatasetGeneratorJulian(DatasetGenerator):
             data.at[i, 'logpolar_pixels'] = lp_glimpses
             
             # Plot
+            full_filename = f'{dirname}/{filename}'
+            data.at[i, 'image_filename'] = full_filename
             plt.matshow(noised, cmap='Greys', vmin=0, vmax=1)
             plt.axis('off')
-            plt.savefig(f'{dirname}/{filename}', bbox_inches='tight', dpi=300,
+            plt.savefig(full_filename, bbox_inches='tight', dpi=300,
                         transparent=True, pad_inches=0)
             # plt.imsave(dirname + filename, dpi=300)
             plt.close()

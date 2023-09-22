@@ -71,7 +71,7 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
     target_type = config.target_type
     n_glimpses = config.n_glimpses
     convolutional = True if config.model_type in ['cnn', 'bigcnn'] else False
-
+    nex = len(dataset.image)
     ### NUMBER LABEL ###
     if target_type == 'all':
         total_num = np.sum(dataset['locations'].values, axis=1)
@@ -99,12 +99,21 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
     ### SHAPE LABEL ###
     # dataset['shape1'] = dataset['shape']
     # shape_array = dataset['shape'].values
-    shape_array = dataset['symbolic_shape'].values
+    if 'human' in shape_format:
+        try:
+            shape_array = dataset['symbolic_shape_humanlike'].values
+        except:
+            print('Shape vector incorrect. Be sure youre not using it')
+            shape_array = dataset['symbolic_shape'].values
+    else:
+        shape_array = dataset['symbolic_shape'].values
     if config.sort:
         shape_arrayA = shape_array[:, :, 0] # Distractor
         shape_array_rest = shape_array[:, :, 1:] # Everything else
         shape_array_rest.sort(axis=-1) # ascending order
         shape_array_rest = shape_array_rest[:, :, ::-1] # descending order
+        if config.same:
+            shape_array_rest = shape_array_rest[:, :, :1] # first only becaue only one kind of shape
         shape_array =  np.concatenate((np.expand_dims(shape_arrayA, axis=2), shape_array_rest), axis=2)
     shape_label = torch.tensor(shape_array).float().to(config.device)
 
@@ -150,7 +159,7 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
             if 'ghost' in shape_format:
                 # remove distractor shape
                 shape_array[:, :, 0] = 0
-            shape_input = torch.tensor(shape_array).float().to(config.device)
+            shape_input = torch.tensor(shape_array).float()#.to(config.device)
         elif 'logpolar' in shape_format:
             if 'centre' in shape_format or 'center' in shape_format or gaze=='fixed':
                 logpolar_centre = dataset['centre_fixation'].values
@@ -160,7 +169,11 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
                 # As if repeating the same glimpse but without allocating that memory
                 shape_input = torch.tensor(logpolar_centre).unsqueeze(1).expand(nex, n_glimpses, h, w)
             elif 'human' in shape_format:
-                glimpse_array = dataset['humanlike_logpolar_pixels'].values
+                try:
+                    glimpse_array = dataset['logpolar_pixels_humanlike'].values
+                except:
+                    glimpse_array = dataset['humanlike_logpolar_pixels'].values
+                    
                 nex, n_gl, h, w = glimpse_array.shape
                 assert n_glimpses == n_gl
                 print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
@@ -218,19 +231,34 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
     
     ### XY LOCATION INPUT ###
     if train_on == 'both' or train_on == 'xy':
-        if 'human' in shape_format:
-            xy_array = dataset['humanlike_coords'].values
+        if config.place_code and 'human'  not in shape_format:
+            coordinates = dataset['glimpse_coords_image'].values.astype(int) # pretty sure these are x (in [0]) then y (in [1])
+            # Sparse Tensor
+            # # coordinates should be nex x 3 where the 3 corresponds too glimpse_no, x, y
+            glimpse_idx = np.tile(range(n_glimpses), nex)
+            image_idx = np.repeat(range(nex), n_glimpses)
+            coordinates = np.concatenate((image_idx[:, np.newaxis], glimpse_idx[:, np.newaxis], coordinates.reshape((-1,2))), axis=1).T
+            
+            xy = torch.sparse_coo_tensor(coordinates, torch.ones((nex*n_glimpses)), (nex, n_glimpses, 42, 48))
+            xy = xy.to_dense().view((nex, n_glimpses, -1)).float()
+            
+            # Dense Tensor  - THIS IS TOO SLOW, faster to create as Sparse Tensor and then convert to dense if you want to stay in dense
+            # xy_array = torch.zeros((nex, n_glimpses, 48, 42), dtype=torch.int8)
+            # xy_array[:, :, coordinates[:,:,1], coordinates[:,:,0]] = 1
+            # xy = torch.tensor(xy_array).view((nex, n_glimpses, -1)).float()
+
         else:
-            # xy_array = dataset['xy'].values
-            xy_array = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
-            # xy_array = np.stack(dataset['glimpse coords'], axis=0)
-        # norm_xy_array = xy_array/20
-        # xy should now already be the original scaled xy between 0 and 1. No need to rescale (since alphabetic)
-        # norm_xy_array = xy_array * 1.2
-        # norm_xy_array = xy_array / 21
-        # xy = torch.tensor(dataset['xy']).float().to(config.device)
-        # xy = torch.tensor(norm_xy_array).float()
-        xy = torch.tensor(xy_array).float()
+            if 'human' in shape_format:
+                try:
+                    xy_array = dataset['glimpse_coords_humanlike'].values
+                except:
+                    xy_array = dataset['humanlike_coords'].values
+            else:
+
+                xy_array = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
+            
+                
+            xy = torch.tensor(xy_array).float()
         if 'logpolar' not in shape_format:
             xy = xy.to(config.device)
         if 'unserial' in model_type:

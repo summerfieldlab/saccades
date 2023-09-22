@@ -5,7 +5,7 @@ import torch
 from torch import nn
 from scipy.stats import special_ortho_group, multivariate_normal
 from prettytable import PrettyTable
-from modules import RNN, ConvNet, MultRNN, MultiplicativeLayer
+from modules import RNN, ConvNet, MultRNN, MultiplicativeLayer, SparseLinear
 import ventral_models as vmod
 from skimage.transform import warp_polar, rotate
 # TRAIN_SHAPES = [0,  2,  4,  5,  8,  9, 14, 15, 16]
@@ -42,7 +42,7 @@ def choose_model(config, model_dir):
                 'n_shapes':n_shapes, 'ventral':ventral, 'train_on':config.train_on,
                 'finetune': finetune, 'device':device, 'sort':config.sort,
                 'no_pretrain': config.no_pretrain, 'whole':whole_im,
-                'n_glimpses': config.n_glimpses}
+                'n_glimpses': config.n_glimpses, 'place_code':False}#config.place_code}
     
     hidden_size = mod_args['h_size']
     output_size = mod_args['n_classes'] + 1
@@ -53,13 +53,17 @@ def choose_model(config, model_dir):
     grid_to_im_shape = {3:[27, 24], 6:[48, 42], 9:[69, 60]}
     height, width = grid_to_im_shape[grid]
     map_size = grid**2
-    xy_sz = 2
+    xy_sz = 48*42 if config.place_code else 2
     if shape_format == 'tetris':
         sh_sz = 4*4
     elif 'symbolic' in shape_format:
         # sh_sz = 64 # 8 * 8
         # sh_sz = 9
         sh_sz = n_shapes#20#25
+        if config.sort and config.same:
+            sh_sz = 2
+        else:
+            sh_sz = n_shapes#20#25
     elif 'pixel' in shape_format:
         sh_sz = 2 if '+' in shape_format else 1
 
@@ -123,7 +127,7 @@ def choose_model(config, model_dir):
     elif model_type == 'rnn_regression':
         model = RNNRegression(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     elif model_type == 'mult':
-        model = MultiplicativeModel(in_sz, hidden_size, output_size, **mod_args).to(device)
+        model = MultiplicativeModel(xy_sz, sh_sz , hidden_size, map_size, output_size, **mod_args).to(device)
     # elif model_type == 'hyper':
     #     model = HyperModel(in_sz, hidden_size, output_size).to(device)
     elif 'cnn' in model_type:
@@ -1019,37 +1023,57 @@ class RNNRegression(RNNClassifier2stream):
 
 
 class MultiplicativeModel(nn.Module):
-    def __init__(self, input_size, hidden_size, output_size, small_weights):
+    def __init__(self, xy_size, pix_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
-        shape_size = 9
-        xy_size = 2
-        embedding_size = 25
-        factor_size = 26
-        map_size = 9
-        if input_size == xy_size:
-            self.embedding = nn.Linear(input_size, embedding_size)
+        # xy_size = 2
+        # shape_size = input_size - xy_size  #9
+        self.xy_size = xy_size
+        input_size = xy_size + pix_size
+        embedding_size = 100
+        self.output_size = output_size
+        factor_size = 36
+        small_weights = False
+        # map_size = 9
+        
+        
+        self.pix_embedding = nn.Linear(pix_size, embedding_size)
+        if kwargs['place_code']:
+            self.xy_embedding = SparseLinear(xy_size, embedding_size)
         else:
-            self.embedding = MultiplicativeLayer(shape_size, xy_size, embedding_size, small_weights)
+            self.xy_embedding = nn.Linear(xy_size, embedding_size)
+        
+        if input_size == xy_size:
+            self.embedding = nn.Linear(input_size, hidden_size)
+        else:
+            self.embedding = MultiplicativeLayer(embedding_size, embedding_size, hidden_size, small_weights)
         # self.embedding = nn.Linear(input_size, hidden_size)
-        self.rnn = MultRNN(embedding_size, hidden_size, factor_size, hidden_size, small_weights)
-        self.readout = nn.Linear(hidden_size, map_size)
-        if small_weights:
-            nn.init.normal_(self.readout.weight, mean=0, std=0.1)
+        self.rnn = MultRNN(hidden_size, hidden_size, factor_size, hidden_size, small_weights)
+        # self.rnn = RNN(hidden_size, hidden_size, hidden_size, 'lrelu')
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        self.num_readout = nn.Linear(map_size, output_size)
+        # if small_weights:
+        #     nn.init.normal_(self.readout.weight, mean=0, std=0.1)
         self.initHidden = self.rnn.initHidden
         self.sigmoid = nn.Sigmoid()
         self.LReLU = nn.LeakyReLU(0.1)
 
     def forward(self, x, hidden):
         if x.shape[1] > 2:
-            xy = x[:, :2]
-            shape = x[:, 2:]
-            x = self.LReLU(self.embedding(xy, shape))
+            xy = x[:, :self.xy_size]
+            pix = x[:, self.xy_size:]
+            pix  = self.LReLU(self.pix_embedding(pix))
+            xy = self.LReLU(self.xy_embedding(xy))
+            x = self.LReLU(self.embedding(xy, pix))
         else:
             x = self.LReLU(self.embedding(x))
         x, hidden = self.rnn(x, hidden)
-        map = self.readout(x)
+        map = self.map_readout(x)
+        
         sig = self.sigmoid(map)
-        num = torch.sum(sig, 1)
+        num = self.num_readout(sig)
+        # num = torch.sum(torch.round(sig), 1)
 
-        return num, map, hidden
+
+        # return num, map, hidden
+        return num, pix, map, hidden, x, sig
 
