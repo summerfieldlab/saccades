@@ -27,7 +27,7 @@ def choose_model(config, model_dir):
         n_classes = max_num + 2
     else:
         n_classes = max_num
-    n_shapes = 25 # 20 or 25
+    n_shapes = 2 if config.same and config.sort else 25 # 20 or 25
     if config.ventral is not None:
         ventral = model_dir + '/ventral/' + config.ventral
     else:
@@ -98,13 +98,14 @@ def choose_model(config, model_dir):
         model = FeedForward(in_size, hidden_size, map_size, output_size, **mod_args).to(device)
 
     elif 'gated' in model_type:
-        if 'map' in model_type:
-            if '2' in model_type:
-                model = MapGated2RNN(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
-            else:
-                model = MapGatedSymbolicRNN(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
-        else:
-            model = GatedSymbolicRNN(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+        model = GatedMapper(xy_sz, sh_sz , hidden_size, map_size, output_size, **mod_args).to(device)
+        # if 'map' in model_type:
+        #     if '2' in model_type:
+        #         model = MapGated2RNN(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+        #     else:
+        #         model = MapGatedSymbolicRNN(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
+        # else:
+        #     model = GatedSymbolicRNN(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     elif 'rnn_classifier' in model_type:
         if model_type == 'rnn_classifier_par':
             # Model with two parallel streams at the level of the map. Only one
@@ -676,7 +677,7 @@ class GatedSymbolicRNN(nn.Module):
         xy = x[:,:2]  # xy coords are first two input features
         shape = x[:,2:]
         gate = self.sigmoid(self.gate(shape))
-        gated = torch.mul(x, gate)
+        gated = torch.mul(x, gate) 
         xy = gated[:,:2]  # xy coords are first two input features
         shape = gated[:,2:]
         shape_emb = self.LReLU(self.pix_embedding(shape))
@@ -1077,3 +1078,98 @@ class MultiplicativeModel(nn.Module):
         # return num, map, hidden
         return num, pix, map, hidden, x, sig
 
+class GatedMapper(nn.Module):
+    def __init__(self, xy_size, pix_size, hidden_size, map_size, output_size, **kwargs):
+        super().__init__()
+        self.xy_size = xy_size
+        self.train_on = kwargs['train_on']
+        self.output_size = output_size
+        embedding_size = 2#hidden_size//2#100
+        n_shapes = kwargs['n_shapes'] if 'n_shapes' in kwargs.keys() else 20
+        self.act = kwargs['act'] if 'act' in kwargs.keys() else None
+        self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
+        drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
+        self.pix_embedding = nn.Linear(pix_size, embedding_size)
+        self.gate = nn.Linear(embedding_size, 1, bias=False)
+        # self.pix_embedding2 = nn.Linear(hidden_size//2, hidden_size//2)
+        self.shape_readout = nn.Linear(embedding_size, n_shapes)
+        if kwargs['place_code']:
+            self.xy_embedding = SparseLinear(xy_size, embedding_size)
+        else:
+            self.xy_embedding = nn.Linear(xy_size, embedding_size)
+        
+        # self.joint_embedding = nn.Linear(hidden_size//2 + n_shapes, hidden_size)
+        if self.train_on == 'both':
+            self.joint_embedding = nn.Linear(embedding_size*2, hidden_size)
+            # self.joint_embedding = MultiplicativeLayer(embedding_size, embedding_size, hidden_size, False)
+        else:
+            self.joint_embedding = nn.Linear(embedding_size, hidden_size)
+        # self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
+        self.rnn = nn.RNNCell(hidden_size, hidden_size, nonlinearity='relu')
+        
+        self.drop_layer = nn.Dropout(p=drop)
+        self.map_readout = nn.Linear(hidden_size, map_size)
+        self.after_map = nn.Linear(map_size, map_size)
+        if self.par:
+            self.notmap = nn.Linear(hidden_size, map_size)
+            self.num_readout = nn.Linear(map_size * 2, output_size)
+        else:
+            self.num_readout = nn.Linear(map_size, output_size)
+
+        # self.initHidden = self.rnn.initHidden
+        self.sigmoid = nn.Sigmoid()
+        self.LReLU = nn.LeakyReLU(0.1)
+
+    def forward(self, xy, pix, hidden=None):
+        if self.train_on == 'both':
+            # xy = x[:, :self.xy_size]  # xy coords are first two input features
+            # pix = x[:, self.xy_size:]
+            xy = self.LReLU(self.xy_embedding(xy))
+            pix = self.LReLU(self.pix_embedding(pix))
+            gate = self.gate(pix)
+            shape = self.shape_readout(pix)
+            xy = torch.mul(gate, xy)
+            # pix = self.LReLU(self.pix_embedding2(pix))
+            # shape = self.shape_readout(pix)
+            # shape_detached = shape.detach().clone()
+            # combined = torch.cat((shape, xy, pix), dim=-1)
+            # combined = torch.cat((shape_detached, xy), dim=-1)
+            # x = self.LReLU(self.joint_embedding(xy, pix))
+            
+            combined = torch.cat((xy, pix), dim=-1)
+        elif self.train_on == 'xy':
+            xy = x
+            xy = self.LReLU(self.xy_embedding(xy))
+            combined = xy
+            pix = torch.zeros_like(xy)
+            x = self.LReLU(self.joint_embedding(combined))
+        elif self.train_on == 'shape':
+            pix = x
+            pix = self.LReLU(self.pix_embedding(pix))
+            combined = pix
+        x = self.LReLU(self.joint_embedding(combined))
+        if hidden is None:
+            # x, hidden = self.rnn(x)
+            hidden = self.rnn(x)
+        else:
+            # x, hidden = self.rnn(x, hidden)
+            hidden = self.rnn(x, hidden)
+            
+        x = self.drop_layer(hidden)
+
+        map_ = self.map_readout(x)
+        sig = self.sigmoid(map_)
+        if self.detach:
+            map_to_pass_on = sig.detach().clone()
+        else:
+            map_to_pass_on = sig
+
+        penult = self.LReLU(self.after_map(map_to_pass_on))
+        if self.par:
+            # Two parallel layers, one to be a map, the other not
+            notmap = self.notmap(x)
+            penult = torch.cat((penult, notmap), dim=1)
+        # num = self.num_readout(map_to_pass_on)
+        num = self.num_readout(penult)
+        return num, shape, map_, hidden, x, penult

@@ -294,9 +294,9 @@ class SparseLinear(nn.Module):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
-        self.weight = torch.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
+        self.weight = nn.parameter.Parameter(torch.empty((out_features, in_features), **factory_kwargs))
         if bias:
-            self.bias = torch.Parameter(torch.empty(out_features, **factory_kwargs))
+            self.bias = nn.parameter.Parameter(torch.empty(out_features, **factory_kwargs))
         else:
             self.register_parameter('bias', None)
         self.reset_parameters()
@@ -313,7 +313,7 @@ class SparseLinear(nn.Module):
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         # return F.linear(input, self.weight, self.bias)
-        return torch.sparse.mm(input, self.weight) + self.bias
+        return torch.sparse.mm(input, self.weight.T) + self.bias
 
     def extra_repr(self) -> str:
         return 'in_features={}, out_features={}, bias={}'.format(

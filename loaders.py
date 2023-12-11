@@ -233,14 +233,21 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
     if train_on == 'both' or train_on == 'xy':
         if config.place_code and 'human'  not in shape_format:
             coordinates = dataset['glimpse_coords_image'].values.astype(int) # pretty sure these are x (in [0]) then y (in [1])
-            # Sparse Tensor
-            # # coordinates should be nex x 3 where the 3 corresponds too glimpse_no, x, y
+            # Sparse Tensor to Dense Tensor
+            # # coordinates should be 4* nex where the 4 corresponds too nex, glimpse_no, x, y
             glimpse_idx = np.tile(range(n_glimpses), nex)
             image_idx = np.repeat(range(nex), n_glimpses)
             coordinates = np.concatenate((image_idx[:, np.newaxis], glimpse_idx[:, np.newaxis], coordinates.reshape((-1,2))), axis=1).T
             
             xy = torch.sparse_coo_tensor(coordinates, torch.ones((nex*n_glimpses)), (nex, n_glimpses, 42, 48))
             xy = xy.to_dense().view((nex, n_glimpses, -1)).float()
+            
+            # Sparse Tensor flattened - Can't give mixed sparse and dense dimensions so this didn't work. Need to index glimpse somewhow
+            # flat = np.ravel_multi_index(coordinates.reshape(nex*n_glimpses, 2).T, dims=(42, 48))
+            # coordinates = np.concatenate((image_idx[:, np.newaxis], glimpse_idx[:, np.newaxis], flat[:, np.newaxis]), axis=1).T
+            # xy = torch.sparse_coo_tensor(coordinates, torch.ones((nex*n_glimpses)), (nex, n_glimpses, 42*48))
+            # xy = xy.to_dense().to_sparse(sparse_dim=2)
+            
             
             # Dense Tensor  - THIS IS TOO SLOW, faster to create as Sparse Tensor and then convert to dense if you want to stay in dense
             # xy_array = torch.zeros((nex, n_glimpses, 48, 42), dtype=torch.int8)
@@ -271,7 +278,7 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
         input = xy
     elif train_on == 'shape':
         input = shape_input
-    elif train_on == 'both' and 'glimpsing' not in model_type:
+    elif train_on == 'both' and 'glimpsing' not in model_type and not config.place_code:
         input = torch.cat((xy, shape_input), dim=-1)
     
     # Get image IDs (for joining with activations later)
@@ -286,6 +293,8 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
         dset = TensorDataset(index, image_input, xy, count_num, dist_num, count_loc, pass_count)
     elif 'unserial' in model_type:
         dset = TensorDataset(index, input, count_num, dist_num, count_loc, pass_count)
+    elif config.place_code:
+        dset = TensorDataset(index, xy, shape_input, count_num, dist_num, count_loc, shape_label, pass_count)
     else:  
         dset = TensorDataset(index, input, count_num, dist_num, count_loc, shape_label, pass_count)
         # dset = TensorDataset(input, count_num, dist_num, count_loc, shape_label, pass_count)

@@ -3,6 +3,7 @@ from datetime import datetime
 import numpy as np
 from mpl_toolkits.axes_grid1 import make_axes_locatable
 import matplotlib.pyplot as plt
+from itertools import product
 
 def colorbar(mappable):
     last_axes = plt.gca()
@@ -62,18 +63,44 @@ def pixel_to_scaled_x(coords):
     upper_left_x = centerX - image_width//2
 
     scaled = [(x-upper_left_x)/image_width for x in coords]
+    # If fixation is off image, map to the nearest edge of the image
+    scaled = [0 if coord < 0 else coord for coord in scaled]
+    scaled = [1 if coord > 1 else coord for coord in scaled]
     return scaled
 
 def pixel_to_scaled_y(coords):
     screen_width, screen_height = 1280, 1024
     centerY = screen_height//2
-    image_height = screen_height-280 # 744x744
+    image_height = screen_height-280 # 744x744 # this is correct because height and width are equal
     upper_left_y = centerY - image_height//2
     
     scaled = [(y-upper_left_y)/image_height for y in coords]
+    # If fixation is off image, map to the nearest edge of the image
+    scaled = [0 if coord < 0 else coord for coord in scaled]
+    scaled = [1 if coord > 1 else coord for coord in scaled]
     return scaled
 
+def index_to_coord(index_list):
+    """Convert from index [0-35] to xy image coordinate scaled to [0-1]."""
+    GRID = np.linspace(0.1, 0.9, 6)
+    POSSIBLE_CENTROIDS = [(x, y) for (x, y) in product(GRID, GRID)]
+    CENTROID_ARRAY = np.array(POSSIBLE_CENTROIDS)
+    # This is to account for the fact that a three pixel border was added to the images
+    CENTROID_ARRAY = ((CENTROID_ARRAY*48) + 3) / 48.0
+    coords = np.array([CENTROID_ARRAY[idx] for idx in index_list])
+    return coords
 
+
+
+def gkern(l=5, sig=1.):
+    """\
+    creates gaussian kernel with side length `l` and a sigma of `sig`
+    """
+    ax = np.linspace(-(l - 1) / 2., (l - 1) / 2., l)
+    gauss = np.exp(-0.5 * np.square(ax) / np.square(sig))
+    kernel = np.outer(gauss, gauss)
+    return kernel / np.sum(kernel)
+    
 def map_jess_to_tim_blocks(fname):
 # %MAP_JESS_TO_TIM_BLOCKS convert from jess' to tim's naming convention.
 # %
@@ -122,14 +149,14 @@ def map_jess_to_tim_blocks(fname):
     return fname
 
 
-
-
 # Augmentation functions
 def mirror(coordinates):
     mirrored = [0.5 - (coord-0.5) for coord in coordinates]
     return mirrored
     
 def transpose(locations_list):
+    """Assumes list of 36 corresponds to 6x6 grid to be transposed.
+    Returns a list of length 36 after having transposed the grid."""
     grid = np.reshape(locations_list, (6, 6))
     transposed = list(grid.T.flatten())
     return transposed

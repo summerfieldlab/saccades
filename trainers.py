@@ -29,6 +29,8 @@ def choose_trainer(model, loaders, test_xarray, config):
         else:
             print('Using FeedForwardTrainer class')
             trainer = FeedForwardTrainer(model, loaders, test_xarray, config)
+    elif config.model_type == 'gated_mapper':
+        trainer = TorchRNNTrainer(model, loaders, test_xarray, config)
     elif 'recurrent_control' in config.model_type:
         if 'distract' in config.challenge:
             trainer = RecurrentTrainerDistract(model, loaders, test_xarray, config)
@@ -56,7 +58,7 @@ class Trainer():
             self.optimizer = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=config.wd)
         elif config.opt == 'Adam':
             # start_lr = 0.01 if config.use_loss == 'num' else 0.001
-            start_lr = 0.0001
+            start_lr = 0.001
             self.optimizer = Adam(model.parameters(), weight_decay=config.wd, amsgrad=True, lr=start_lr)
         # scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)
         # self.scheduler = StepLR(self.optimizer, step_size=config.n_epochs/20, gamma=0.7)
@@ -202,7 +204,7 @@ class Trainer():
                 test_accs = test_acc_count
                 confs[ts] = conf
 
-            if not ep % 50 or ep == n_epochs - 1 or ep==1:
+            if not ep % 10 or ep == n_epochs - 1 or ep==1:
                 train_num_losses = (train_count_num_loss, train_dist_num_loss, train_all_num_loss)
                 train_map_losses = (train_count_map_loss, train_dist_map_loss, train_full_map_loss)
                 train_accs = (train_acc_count, train_acc_dist, train_acc_all, train_acc_map)
@@ -223,6 +225,9 @@ class Trainer():
                 print(f'Test OOD (Free/Fixed) Loss={test_count_num_loss[2][ep]:.4}/{test_count_num_loss[3][ep]:.4} \t Accuracy={test_acc_count[2][ep]:.3}%/{test_acc_count[3][ep]:.3}%')
                 print(f'Test Val (Free/Fixed) Map Loss={test_count_map_loss[0][ep]:.4}/{test_count_map_loss[1][ep]:.4} ')
                 print(f'Test OOD (Free/Fixed) Map Loss={test_count_map_loss[2][ep]:.4}/{test_count_map_loss[3][ep]:.4} ')
+                if config.learn_shape:
+                    print(f'Test Val (Free/Fixed) Shape Loss={test_sh_loss[0][ep]:.4}/{test_sh_loss[1][ep]:.4} ')
+                    print(f'Test OOD (Free/Fixed) Shape Loss={test_sh_loss[2][ep]:.4}/{test_sh_loss[3][ep]:.4} ')
 
             # else:
             #     print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]:.4} \t (Train/Test) Num Loss={train_num_loss[ep]:.4}/{test_num_loss[ep]:.4}/ \t Accuracy={train_acc[ep]:.3}%/{test_acc[ep]:.3}% \t Shape loss: {train_sh_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
@@ -280,7 +285,7 @@ class Trainer():
             for t in range(n_glimpses):
                 pred_num, pred_shape, map, hidden, _, _ = self.model(input[:, t, :], hidden)
                 if config.learn_shape:
-                    shape_loss_mse = criterion_mse(pred_shape, shape_label[:, t, :])*10
+                    shape_loss_mse = criterion_mse(pred_shape, shape_label[:, t, :])#*10
                     shape_loss_ce = criterion(pred_shape, shape_label[:, t, :])
                     shape_loss = shape_loss_mse + shape_loss_ce
                     shape_epoch_loss += shape_loss.item()
@@ -466,11 +471,10 @@ class Trainer():
         # data = test_results
         # max_pass = max(data['pass count'].max(), 6)
         # data = data[data['pass count'] < max_pass]
-        # self.make_loss_plot_quick(test_losses, train_losses, ep, config)
+        self.make_loss_plot_quick(test_losses, train_losses, ep, config)
         # sns.countplot(data=test_results[test_results['correct']==True], x='epoch', hue='pass count')
         # plt.savefig(f'figures/toy/test_correct_{base_name}.png', dpi=300)
         # plt.close()
-
         (train_acc_count, _, _, train_map_acc) = train_acc
         # accuracy = data.groupby(['epoch', 'pass count']).mean()
         # accuracy = data.groupby(['epoch', 'test shapes', 'test lums', 'pass count']).mean(numeric_only=True)
@@ -482,7 +486,7 @@ class Trainer():
         # sns.lineplot(data=accuracy, x='epoch', hue='testset',
         #             style='viewing', y='accuracy', alpha=0.7)
         ax1.plot(test_accs[0][:ep], label='Validation')
-        ax1.plot(test_accs[1][:ep], label='OOD')
+        ax1.plot(test_accs[2][:ep], label='OOD')
         ax1.set_title('Number')
         ax1.legend()
         ax1.grid()
@@ -492,6 +496,7 @@ class Trainer():
         # ax1.set_ylabel('Accuracy on number task')
         
         ax2.plot(train_map_acc[1:ep], ':', color='green', label='training accuracy')
+        
         ax2.set_ylim([0, 102])
         ax2.grid()
         ax2.set_title('Map')
@@ -606,6 +611,57 @@ class Trainer():
         ax3.legend()
         plt.savefig(f'{fig_dir}/loss_{config.base_name}.png', dpi=300)
         plt.close()
+        
+    def make_loss_plot_quick(self, test_losses, train_losses, ep, config):
+        
+        (test_loss, test_count_num_loss, test_count_map_loss, test_sh_loss) = test_losses
+        (train_num_losses, train_map_losses, train_sh_loss) = train_losses
+        (train_num_loss, _, _) = train_num_losses
+        (train_count_map_loss, _, _) = train_map_losses
+                ## PLOT LOSS FOR BOTH OBJECTIVES
+        fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=[9,9], sharex=True)
+        # sns.lineplot(data=data, x='epoch', y='num loss', hue='pass count', ax=ax1)
+        ax1.plot(train_num_loss[:ep], ':', color='green', label='training loss')
+        ax1.plot(test_count_num_loss[0][:ep], ':', label='validation loss')
+        ax1.plot(test_count_num_loss[2][:ep], ':', label='ood loss')
+        ax1.set_ylabel('Number Loss')
+        mt = config.model_type #+ '-nosymbol' if nonsymbolic else config.model_type
+        # title = f'{mt} trainon-{config.train_on} train_shapes-{config.train_shapes} \n test_shapes-{test_shapes} useloss-{config.use_loss} lums-{lums}'
+        title = f'{mt} trainon-{config.train_on} train_shapes-{config.train_shapes}'
+        ax1.set_title(title)
+        ylim = ax1.get_ylim()
+        ax1.set_ylim([-0.05, ylim[1]])
+        ax1.grid()
+        ax1.legend()
+        # plt.savefig(f'figures/toy/test_num-loss_{base_name_test}.png', dpi=300)
+        # plt.close()
+
+        # sns.lineplot(data=data, x='epoch', y='map loss', hue='pass count', ax=ax2, estimator='mean')
+        ax2.plot(train_count_map_loss[:ep], ':', color='green', label='training loss')
+        ax2.plot(test_count_map_loss[0][:ep], ':', label='validation loss')
+        ax2.plot(test_count_map_loss[2][:ep], ':', label='ood loss')
+        ax2.legend()
+        ax2.set_ylabel('Count Map Loss')
+        # plt.title(title)
+        ylim = ax2.get_ylim()
+        ax2.set_ylim([-0.05, ylim[1]])
+        ax2.grid()
+        
+        ax3.plot(train_sh_loss[:ep], ':', color='green', label='training loss')
+        ax3.plot(test_sh_loss[0][:ep], ':', label='validation loss')
+        ax3.plot(test_sh_loss[2][:ep], ':', label='ood loss')
+        ax3.legend()
+        ax3.set_ylabel('Shape Loss')
+        # plt.title(title)
+        ylim = ax3.get_ylim()
+        ax3.set_ylim([-0.05, ylim[1]])
+        ax3.grid()
+        
+        
+        plt.savefig(f'{fig_dir}/loss_{config.base_name}.png', dpi=300)
+        plt.close()
+        
+        
 
     @torch.no_grad()
     def save_activations(self, model, test_loaders, basename, config):
@@ -1056,3 +1112,162 @@ class RecurrentTrainer(Trainer):
 class RecurrentTrainerDistract(RecurrentTrainer, TrainerDistract):
     def __init__(self, model, loaders, test_xarray, config):
         super().__init__(model, loaders, test_xarray, config)
+
+class TorchRNNTrainer(Trainer):
+    @torch.no_grad()
+    def test(self, loader, ep):
+        noreduce = True
+        self.model.eval()
+        config = self.config
+        device = config.device
+        n_correct = 0
+        epoch_loss = 0
+        num_epoch_loss = 0
+        count_map_epoch_loss = 0
+        shape_epoch_loss = 0
+
+        confusion_matrix = None
+        test_results = pd.DataFrame()
+        # for i, (input, target, locations, shape_label, pass_count) in enumerate(loader):
+        for i, (_, xy, pix, target, num_dist, all_loc, shape_label, pass_count) in enumerate(loader):
+            xy = xy.to(device)
+            pix = pix.to(device)
+            n_glimpses = xy.shape[1]
+            batch_results = pd.DataFrame()
+            # hidden = self.model.initHidden(input_dim)
+            # hidden = hidden.to(device)
+            hidden = None
+            for t in range(n_glimpses):
+                pred_num, pred_shape, map, hidden, _, _ = self.model(xy[:, t], pix[:, t, :], hidden)
+                if config.learn_shape:
+                    shape_loss_mse = criterion_mse(pred_shape, shape_label[:, t, :])#*10
+                    shape_loss_ce = criterion(pred_shape, shape_label[:, t, :])
+                    shape_loss = shape_loss_mse#+ shape_loss_ce
+                    shape_epoch_loss += shape_loss.item()
+                else:
+                    shape_epoch_loss += -1
+            losses, pred = self.get_losses(pred_num, target, map, all_loc, ep, noreduce)
+            # pred_num, pred_shape, map, _, _, _ = self.model(input)
+            # losses, pred = self.get_losses(pred_num[:,-1,:], target, map[:, -1, :], all_loc, ep, noreduce)
+            loss, num_loss, map_loss, map_loss_to_add = losses
+            correct = pred.eq(target.view_as(pred))
+            batch_results['pass count'] = pass_count.detach().cpu().numpy()
+            batch_results['correct'] = correct.cpu().numpy()
+            batch_results['predicted'] = pred.detach().cpu().numpy()
+            batch_results['true'] = target.detach().cpu().numpy()
+            batch_results['loss'] = loss.detach().cpu().numpy()
+            try:
+                # Somehow before it was like just the first column was going
+                # into batch_results, so just map loss for the first out of
+                # nine location, instead of the average over all locations.
+                # batch_results['map loss'] = map_loss.mean(axis=1).detach().cpu().numpy()
+                # batch_results['map loss'] = map_loss.mean(axis=1).detach().cpu().numpy()
+                batch_results['full map loss'] = map_loss.detach().cpu().numpy()
+                # batch_results['count map loss'] = count_map_loss.detach().cpu().numpy()
+            except:
+                # batch_results['map loss'] = np.ones(loss.shape) * -1
+                batch_results['full map loss'] = np.ones(loss.shape) * -1
+                batch_results['count map loss'] = np.ones(loss.shape) * -1
+            batch_results['num loss'] = num_loss.detach().cpu().numpy()
+            batch_results['shape loss'] = -1 #shape_loss.detach().cpu().numpy() if self.config.learn_shape else -1
+            batch_results['epoch'] = ep
+            test_results = pd.concat((test_results, batch_results))
+
+            n_correct += pred.eq(target.view_as(pred)).sum().item()
+            epoch_loss += loss.mean().item()
+            num_epoch_loss += num_loss.mean().item()
+            # if not isinstance(map_loss_to_add, int):
+            #     map_loss_to_add = map_loss_to_add.item()
+            count_map_epoch_loss += map_loss_to_add
+            # class-specific analysis and confusion matrix
+            # c = (pred.squeeze() == target)
+            if self.config.use_loss != 'map':
+                confusion_matrix = self.update_confusion(target, pred, num_dist, confusion_matrix)
+
+        # These two lines should be the same
+        # map_epoch_loss / len(loader.dataset)
+        # test_results['map loss'].mean()
+
+        accuracy = 100. * (n_correct/len(loader.dataset))
+        epoch_loss /= len(loader)
+        num_epoch_loss /= len(loader)
+        # map_epoch_loss /= len(loader)
+        if config.use_loss == 'num':
+            # map_epoch_loss /= len(loader)
+            count_map_epoch_loss /= len(loader)
+        else:
+            count_map_epoch_loss /= len(loader.dataset)
+        map_epoch_loss = (count_map_epoch_loss, -1)
+        shape_epoch_loss /= len(loader) * n_glimpses
+
+        return (epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss,
+                map_epoch_loss, test_results, confusion_matrix)
+    
+    def train(self, loader, ep):
+        self.model.train()
+        noreduce = False
+        config = self.config
+        correct = 0
+        correct_map = 0
+        epoch_loss = 0
+        num_epoch_loss = 0
+        # map_epoch_loss = 0
+        count_map_epoch_loss = 0
+        shape_epoch_loss = 0
+
+        for i, (_, xy, pix, target, num_dist, locations, shape_label, _) in enumerate(loader):
+            # assert all(locations.sum(dim=1) == target)
+            # input = input.to(config.device)
+            xy = xy.to(config.device)
+            pix = pix.to(config.device)
+            n_glimpses = xy.shape[1]
+            if self.shuffle:
+                new_order = torch.randperm(n_glimpses)
+                # Shuffle glimpse order on each batch
+                # for i, row in enumerate(input):
+                    # input[i, :, :] = row[torch.randperm(seq_len), :]
+                xy = xy[:, new_order, :]
+                pix = pix[:, new_order, :]
+
+            self.model.zero_grad()
+            # hidden = self.model.initHidden(input_dim)
+            # hidden = hidden.to(config.device)
+            hidden = None
+            for t in range(n_glimpses):
+                pred_num, pred_shape, map, hidden, _, _ = self.model(xy[:, t], pix[:, t, :], hidden)
+                if config.learn_shape:
+                    shape_loss_mse = criterion_mse(pred_shape, shape_label[:, t, :])#*10
+                    shape_loss_ce = criterion(pred_shape, shape_label[:, t, :])
+                    shape_loss = shape_loss_mse #+ shape_loss_ce
+                    shape_epoch_loss += shape_loss.item()
+                    shape_loss.backward(retain_graph=True)
+                else:
+                    shape_epoch_loss += -1
+            losses, pred = self.get_losses(pred_num, target, map, locations, ep, noreduce)
+            
+            loss, num_loss, map_loss, map_loss_to_add = losses
+
+            loss.backward()
+            nn.utils.clip_grad_norm_(self.model.parameters(), 2)
+            self.optimizer.step()
+
+            correct += pred.eq(target.view_as(pred)).sum().item()
+            correct_map += (torch.round(torch.sigmoid(map)).eq(locations)*1.0).mean().item()
+            
+            
+            epoch_loss += loss.item()
+            num_epoch_loss += num_loss.item()
+            # if not isinstance(map_loss_to_add, int):
+                # map_loss_to_add = map_loss_to_add.item()
+            count_map_epoch_loss += map_loss_to_add
+            # count_map_epoch_loss += count_map_loss_to_add 
+        accuracy = 100. * (correct/len(loader.dataset))
+        map_acc = 100 * (correct_map/(len(loader)))
+        epoch_loss /= len(loader)
+        num_epoch_loss /= len(loader)
+        self.scheduler.step(epoch_loss)
+        # full_map_epoch_loss /= len(loader)
+        count_map_epoch_loss /= len(loader)
+        map_epoch_loss = (count_map_epoch_loss, -1)
+        shape_epoch_loss /= len(loader) * n_glimpses
+        return epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss, map_epoch_loss, map_acc
