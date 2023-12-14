@@ -777,7 +777,7 @@ def get_model(config, device):
     input_size = 42*48 if config.logpolar else 36
     layer_width = 128 #1024 # config["layer_width"]
     # n_layers = 2 # config["n_layers"]
-    output_size = 25
+    output_size = 2 if config.sort else 25
     drop = config.dropout
     penult_size = 8
     if config.model_type == 'mlp':
