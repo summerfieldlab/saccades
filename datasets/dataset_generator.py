@@ -19,6 +19,7 @@ from scipy.spatial import distance
 from skimage.transform import warp_polar
 from itertools import product
 import random
+from math import isclose
 
 import symbolic_model as solver
 from letters import get_alphabet
@@ -635,7 +636,7 @@ class DatasetGenerator():
             fix_dir = '/home/jessica/Dropbox/saccades/eye_tracking/'
             fixator  = torch.load(fix_dir + 'noconv_onlypretrain_drop50_mse_20eps20230915-17.56.42.pt')  #'sparse0.01_fixator_20230913-14.24.33.pt')
             fixator = fixator.to('cpu')
-
+        
         # Convert to xarray
         data = self.pandas_to_xr(data_pd)
         chars = get_alphabet()
@@ -686,8 +687,12 @@ class DatasetGenerator():
             fg, bg = np.random.choice(lums, size=2, replace=False)
             # ensure that the difference between the foreground and background
             # is at least 0.2, which is the smallest difference in the test sets
-            while abs(fg - bg) < 0.2:
-                fg, bg = np.random.choice(lums, size=2, replace=False)
+            if conf.constant_contrast:
+                while not isclose(abs(fg - bg), 0.3):
+                    fg, bg = np.random.choice(lums, size=2, replace=False)
+            else: 
+                while abs(fg - bg) < 0.2:
+                    fg, bg = np.random.choice(lums, size=2, replace=False)
             # data.at[i, 'luminances'] = [fg, bg]
             data['luminances'].loc[dict(image=i)] = [fg, bg]
             noised = self.get_solarized_noise(image_wbord, fg, bg)
@@ -744,10 +749,10 @@ class DatasetGenerator():
                 data["symbolic_shape_humanlike"].loc[dict(image=i)] = shape_coords
                 
                 # Warp noised image to generate log-polar glimpses
-                lp_glimpses = [warp_polar(noised, scaling='log', output_shape=imsize_wbord, center=(y*48, x*48), mode='edge') for x, y in humanlike_coords]
+                lp_glimpses = [warp_polar(noised, scaling=conf.scaling, output_shape=imsize_wbord, center=(y*48, x*48), mode='edge') for x, y in humanlike_coords]
             else:
                 # Warp noised image to generate log-polar glimpses
-                lp_glimpses = [warp_polar(noised, scaling='log', output_shape=imsize_wbord, center=(y, x), mode='edge') for x, y in glimpse_coords_image]
+                lp_glimpses = [warp_polar(noised, scaling=conf.scaling, output_shape=imsize_wbord, center=(y, x), mode='edge') for x, y in glimpse_coords_image]
             # data.at[i, 'logpolar_pixels'] = lp_glimpses
             data['logpolar_pixels'].loc[dict(image=i)] = lp_glimpses
             
@@ -792,7 +797,9 @@ def main():
     parser.add_argument('--luminances', nargs='*', type=float, default=[0, 0.5, 1], help='at least two values between 0 and 1')
     parser.add_argument('--solarize', action='store_true', default=False)
     parser.add_argument('--no_glimpse', action='store_true', default=False)
-    parser.add_argument('--logpolar', action='store_true', default=False)
+    parser.add_argument('--polar', action='store_true', default=False)
+    parser.add_argument('--scaling', type=str, default='log')
+    parser.add_argument('--constant_contrast', action='store_true', default=False)
     # parser.add_argument('--distract', action='store_true', default=False)
     # parser.add_argument('--distract_corner', action='store_true', default=False)
     # parser.add_argument('--random', action='store_true', default=False)
@@ -803,7 +810,7 @@ def main():
     same = 'same' if conf.same else ''
     challenge = f'_{conf.challenge}' if conf.challenge != '' else ''
     # solar = 'solarized_' if conf.solarize else ''
-    transform = 'logpolar_' if conf.logpolar else f'gw{conf.glimpse_wid}_'
+    transform = 'polar_' if conf.polar else f'gw{conf.glimpse_wid}_'
     shapes = ''.join(conf.shapes)
     if conf.no_glimpse:
         n_glimpses = 'nogl'
