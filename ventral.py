@@ -166,9 +166,11 @@ def load_data(config, device):
     # lums = [0.1, 0.2, 0.4, 0.5, 0.6, 0.8, 0.9]
     lums = config.lums
     trainframe = get_dataframe(train_size, config.shapestr, config, lums, solarize=True)
-    trainset = get_dataset_pd(trainframe, config, device)
+    # trainset = get_dataset_pd(trainframe, config, device)
+    trainset = get_dataset_xr(trainframe, config, device)
     testframe = get_dataframe(test_size, config.testshapestr[0], config, lums, solarize=True)
-    testset = get_dataset_pd(testframe, config, device)
+    # testset = get_dataset_pd(testframe, config, device)
+    testset = get_dataset_xr(testframe, config, device)
     # try:
     #     config.lum_sets = [[0.1, 0.5, 0.9], [0.2, 0.4, 0.6, 0.8]]
     #     trainframe = get_dataframe(train_size, config.shapestr, config, [0.1, 0.5, 0.9], solarize=config.solarize)
@@ -574,7 +576,8 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
     # fname = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_{solar}12_{size}.pkl'
     transform = 'logpolar_' if config.logpolar else f'gw6_'
     # fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-cheat+jitter_lum{lums}_{transform}12_{size}.pkl'
-    fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-{config.policy}_lum{lums}_{transform}12_{size}'
+    # fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-{config.policy}_lum{lums}_{transform}12_{size}'
+    fname_gw = f'{home}/datasets/image_sets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-{config.policy}_lum{lums}_{transform}12_{size}'
     
     if os.path.exists(fname_gw+'.nc'):
         print(f'Loading saved dataset {fname_gw}.nc')
@@ -700,7 +703,10 @@ def get_dataset_xr(dataframe, config, device):
         shape_array = dataframe['shape_coords_humanlike'].values
         import pdb;pdb.set_trace()
     else:
-        shape_array = dataframe['shape'].values
+        try: 
+            shape_array = dataframe['symbolic_shape'].values
+        except:
+            shape_array = dataframe['shape'].values
     if config.sort:
         shape_arrayA = shape_array[:, :, 0]
         shape_array_rest = shape_array[:, :, 1:]
@@ -814,7 +820,7 @@ def get_config():
     parser.add_argument('--test_shapes', nargs='*', type=list, default=[[0, 1, 2, 3, 5, 6, 7, 8], [4]])
     parser.add_argument('--lums', nargs='*', type=float, default=[0, 0.5, 1], help='at least two values between 0 and 1')
 
-    parser.add_argument('--shape_input', type=str, default='symbolic', help='Which format to use for what pathway (symbolic, parametric, tetris, or char)')
+    parser.add_argument('--shape_input', type=str, default='symbolic', help='Which format to use for what pathway (symbolic, parametric, tetris, or char)') # Not used anymore except for in creating save filename
     parser.add_argument('--same', action='store_true', default=False)
 
     # parser.add_argument('--distract', action='store_true', default=False)
@@ -1028,9 +1034,12 @@ def main():
     config.base_name = base_name
 
     # make sure all results directories exist
-    model_dir = 'models/toy/letters/ventral'
-    results_dir = 'results/toy/letters/ventral'
-    fig_dir = 'figures/toy/letters/ventral'
+    # model_dir = 'models/toy/letters/ventral'
+    # results_dir = 'results/toy/letters/ventral'
+    # fig_dir = 'figures/toy/letters/ventral'
+    model_dir = 'models/logpolar/ventral'
+    results_dir = 'results/logpolar/ventral'
+    fig_dir = 'figures/logpolar/ventral'
     dir_list = [model_dir, results_dir, fig_dir]
     for directory in dir_list:
         if not os.path.exists(directory):
