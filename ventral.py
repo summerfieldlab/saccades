@@ -570,7 +570,8 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
     challenge = config.challenge
     # distract = '_distract' if config.distract else ''
     # solar = 'solarized_' if solarize else ''
-    home = '/mnt/jessica/data0/Dropbox/saccades/rnn_tests'
+    # home = '/mnt/jessica/data0/Dropbox/saccades/rnn_tests'
+    home = '.'
     # fname = f'{home}/toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}_{challenge}_grid{config.grid}_{solar}{size}.pkl'
     # fname_gw = f'{home}/toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}_{challenge}_grid{config.grid}_lum{lums}_gw6_{solar}{size}.pkl'
     # fname = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_{solar}12_{size}.pkl'
