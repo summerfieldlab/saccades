@@ -575,6 +575,7 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
     # fname = f'{home}/toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}_{challenge}_grid{config.grid}_{solar}{size}.pkl'
     # fname_gw = f'{home}/toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}_{challenge}_grid{config.grid}_lum{lums}_gw6_{solar}{size}.pkl'
     # fname = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_{solar}12_{size}.pkl'
+
     transform = 'logpolar_' if config.logpolar else f'gw6_'
     # fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-cheat+jitter_lum{lums}_{transform}12_{size}.pkl'
     # fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-{config.policy}_lum{lums}_{transform}12_{size}'
@@ -588,8 +589,13 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
         print(f'Loading saved dataset {fname_gw}.pkl')
         data = pd.read_pickle(fname_gw+'.pkl')
     else:
-        print(f'{fname_gw} does not exist. Exiting.')
-        raise FileNotFoundError
+        try:
+            transform = 'polar_'
+            fname_gw = f'{home}/datasets/image_sets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-{config.policy}_lum{lums}_{transform}12_{size}'
+            data = xr.open_dataset(fname_gw+'.nc')
+        except:
+            print(f'{fname_gw} does not exist. Exiting.')
+            raise FileNotFoundError
         # print('Generating new dataset')
         # data = save_dataset(fname_gw, noise_level, size, pass_count_range, num_range, shapes_set, same)
 
