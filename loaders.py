@@ -35,7 +35,12 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     challenge = '_' + config.challenge if config.challenge != '' else ''
     # distract = '_distract' if config.distract else ''
     solar = 'solarized_' if solarize else ''
-    transform = 'logpolar_' if 'logpolar' in config.shape_input else 'gw6_'
+    if 'logpolar' in config.shape_input:
+        transform = 'logpolar_'
+    elif 'polar' in config.shape_input:
+        transform = 'polar_'
+    else:
+        transform = 'gw6_'
     policy = config.policy
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_{solar}{n_glimpses}{size}.pkl'
     # fname_gw = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_lum{lums}_gw6_{solar}{n_glimpses}{size}.pkl'
@@ -53,10 +58,21 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     #     print(f'Loading saved dataset {fname}')
     #     data = pd.read_pickle(fname)
     else:
-        print(f'{fname_gw}.nc does not exist. Exiting.')
-        raise FileNotFoundError
-        # print('Generating new dataset')
-        # data = save_dataset(fname_gw, noise_level, size, pass_count_range, num_range, shapes_set, same)
+        transform = 'logpolar_'
+        fname_gw = f'{datadir}/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}'
+        if os.path.exists(fname_gw + '.nc'):
+            print(f'Loading saved dataset {fname_gw}')
+            data = xr.open_dataset(fname_gw + '.nc')
+        elif config.whole_image:
+            transform = 'polar_'
+            fname_gw = f'{datadir}/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}'
+            if os.path.exists(fname_gw + '.nc'):
+                print(f'Loading saved dataset {fname_gw}')
+                data = xr.open_dataset(fname_gw + '.nc')
+        else:
+            print(f'{fname_gw}.nc does not exist. Exiting.')
+            raise FileNotFoundError
+
     data['filename'] = fname_gw
 
     return data
@@ -92,9 +108,11 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
         else:
             count_num = torch.tensor(dataset['numerosity'].values).long().to(config.device)
             dist_num = torch.zeros_like(count_num).long().to(config.device)
+    count_num -= config.min_num
 
     ### INTEGRATION SCORE ###
-    pass_count = torch.tensor(dataset['pass_count'].values).float().to(config.device)
+    # pass_count = torch.tensor(dataset['pass_count'].values).float().to(config.device)
+    pass_count = torch.zeros_like(count_num).float().to(config.device)
     
     ### SHAPE LABEL ###
     # dataset['shape1'] = dataset['shape']
@@ -115,6 +133,10 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
         if config.same:
             shape_array_rest = shape_array_rest[:, :, :1] # first only becaue only one kind of shape
         shape_array =  np.concatenate((np.expand_dims(shape_arrayA, axis=2), shape_array_rest), axis=2)
+    # shape_array /= shape_array.max() # -log distances scaled to  0-1
+    # if shape_array.max() > 1:
+    #     # really only want this to happen if logscaled proximities, 
+    #     shape_array /= 11.340605
     shape_label = torch.tensor(shape_array).float().to(config.device)
 
     ### MAP LABEL ###
@@ -144,132 +166,137 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
             nex, h, w = image_array.shape
             image_array = image_array.reshape(nex, -1)
             image_input = torch.tensor(image_array).float().to(config.device)
-
-    ### PIXEL/SHAPE INPUT ###
-    # Don't normalize if you want to test transfer to OOD luminance values
-    # TODO this is a bit messy and at risk of developing a bug
-    if train_on == 'both' or train_on =='shape':
-        if shape_format == 'noise':
-            glimpse_array = dataset['noi_glimpse_pixels'].values
-            # glimpse_array -= glimpse_array.min()
-            # glimpse_array /= glimpse_array.max()
-            print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
-            shape_input = torch.tensor(glimpse_array).float().to(config.device)
-        elif 'symbolic' in shape_format: # symbolic shape input
-            if 'ghost' in shape_format:
-                # remove distractor shape
-                shape_array[:, :, 0] = 0
-            shape_input = torch.tensor(shape_array).float()#.to(config.device)
-        elif 'logpolar' in shape_format:
-            if 'centre' in shape_format or 'center' in shape_format or gaze=='fixed':
-                logpolar_centre = dataset['centre_fixation'].values
-                # logpolar_centre -= logpolar_centre.min()
-                # logpolar_centre /= logpolar_centre.max()
-                nex, h, w = logpolar_centre.shape
-                # As if repeating the same glimpse but without allocating that memory
-                shape_input = torch.tensor(logpolar_centre).unsqueeze(1).expand(nex, n_glimpses, h, w)
-            elif 'human' in shape_format:
-                try:
-                    glimpse_array = dataset['logpolar_pixels_humanlike'].values
-                except:
-                    glimpse_array = dataset['humanlike_logpolar_pixels'].values
+    else: # only create the separate inputs for the two streams if a two stream model
+        ### PIXEL/SHAPE INPUT ###
+        # Don't normalize if you want to test transfer to OOD luminance values
+        # TODO this is a bit messy and at risk of developing a bug
+        if train_on == 'both' or train_on =='shape':
+            if shape_format == 'noise':
+                glimpse_array = dataset['noi_glimpse_pixels'].values
+                # glimpse_array -= glimpse_array.min()
+                # glimpse_array /= glimpse_array.max()
+                print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
+                shape_input = torch.tensor(glimpse_array).float().to(config.device)
+            elif 'symbolic' in shape_format: # symbolic shape input
+                if 'ghost' in shape_format:
+                    # remove distractor shape
+                    shape_array[:, :, 0] = 0
+                shape_input = torch.tensor(shape_array).float()#.to(config.device)
+            elif 'logpolar' in shape_format:
+                if 'centre' in shape_format or 'center' in shape_format or gaze=='fixed':
+                    logpolar_centre = dataset['centre_fixation'].values
+                    # logpolar_centre -= logpolar_centre.min()
+                    # logpolar_centre /= logpolar_centre.max()
+                    nex, h, w = logpolar_centre.shape
+                    # As if repeating the same glimpse but without allocating that memory
+                    shape_input = torch.tensor(logpolar_centre).unsqueeze(1).expand(nex, n_glimpses, h, w)
+                elif 'human' in shape_format:
+                    try:
+                        glimpse_array = dataset['logpolar_pixels_humanlike'].values
+                    except:
+                        glimpse_array = dataset['humanlike_logpolar_pixels'].values
+                        
+                    nex, n_gl, h, w = glimpse_array.shape
+                    assert n_glimpses == n_gl
+                    print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
+                    shape_input = torch.tensor(glimpse_array)
+                elif gaze=='free':
+                    glimpse_array = dataset['logpolar_pixels'].values
+                    # glimpse_array -= glimpse_array.min()
+                    # glimpse_array /= glimpse_array.max()
+                    nex, n_gl, h, w = glimpse_array.shape
+                    assert n_glimpses == n_gl
                     
-                nex, n_gl, h, w = glimpse_array.shape
-                assert n_glimpses == n_gl
-                print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
-                shape_input = torch.tensor(glimpse_array)
-            elif gaze=='free':
-                glimpse_array = dataset['logpolar_pixels'].values
-                # glimpse_array -= glimpse_array.min()
-                # glimpse_array /= glimpse_array.max()
-                nex, n_gl, h, w = glimpse_array.shape
-                assert n_glimpses == n_gl
-                # glimpse_array -= glimpse_array.min()
-                # glimpse_array /= glimpse_array.max()
-                print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
-                shape_input = torch.tensor(glimpse_array)
-            elif 'mixed' in shape_format:
-                # Take first half free viewing, second half centre fixated
-                glimpse_array = dataset['logpolar_pixels'].values
-                # glimpse_array -= glimpse_array.min()
-                # glimpse_array /= glimpse_array.max()
-                nex, n_gl, h, w = glimpse_array.shape
-                assert n_glimpses == n_gl
-                free = glimpse_array[::2]
-                del glimpse_array
-                free = torch.tensor(free)
+                        
+                    # glimpse_array -= glimpse_array.min()
+                    # glimpse_array /= glimpse_array.max()
+                    print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
+                    shape_input = torch.tensor(glimpse_array)
+
+                elif 'mixed' in shape_format:
+                    # Take first half free viewing, second half centre fixated
+                    glimpse_array = dataset['logpolar_pixels'].values
+                    # glimpse_array -= glimpse_array.min()
+                    # glimpse_array /= glimpse_array.max()
+                    nex, n_gl, h, w = glimpse_array.shape
+                    assert n_glimpses == n_gl
+                    free = glimpse_array[::2]
+                    del glimpse_array
+                    free = torch.tensor(free)
+                    
+                    # Fixed central fixation
+                    logpolar_centre = dataset['centre_fixation'].values
+                    # logpolar_centre -= logpolar_centre.min()
+                    # logpolar_centre /= logpolar_centre.max()
+                    fixed = logpolar_centre[1::2]
+                    nex2, h, w = fixed.shape
+                    del logpolar_centre
+                    fixed = torch.tensor(fixed).unsqueeze(1).expand(nex2, n_glimpses, h, w)
+                    
+                    # Merge free and fixed
+                    shape_input = torch.empty((nex, n_gl, h, w))
+                    shape_input[::2] = free
+                    shape_input[1::2] = fixed
+
+                else:
+                    glimpse_array = dataset['logpolar_pixels'].values
+                    # glimpse_array -= glimpse_array.min()
+                    # glimpse_array /= glimpse_array.max()
+                    nex, n_gl, h, w = glimpse_array.shape
+                    assert n_glimpses == n_gl
+                    # glimpse_array -= glimpse_array.min()
+                    # glimpse_array /= glimpse_array.max()
+                    print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
+                    shape_input = torch.tensor(glimpse_array)
+                    
+                if 'unserial' in model_type:
+                    shape_input = shape_input.float().reshape((nex, -1))
+                # elif convolutional:
+                #     shape_input = shape_input.unsqueeze(0)
+                else:
+                    shape_input = shape_input.float().view((nex, n_glimpses, -1))
+        
+        ### XY LOCATION INPUT ###
+        if train_on == 'both' or train_on == 'xy':
+            if config.place_code and 'human'  not in shape_format:
+                coordinates = dataset['glimpse_coords_image'].values.astype(int) # pretty sure these are x (in [0]) then y (in [1])
+                coordinates[coordinates==48] = 47
+                # Sparse Tensor to Dense Tensor
+                # # coordinates should be 4* nex where the 4 corresponds too nex, glimpse_no, x, y
+                glimpse_idx = np.tile(range(n_glimpses), nex)
+                image_idx = np.repeat(range(nex), n_glimpses)
+                coordinates = np.concatenate((image_idx[:, np.newaxis], glimpse_idx[:, np.newaxis], coordinates.reshape((-1,2))), axis=1).T
+                xy = torch.sparse_coo_tensor(coordinates, torch.ones((nex*n_glimpses)), (nex, n_glimpses, 42, 48))
+                xy = xy.to_dense().view((nex, n_glimpses, -1)).float()
                 
-                # Fixed central fixation
-                logpolar_centre = dataset['centre_fixation'].values
-                # logpolar_centre -= logpolar_centre.min()
-                # logpolar_centre /= logpolar_centre.max()
-                fixed = logpolar_centre[1::2]
-                nex2, h, w = fixed.shape
-                del logpolar_centre
-                fixed = torch.tensor(fixed).unsqueeze(1).expand(nex2, n_glimpses, h, w)
+                # Sparse Tensor flattened - Can't give mixed sparse and dense dimensions so this didn't work. Need to index glimpse somewhow
+                # flat = np.ravel_multi_index(coordinates.reshape(nex*n_glimpses, 2).T, dims=(42, 48))
+                # coordinates = np.concatenate((image_idx[:, np.newaxis], glimpse_idx[:, np.newaxis], flat[:, np.newaxis]), axis=1).T
+                # xy = torch.sparse_coo_tensor(coordinates, torch.ones((nex*n_glimpses)), (nex, n_glimpses, 42*48))
+                # xy = xy.to_dense().to_sparse(sparse_dim=2)
                 
-                # Merge free and fixed
-                shape_input = torch.empty((nex, n_gl, h, w))
-                shape_input[::2] = free
-                shape_input[1::2] = fixed
+                
+                # Dense Tensor  - THIS IS TOO SLOW, faster to create as Sparse Tensor and then convert to dense if you want to stay in dense
+                # xy_array = torch.zeros((nex, n_glimpses, 48, 42), dtype=torch.int8)
+                # xy_array[:, :, coordinates[:,:,1], coordinates[:,:,0]] = 1
+                # xy = torch.tensor(xy_array).view((nex, n_glimpses, -1)).float()
 
             else:
-                glimpse_array = dataset['logpolar_pixels'].values
-                # glimpse_array -= glimpse_array.min()
-                # glimpse_array /= glimpse_array.max()
-                nex, n_gl, h, w = glimpse_array.shape
-                assert n_glimpses == n_gl
-                # glimpse_array -= glimpse_array.min()
-                # glimpse_array /= glimpse_array.max()
-                print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
-                shape_input = torch.tensor(glimpse_array)
+                if 'human' in shape_format:
+                    try:
+                        xy_array = dataset['glimpse_coords_humanlike'].values
+                    except:
+                        xy_array = dataset['humanlike_coords'].values
+                else:
+
+                    xy_array = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
                 
+                    
+                xy = torch.tensor(xy_array).float()
+            if 'logpolar' not in shape_format:
+                xy = xy.to(config.device)
             if 'unserial' in model_type:
-                shape_input = shape_input.float().reshape((nex, -1))
-            else:
-                shape_input = shape_input.float().view((nex, n_glimpses, -1))
-    
-    ### XY LOCATION INPUT ###
-    if train_on == 'both' or train_on == 'xy':
-        if config.place_code and 'human'  not in shape_format:
-            coordinates = dataset['glimpse_coords_image'].values.astype(int) # pretty sure these are x (in [0]) then y (in [1])
-            # Sparse Tensor to Dense Tensor
-            # # coordinates should be 4* nex where the 4 corresponds too nex, glimpse_no, x, y
-            glimpse_idx = np.tile(range(n_glimpses), nex)
-            image_idx = np.repeat(range(nex), n_glimpses)
-            coordinates = np.concatenate((image_idx[:, np.newaxis], glimpse_idx[:, np.newaxis], coordinates.reshape((-1,2))), axis=1).T
-            
-            xy = torch.sparse_coo_tensor(coordinates, torch.ones((nex*n_glimpses)), (nex, n_glimpses, 42, 48))
-            xy = xy.to_dense().view((nex, n_glimpses, -1)).float()
-            
-            # Sparse Tensor flattened - Can't give mixed sparse and dense dimensions so this didn't work. Need to index glimpse somewhow
-            # flat = np.ravel_multi_index(coordinates.reshape(nex*n_glimpses, 2).T, dims=(42, 48))
-            # coordinates = np.concatenate((image_idx[:, np.newaxis], glimpse_idx[:, np.newaxis], flat[:, np.newaxis]), axis=1).T
-            # xy = torch.sparse_coo_tensor(coordinates, torch.ones((nex*n_glimpses)), (nex, n_glimpses, 42*48))
-            # xy = xy.to_dense().to_sparse(sparse_dim=2)
-            
-            
-            # Dense Tensor  - THIS IS TOO SLOW, faster to create as Sparse Tensor and then convert to dense if you want to stay in dense
-            # xy_array = torch.zeros((nex, n_glimpses, 48, 42), dtype=torch.int8)
-            # xy_array[:, :, coordinates[:,:,1], coordinates[:,:,0]] = 1
-            # xy = torch.tensor(xy_array).view((nex, n_glimpses, -1)).float()
-
-        else:
-            if 'human' in shape_format:
-                try:
-                    xy_array = dataset['glimpse_coords_humanlike'].values
-                except:
-                    xy_array = dataset['humanlike_coords'].values
-            else:
-
-                xy_array = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
-            
-                
-            xy = torch.tensor(xy_array).float()
-        if 'logpolar' not in shape_format:
-            xy = xy.to(config.device)
-        if 'unserial' in model_type:
-            xy = xy.view((nex, -1))
+                xy = xy.view((nex, -1))
     
     # Create merged input (or not)
     if config.whole_image:
@@ -278,7 +305,7 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
         input = xy
     elif train_on == 'shape':
         input = shape_input
-    elif train_on == 'both' and 'glimpsing' not in model_type and not config.place_code:
+    elif train_on == 'both' and 'glimpsing' not in model_type :#and not config.place_code:
         input = torch.cat((xy, shape_input), dim=-1)
     
     # Get image IDs (for joining with activations later)
@@ -293,8 +320,10 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
         dset = TensorDataset(index, image_input, xy, count_num, dist_num, count_loc, pass_count)
     elif 'unserial' in model_type:
         dset = TensorDataset(index, input, count_num, dist_num, count_loc, pass_count)
-    elif config.place_code:
-        dset = TensorDataset(index, xy, shape_input, count_num, dist_num, count_loc, shape_label, pass_count)
+    # elif config.place_code:
+    #     dset = TensorDataset(index, xy, shape_input, count_num, dist_num, count_loc, shape_label, pass_count)
+    elif model_type == 'map2num_decoder':
+        dset = TensorDataset(index, count_loc, count_num, dist_num, count_loc, pass_count)
     else:  
         dset = TensorDataset(index, input, count_num, dist_num, count_loc, shape_label, pass_count)
         # dset = TensorDataset(input, count_num, dist_num, count_loc, shape_label, pass_count)
@@ -537,12 +566,27 @@ def choose_loader(config):
     # try:
         # config.lum_sets = [[0.1, 0.5, 0.9], [0.2, 0.4, 0.6, 0.8]]
     config.lum_sets = [[0.1, 0.4, 0.7], [0.3, 0.6, 0.9]]
+    lums1 = [0.1, 0.4, 0.7]
+    lums2 = [0.3, 0.6, 0.9]
+    lums12 = [0.1, 0.4, 0.7, 0.3, 0.6, 0.9]
+    if config.constant_contrast:
+        train_lums = lums2
+        val_lums = lums2
+        ood_lums = lums1
+    else: 
+        train_lums = lums1
+        val_lums = lums1
+        ood_lums = lums2
     # Get xarrays
-    trainset = get_dataset(train_size, config.shapestr, config, [0.1, 0.4, 0.7], solarize=config.solarize)
+    trainset = get_dataset(train_size, config.shapestr, config, train_lums, solarize=config.solarize)
     # testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
-    validation_set = get_dataset(test_size, config.shapestr, config, [0.1, 0.4, 0.7], solarize=config.solarize)
-    OOD_set = get_dataset(test_size, config.testshapestr[-1], config, config.lum_sets[-1], solarize=config.solarize)
-    test_xarray = {'validation': validation_set, 'OOD': OOD_set}
+    validation_set = get_dataset(test_size, config.shapestr, config, val_lums, solarize=config.solarize)
+    
+    OODshape_set = get_dataset(test_size, config.testshapestr[-1], config, val_lums, solarize=config.solarize)
+    OODlum_set = get_dataset(test_size, config.shapestr, config, ood_lums, solarize=config.solarize)
+    OODboth_set = get_dataset(test_size, config.testshapestr[-1], config, ood_lums, solarize=config.solarize)
+    
+    test_xarray = {'validation': validation_set, 'OODshape': OODshape_set, 'OODlum':OODlum_set, "OODboth":OODboth_set}
     # except:
     #     config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
     #     trainset = get_dataset(train_size, config.shapestr, config, [0.0, 0.5, 1.0], solarize=config.solarize)
@@ -558,22 +602,44 @@ def choose_loader(config):
     val_free.viewing = 'free'
     val_free.shapes = config.shapestr
     val_free.lums = [0.1, 0.4, 0.7]
-    val_fixed = get_loader(validation_set, config, batch_size=2500, gaze='fixed')
-    val_fixed.testset = 'validation'
-    val_fixed.viewing = 'fixed'
-    val_fixed.shapes = config.shapestr
-    val_fixed.lums = [0.1, 0.4, 0.7]
-    ood_free = get_loader(OOD_set, config, batch_size=2500, gaze='free')
-    ood_free.testset = 'ood'
-    ood_free.viewing = 'free'
-    ood_free.shapes = config.testshapestr[-1]
-    ood_free.lums = config.lum_sets[-1]
-    ood_fixed = get_loader(OOD_set, config, batch_size=2500, gaze='fixed')
-    ood_fixed.testset = 'ood'
-    ood_fixed.viewing = 'fixed'
-    ood_fixed.shapes = config.testshapestr[-1]
-    ood_fixed.lums = config.lum_sets[-1]
-    test_loaders = [val_free, val_fixed, ood_free, ood_fixed]
+    
+    # val_fixed = get_loader(validation_set, config, batch_size=2500, gaze='fixed')
+    # val_fixed.testset = 'validation'
+    # val_fixed.viewing = 'fixed'
+    # val_fixed.shapes = config.shapestr
+    # val_fixed.lums = [0.1, 0.4, 0.7]
+    
+    # ood_free = get_loader(OOD_set, config, batch_size=2500, gaze='free')
+    # ood_free.testset = 'ood'
+    # ood_free.viewing = 'free'
+    # ood_free.shapes = config.testshapestr[-1]
+    # ood_free.lums = config.lum_sets[-1]
+    ood_shape_free = get_loader(OODshape_set, config, batch_size=2500, gaze='free')
+    ood_shape_free.testset = 'ood'
+    ood_shape_free.viewing = 'free'
+    ood_shape_free.shapes = config.testshapestr[-1]
+    ood_shape_free.lums = val_lums
+    
+    ood_lum_free = get_loader(OODlum_set, config, batch_size=2500, gaze='free')
+    ood_lum_free.testset = 'ood'
+    ood_lum_free.viewing = 'free'
+    ood_lum_free.shapes = config.shapestr
+    ood_lum_free.lums = config.lum_sets[-1]
+    
+    ood_both_free = get_loader(OODboth_set, config, batch_size=2500, gaze='free')
+    ood_both_free.testset = 'ood'
+    ood_both_free.viewing = 'free'
+    ood_both_free.shapes = config.testshapestr[-1]
+    ood_both_free.lums = config.lum_sets[-1]
+    
+    # ood_fixed = get_loader(OOD_set, config, batch_size=2500, gaze='fixed')
+    # ood_fixed.testset = 'ood'
+    # ood_fixed.viewing = 'fixed'
+    # ood_fixed.shapes = config.testshapestr[-1]
+    # ood_fixed.lums = config.lum_sets[-1]
+    
+    # test_loaders = [val_free, val_fixed, ood_free, ood_fixed]
+    test_loaders = [val_free, ood_shape_free, ood_lum_free, ood_both_free]
     
     loaders = [train_loader, test_loaders]
     return loaders, test_xarray
