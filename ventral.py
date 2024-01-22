@@ -3,6 +3,15 @@
 Some functions are from when I used raytune to do a parameter search, but then 
 others were used to train the final configured model(s) that were saved and used 
 later.
+
+I attempted to implement the logpolar transform of the glimpse contents as part
+of the ventral module but it's too slow. Now easy way to parallelize on GPU so
+have to do one glimpse at a time. Only practical way is to precompute.
+
+Originally targets were proximity scores bewteen 0 and 1 where anything further
+away than some threshold was 0. When I removed the truncated fixation sampling,
+I also changed the ventral targets to be -log(distance) up to the width of the
+image. So now the targets are positive unbounded. (not sure if that is ideal)
 """
 import os
 import argparse
@@ -17,8 +26,8 @@ import seaborn as sns
 import torch
 from torch import nn
 from torch.utils.data import TensorDataset, DataLoader
-from torch.optim import SGD, Adam
-from torch.optim.lr_scheduler import StepLR
+from torch.optim import SGD, Adam, AdamW
+from torch.optim.lr_scheduler import StepLR, ReduceLROnPlateau
 from functools import partial
 import torch.nn.functional as F
 import torch.optim as optim
@@ -33,13 +42,13 @@ import ventral_models as mod
 
 
 mom = 0.9
-# wd = 0.0001
-wd = 0
-start_lr = 1.0
-BATCH_SIZE = 1024
+wd = 0.0001
+# wd = 0
+
+BATCH_SIZE = 512
 # BATCH_SIZE = 1
 # TRAIN_SHAPES = [2,  4,  5,  8,  9, 14, 15, 16]
-TRAIN_SHAPES = [0, 2, 4, 5, 9, 10, 15, 16, 17]
+TRAIN_SHAPES = [0, 2, 4, 5, 9, 10, 15, 16, 17] # AESUZFCKJ
 
 # device = torch.device("cuda")
 # device = torch.device("cpu")
@@ -207,7 +216,7 @@ def te_accuracy(net, cla, device="cpu"):
 
 def train_model(model, optimizer, scheduler, loaders, config, device):
     if 'distract' in config.challenge:
-        TRAIN_SHAPES.append(0)
+        TRAIN_SHAPES.append(0) # first lettter A is always distractor
     train_loader, test_loader = loaders
     tr_loss_mse = np.zeros((config.n_epochs+1,))
     tr_loss_ce = np.zeros((config.n_epochs+1,))
@@ -237,12 +246,14 @@ def train_model(model, optimizer, scheduler, loaders, config, device):
         
         tr_loss_mse[ep+1], tr_loss_ce[ep+1], tr_loss[ep+1], tr_acc[ep+1] = tr_res
         te_loss_mse[ep+1], te_loss_ce[ep+1], te_loss[ep+1], te_acc[ep+1] = te_res
-        scheduler.step()
+        if scheduler is not None:
+            # scheduler.step()
+            scheduler.step(tr_loss_mse[ep+1])
         print(f'Epoch {ep+1}. LR={optimizer.param_groups[0]["lr"]:.4}')
         print(f'Train (mse/ce/tot): {tr_loss_mse[ep+1]:.4}/{tr_loss_ce[ep+1]:.4}/{tr_loss[ep+1]:.4}/{tr_acc[ep+1]:.4}%')
         print(f'Test (mse/ce/tot): {te_loss_mse[ep+1]:.4}/{te_loss_ce[ep+1]:.4}/{te_loss[ep+1]:.4}/{te_acc[ep+1]:.4}%')
-        # if not ep % 10 or ep < 2:
-            # plot_performance()
+        if not ep % 10 or ep < 2:
+            plot_performance(tr_loss_mse, tr_acc, te_loss_mse, te_acc, config.base_name, ep+1)
         epoch_timer.stop_timer()
     tr_results = (tr_loss_mse, tr_loss_ce, tr_loss, tr_acc)
     te_results = (te_loss_mse, te_loss_ce, te_loss, te_acc)
@@ -524,9 +535,24 @@ def test_logpolar(loader, model, which_loss, sort):
     return mse_loss, ce_loss, tot_loss, acc
 
 
-# def plot_performance():
-#     pass
-
+def plot_performance(tr_loss_mse, tr_acc, te_loss_mse, te_acc, base_name, ep):
+    fig_dir = 'figures/logpolar/ventral/'
+    fig, (ax1, ax2) = plt.subplots(1, 2)
+    ax1.plot(tr_loss_mse[:ep], label='Train')
+    ax1.plot(te_loss_mse[:ep], label='Test')
+    ylim = ax1.get_ylim()
+    ax1.set_ylim([-0.001, ylim[1]])
+    ax1.grid()
+    ax1.set_title('MSE Loss')
+    ax2.plot(tr_acc[:ep], label='Train')
+    ax2.plot(te_acc[:ep], label='Test')
+    ax2.set_ylim([10, 102])
+    ax2.grid()
+    ax2.set_title('Accuracy')
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(fig_dir + base_name + '.png', dpi=300, bbox_inches='tight')
+    plt.close()
 
 def get_dataframe(size, shapes_set, config, lums, solarize):
     """ Load specified dataset
@@ -547,6 +573,7 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
     noise_level = config.noise_level
     min_pass_count = config.min_pass
     max_pass_count = config.max_pass
+    n_glimpses = config.n_glimpses
     pass_count_range = (min_pass_count, max_pass_count)
     min_num = config.min_num
     max_num = config.max_num
@@ -579,7 +606,7 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
     transform = 'logpolar_' if config.logpolar else f'gw6_'
     # fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-cheat+jitter_lum{lums}_{transform}12_{size}.pkl'
     # fname_gw = f'{home}/toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-{config.policy}_lum{lums}_{transform}12_{size}'
-    fname_gw = f'{home}/datasets/image_sets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-{config.policy}_lum{lums}_{transform}12_{size}'
+    fname_gw = f'{home}/datasets/image_sets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-{config.policy}_lum{lums}_{transform}{n_glimpses}_{size}'
     
     if os.path.exists(fname_gw+'.nc'):
         print(f'Loading saved dataset {fname_gw}.nc')
@@ -591,7 +618,7 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
     else:
         try:
             transform = 'polar_'
-            fname_gw = f'{home}/datasets/image_sets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-{config.policy}_lum{lums}_{transform}12_{size}'
+            fname_gw = f'{home}/datasets/image_sets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}_{challenge}_grid{config.grid}_policy-{config.policy}_lum{lums}_{transform}{n_glimpses}_{size}'
             data = xr.open_dataset(fname_gw+'.nc')
         except:
             print(f'{fname_gw} does not exist. Exiting.')
@@ -708,7 +735,6 @@ def get_dataset_xr(dataframe, config, device):
     
     if config.policy == 'humanlike':
         shape_array = dataframe['shape_coords_humanlike'].values
-        import pdb;pdb.set_trace()
     else:
         try: 
             shape_array = dataframe['symbolic_shape'].values
@@ -719,9 +745,16 @@ def get_dataset_xr(dataframe, config, device):
         shape_array_rest = shape_array[:, :, 1:]
         shape_array_rest.sort(axis=-1)
         shape_array_rest = shape_array_rest[:, :, ::-1]
+        # shape_array25 =  np.concatenate((np.expand_dims(shape_arrayA, axis=2), shape_array_rest), axis=2)
+        if config.same:
+            shape_array_rest = shape_array_rest[:, :, :1] # first only becaue only one kind of shape
         shape_array =  np.concatenate((np.expand_dims(shape_arrayA, axis=2), shape_array_rest), axis=2)
+        # if logscale_proximity: 
+            # shape_array /= shape_array.max() # -log distances scaled to  0-1
+            # shape_array /= 11.340605 # need to ensure that all datasets scaled by same amount
     print(f'label range: {shape_array.min()}-{shape_array.max()}')
     shape_label = torch.tensor(shape_array).float()
+    # shape_label25 = torch.tensor(shape_array25).float()
     if config.logpolar:
         # image_array = np.stack(dataframe['noised_image'], axis=0)
         # image_array -= image_array.min()
@@ -756,11 +789,14 @@ def get_dataset_xr(dataframe, config, device):
     nrows = nex * n_glimpses
     if 'cnn' in config.model_type:
         # reshape for conv layers
+        
         shape_input = shape_input.view((nrows, height, width)).unsqueeze(1)
+        
     else:
         shape_input = shape_input.view((nrows, height*width))
     # if not 'logpolar' in model_type:
-    shape_label = shape_label.view((nrows, 25))
+    # shape_label25 = shape_label25.view((nrows, 25))
+    shape_label = shape_label.view(nrows, -1)
 
     if not(torch.isfinite(shape_input).all() and torch.isfinite(shape_label).all()):
         print('Found NaNs in the inputs or targets.')
@@ -779,20 +815,25 @@ def get_model(config, device):
     # n_layers = 2 # config["n_layers"]
     output_size = 2 if config.sort else 25
     drop = config.dropout
-    penult_size = 8
+    penult_size = 10#8
     if config.model_type == 'mlp':
         model = mod.MLP(input_size, layer_width, penult_size, output_size, drop)
     elif config.model_type == 'basic_mlp':
         model = mod.BasicMLP(input_size, layer_width, penult_size, output_size, drop)
     elif config.model_type == 'cnn':
-        width = 6; height = 6
+        # width = 6; height = 6
+        width = 42
+        height = 48
         model = mod.ConvNet(width, height, penult_size, output_size, dropout=drop)
     elif 'logpolar' in config.model_type:
+        # This was an attempt to do the logpolar transform as part of the moodel, 
+        # computed on every input, rather than preprocessed. It was too slow too use.
         # model = mod.MLP(input_size, layer_width, penult_size, output_size, drop)
         model = mod.LogPolarBasicMLP(input_size, layer_width, penult_size, output_size, device, drop)
     else:
         print(f'Model {config.model_type} not implemented.')
         exit()
+    
     model.to(device)
 
     print('Params to learn:')
@@ -837,6 +878,7 @@ def get_config():
     parser.add_argument('--solarize', action='store_true', default=False)
     parser.add_argument('--rep', type=int, default=0)
     parser.add_argument('--n_epochs', type=int, default=10)
+    parser.add_argument('--n_glimpses', type=int, default=12)
     # parser.add_argument('--tetris', action='store_true', default=False)
     parser.add_argument('--no_cuda', action='store_true', default=False)
     # parser.add_argument('--use_schedule', action='store_true', default=False)
@@ -1069,11 +1111,17 @@ def main():
     # Prepare model and optimizer
     model = get_model(config, device)
     if config.opt == 'SGD':
+        start_lr = 0.0001
         opt = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
+        # scheduler = StepLR(opt, step_size=config.n_epochs/10, gamma=0.7)
+        # scheduler = StepLR(opt, step_size=config.n_epochs/20, gamma=0.7)
+        scheduler = ReduceLROnPlateau(opt, 'min', verbose=True, patience=3) # if applied on loss
     elif config.opt == 'Adam':
-        opt = Adam(model.parameters(), weight_decay=wd, amsgrad=True)
-    scheduler = StepLR(opt, step_size=config.n_epochs/10, gamma=0.7)
-    # scheduler = StepLR(opt, step_size=config.n_epochs/20, gamma=0.7)
+        start_lr = 0.001
+        opt = AdamW(model.parameters(), lr=start_lr, weight_decay=wd, amsgrad=True)
+        # proper weight decay rather than just l2 regularization
+        scheduler = None # no lr schedule with Adam, let it adjust itself
+
 
     # Train model
     results = train_model(model, opt, scheduler, loaders, config, device)

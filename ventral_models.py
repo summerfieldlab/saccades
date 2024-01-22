@@ -133,6 +133,10 @@ class old_MLP(nn.Module):
         return pred, x
 
 class ConvNet(nn.Module):
+    """Main Ventral Stream module.
+    
+    Batch-norm seems to affect OOD generalization so shouldn't be included in any models, probably.
+    """
     def __init__(self, width, height, penult_size, output_size, **kwargs):
         super().__init__()
         grid = kwargs['grid'] if 'grid' in kwargs.keys() else 9
@@ -156,13 +160,13 @@ class ConvNet(nn.Module):
             # self.kernel3_size = 2
             # self.cnn3_nchannels_out = 32
         # elif grid==3: # Smaller version
-        self.kernel1_size = (2, 1)
-        self.cnn1_nchannels_out = 33
+        self.kernel1_size = (3, 3) # height, width?
+        self.cnn1_nchannels_out = 10
         # self.poolsize = 2
-        self.kernel2_size = (1, 2)
-        self.cnn2_nchannels_out = 33
-        # self.kernel3_size = 2
-        # self.cnn3_nchannels_out = 33
+        self.kernel2_size = (3, 3)
+        self.cnn2_nchannels_out = 10
+        self.kernel3_size = (3, 3)
+        self.cnn3_nchannels_out = 10
         # elif grid==6: # Smaller version
         #     self.kernel1_size = 3
         #     self.cnn1_nchannels_out = 33
@@ -186,29 +190,30 @@ class ConvNet(nn.Module):
         # (Also assumes leaky Relu for gain)
         # which is appropriate for all layers here
         self.conv1 = nn.Conv2d(1, self.cnn1_nchannels_out, self.kernel1_size)    # (NChannels_in, NChannels_out, kernelsize)
-        self.BN0 = torch.nn.BatchNorm2d(self.cnn1_nchannels_out)
+        # self.BN0 = torch.nn.BatchNorm2d(self.cnn1_nchannels_out)
         # torch.nn.init.kaiming_uniform_(self.conv1.weight, nonlinearity='relu')
         # self.pool = nn.MaxPool2d(self.poolsize, self.poolsize)     # kernel height, kernel width
         self.conv2 = nn.Conv2d(self.cnn1_nchannels_out, self.cnn2_nchannels_out, self.kernel2_size)   # (NChannels_in, NChannels_out, kernelsize)
-        self.BN1 = torch.nn.BatchNorm2d(self.cnn2_nchannels_out)
-        # self.conv3 = nn.Conv2d(self.cnn2_nchannels_out, self.cnn3_nchannels_out, self.kernel3_size)
+        # self.BN1 = torch.nn.BatchNorm2d(self.cnn2_nchannels_out)
+        self.conv3 = nn.Conv2d(self.cnn2_nchannels_out, self.cnn3_nchannels_out, self.kernel3_size)
         # torch.nn.init.kaiming_uniform_(self.conv2.weight, nonlinearity='relu')
         # track the size of the cnn transformations
         # self.cnn2_width_out = ((width - self.kernel1_size+1) - self.kernel2_size + 1) // self.poolsize
         # self.cnn2_height_out = ((height - self.kernel1_size+1) - self.kernel2_size + 1) // self.poolsize
         # self.cnn3_width_out = (((width - self.kernel1_size+1) - self.kernel2_size + 1)  // self.poolsize) - self.kernel3_size+1
         # self.cnn3_height_out = (((height - self.kernel1_size+1) - self.kernel2_size + 1)  // self.poolsize) - self.kernel3_size+1
-        self.cnn2_width_out = ((width - self.kernel1_size[0]+1) - self.kernel2_size[0] + 1)
-        self.cnn2_height_out = ((height - self.kernel1_size[1]+1) - self.kernel2_size[1] + 1)
+        self.cnn2_width_out = ((width - self.kernel1_size[1]+1) - self.kernel2_size[1] + 1)
+        self.cnn2_height_out = ((height - self.kernel1_size[0]+1) - self.kernel2_size[0] + 1)
+        self.cnn3_width_out = self.cnn2_width_out - self.kernel3_size[1] + 1
+        self.cnn3_height_out = self.cnn2_height_out - self.kernel3_size[0] + 1
 
         # FC layers
-        self.fc1_size = 100
+        self.fc1_size = 50
         self.fc2_size = penult_size
-        self.fc1 = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), self.fc1_size)  # size input, size output
+        # self.fc1 = nn.Linear(int(self.cnn2_nchannels_out * self.cnn2_width_out * self.cnn2_height_out), self.fc1_size)  # size input, size output
         # self.fc1_size = 120
         
-        # import pdb; pdb.set_trace()
-        # self.fc1 = nn.Linear(int(self.cnn3_nchannels_out * self.cnn3_width_out * self.cnn3_height_out), self.fc1_size)  # size input, size output
+        self.fc1 = nn.Linear(int(self.cnn3_nchannels_out * self.cnn3_width_out * self.cnn3_height_out), self.fc1_size)  # size input, size output
         self.fc2 = nn.Linear(self.fc1_size, self.fc2_size)
         self.fc3 = nn.Linear(self.fc2_size, output_size)
 
@@ -216,10 +221,12 @@ class ConvNet(nn.Module):
         self.drop_layer = nn.Dropout(p=dropout)
 
     def forward(self, x):
-        x = self.BN0(self.LReLU(self.conv1(x)))
+        x = self.LReLU(self.conv1(x))
+        # x = self.BN0(self.LReLU(self.conv1(x)))
         # x = self.pool(self.LReLU(self.conv2(x)))
-        x = self.BN1(self.LReLU(self.conv2(x)))
-        # x = self.LReLU(self.conv3(x))
+        x = self.LReLU(self.conv2(x))
+        # x = self.BN1(self.LReLU(self.conv2(x)))
+        x = self.LReLU(self.conv3(x))
         x = x.view(-1, x.shape[1]*x.shape[2]*x.shape[3]) # this reshapes the tensor to be a 1D vector, from whatever the final convolutional layer output
         # add dropout before fully connected layers, widest part of network
         x = self.drop_layer(x)
