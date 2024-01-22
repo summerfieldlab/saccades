@@ -197,19 +197,20 @@ class MultRNN(nn.Module):
         o_t = h_t @ W_oh + b_o
         return o_t, h_t
 
-    def init_params(self):
-        for par in self.params:
-            if self.small_weights:
-                nn.init.normal_(par.weight, mean=0, std=0.1)
-            else:
-                nn.init.xavier_uniform_(par.weight, gain=self.gain)
+    # def init_params(self):
+    #     for par in self.params:
+    #         if self.small_weights:
+    #             nn.init.normal_(par.weight, mean=0, std=0.1)
+    #         else:
+    #             nn.init.xavier_uniform_(par.weight, gain=self.gain)
 
     def initHidden(self, batch_size):
         return torch.zeros(batch_size, self.hidden_size)
 
 
 class MultiplicativeLayer(nn.Module):
-    def __init__(self, z_size, x_size, out_size, small_weights):
+    """Where did I get this from?"""
+    def __init__(self, z_size, x_size, out_size, small_weights=False):
         super().__init__()
         self.U = nn.Linear(z_size, out_size, bias=True)
         self.V = nn.Linear(x_size, out_size, bias=False)

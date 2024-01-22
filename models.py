@@ -21,12 +21,12 @@ def choose_model(config, model_dir):
     max_num = config.max_num
     no_symbol = True if config.shape_input == 'parametric' else False
     drop = config.dropout
+    n_classes = max_num - config.min_num + 1
     if 'unique' in config.challenge:
         n_classes = 3
     elif 'distract' in config.challenge and config.target_type == 'all':
-        n_classes = max_num + 2
-    else:
-        n_classes = max_num
+        n_classes = n_classes + 2
+
     n_shapes = 2 if config.same and config.sort else 25 # 20 or 25
     if config.ventral is not None:
         ventral = model_dir + '/ventral/' + config.ventral
@@ -34,6 +34,8 @@ def choose_model(config, model_dir):
         ventral = None
     finetune = True if 'finetune' in model_type else False
     whole_im = True if 'whole' in model_type else False
+    xy_sz = 48*42 if config.place_code else 2
+    sigmoid = False if config.use_loss == 'num' else True
     mod_args = {'h_size': config.h_size, 'act': config.act,
                 # 'small_weights': config.small_weights, 
                 'outer':config.outer,
@@ -42,10 +44,15 @@ def choose_model(config, model_dir):
                 'n_shapes':n_shapes, 'ventral':ventral, 'train_on':config.train_on,
                 'finetune': finetune, 'device':device, 'sort':config.sort,
                 'no_pretrain': config.no_pretrain, 'whole':whole_im,
-                'n_glimpses': config.n_glimpses, 'place_code':False}#config.place_code}
-    
+                'n_glimpses': config.n_glimpses, 'xy_sz':xy_sz, 'mult':config.mult, 
+                'pass_penult':config.pass_penult, 'sigmoid':sigmoid}
+    if 'par' in model_type:# == 'rnn_classifier_par':
+        # Model with two parallel streams at the level of the map. Only one
+        # stream is optimized to match the map. The other of the same size
+        # is free, only influenced by the num loss.
+        mod_args['parallel'] = True
     hidden_size = mod_args['h_size']
-    output_size = mod_args['n_classes'] + 1
+    output_size = mod_args['n_classes'] #+ 1
     shape_format = mod_args['format']
     train_on = mod_args['train_on']
     grid = mod_args['grid']
@@ -53,7 +60,7 @@ def choose_model(config, model_dir):
     grid_to_im_shape = {3:[27, 24], 6:[48, 42], 9:[69, 60]}
     height, width = grid_to_im_shape[grid]
     map_size = grid**2
-    xy_sz = 48*42 if config.place_code else 2
+    
     if shape_format == 'tetris':
         sh_sz = 4*4
     elif 'symbolic' in shape_format:
@@ -96,7 +103,8 @@ def choose_model(config, model_dir):
     elif 'mlp' in model_type:
         in_size = height * width
         model = FeedForward(in_size, hidden_size, map_size, output_size, **mod_args).to(device)
-
+    elif model_type == 'map2num_decoder':
+        model = Map2NumDecoder(map_size, output_size).to(device)
     elif 'gated' in model_type:
         model = GatedMapper(xy_sz, sh_sz , hidden_size, map_size, output_size, **mod_args).to(device)
         # if 'map' in model_type:
@@ -107,12 +115,7 @@ def choose_model(config, model_dir):
         # else:
         #     model = GatedSymbolicRNN(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     elif 'rnn_classifier' in model_type:
-        if model_type == 'rnn_classifier_par':
-            # Model with two parallel streams at the level of the map. Only one
-            # stream is optimized to match the map. The other of the same size
-            # is free, only influenced by the num loss.
-            mod_args['parallel'] = True
-        elif '2stream' in model_type:
+        if '2stream' in model_type:
             if '2map' in model_type:
                 model = RNNClassifier2stream2map(sh_sz, hidden_size, map_size, output_size, **mod_args).to(device)
             else:
@@ -279,6 +282,19 @@ class FeedForward(nn.Module):
         return out, map, x
 
 
+class Map2NumDecoder(nn.Module):
+    """To test learning the simple function between a map representaion and numerosity classification."""
+    def __init__(self, map_size, output_size):
+        super().__init__()
+        self.output_size = output_size
+        self.layer1 = nn.Linear(map_size, map_size)
+        self.layer2 = nn.Linear(map_size, output_size)
+        
+    def forward(self, map):
+        x = self.layer1(map)
+        num = self.layer2(map)
+        return num, map, x
+
 class UnserialControl(nn.Module):
     def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
@@ -327,26 +343,29 @@ class PretrainedVentral(nn.Module):
         self.train_on = kwargs['train_on']
         ventral_file = kwargs['ventral']
         self.whole_im = kwargs['whole']
+        self.gate = kwargs['gate'] if 'gate' in kwargs.keys() else False
         self.ce = True if 'loss-ce' in ventral_file else False
         self.finetune = kwargs['finetune']
         self.sort = kwargs['sort']
+        self.pass_penult =  kwargs['pass_penult']
         no_pretrain = kwargs['no_pretrain']
-        penult_size = 8
+        penult_size = 10#8
+        self.xy_size = kwargs['xy_sz'] if 'xy_sz' in kwargs.keys() else 2
         if self.train_on == 'xy':
             shape_rep_len = 0
-        elif self.sort:
-            shape_rep_len = 2
-        else:
-            # shape_rep_len = 8
+        elif self.pass_penult:
             shape_rep_len = penult_size
-            # shape_rep_len = len(TRAIN_SHAPES)
+        else:
+            shape_rep_len = 2
+            
+
         if self.finetune:
-            drop = 0.25
+            drop = 0.4
         else:
             drop = 0
-        ventral_output_size = 25
+        ventral_output_size = 2
         # output_size = 6
-        if 'mlp' in ventral_file or 'logpolar' in ventral_file:
+        if 'mlp' in ventral_file :#or 'logpolar' in ventral_file:
             layer_width = 1024
             # self.ventral = vmod.MLP(pix_size, 1024, 3, ventral_output_size, drop=drop)
             self.ventral = vmod.BasicMLP(pix_size, layer_width, penult_size, ventral_output_size, drop=drop)
@@ -360,6 +379,7 @@ class PretrainedVentral(nn.Module):
             self.ventral = vmod.ConvNet(self.width, self.height, penult_size, ventral_output_size, dropout=drop)
         if not no_pretrain:
             print('Loading saved ventral model parameters...')
+            
             try:  # Try loading the whole model first, this is the way to go in case we make changes to the ventral model
                 self.ventral = torch.load(ventral_file)
                 if hasattr(self.ventral, 'penult_size'):
@@ -368,6 +388,8 @@ class PretrainedVentral(nn.Module):
                 self.ventral.load_state_dict(torch.load(ventral_file))
         # self.ventral.eval()
         # self.rnn = RNNClassifier2stream(shape_rep_len+100, hidden_size, map_size, output_size, **kwargs)
+        # self.gater = nn.Linear(pix_size + shape_rep_len, 1)
+        # nn.init.normal_(self.gater.weight, mean=0.01, std=0.1)
         self.rnn = RNNClassifier2stream(shape_rep_len, hidden_size, map_size, output_size, **kwargs)
         self.initHidden = self.rnn.initHidden
         self.Softmax = nn.Softmax(dim=1)
@@ -378,47 +400,56 @@ class PretrainedVentral(nn.Module):
         elif self.train_on == 'xy':
             xy = x
         else:
-            xy = x[:, :2]  # xy coords are first two input features
-            pix = x[:, 2:]
+            xy = x[:, :self.xy_size]  # xy coords are first two input features normally, unless place code
+            pix = x[:, self.xy_size:]
         if self.cnn and not self.whole_im and self.train_on != 'xy':
             n, p = pix.shape
-            pix = pix.view(n, 1, self.width, self.height)
+            pix = pix.view(n, 1, self.height, self.width) # REALLY IMPORTANT THAT THIS IS CORRECT, won't throw error when wrong
         if self.train_on != 'xy':
             if not self.finetune:
                 with torch.no_grad():
                     # shape_rep = self.ventral(pix)[:, 1:3] # ignore 0th, take 1st and 2nd column
-                    shape_rep, penult = self.ventral(pix) # for BCE experiment
+                    
+                    shape_pred, penult_ven = self.ventral(pix) # for BCE experiment
                     # shape_rep = torch.sigmoid(shape_rep[:, TRAIN_SHAPES])
                     # the 0th output was trained with  BCEWithLogitsLoss so need to apply sigmoid
                     # shape_rep[:, 0] = torch.sigmoid(shape_rep[:, 0])
                     # shape_rep = torch.concat((shape_rep[:, :2], penult), dim=1)
-                    if self.sort:
-                        shape_rep = shape_rep[:, :2].detach().clone()
-                        if self.ce:
-                            shape_rep = self.Softmax(shape_rep)
+                    if self.pass_penult:
+                        shape_rep = penult_ven.detach().clone()
                     else:
-                        shape_rep = penult.detach().clone()
+                        shape_rep = shape_pred[:, :2].detach().clone()
+                        if self.ce:
+                            shape_rep = self.Softmax(shape_rep)            
 
             else:
-                shape_rep, penult = self.ventral(pix)
+                shape_pred, penult_ven = self.ventral(pix)
                 # shape_rep, _ = self.ventral(pix)
-                if self.sort:
-                    shape_rep = shape_rep[:, :2]
+                if self.pass_penult:
+                    shape_rep = penult_ven
+                else:
+                    shape_rep = shape_pred[:, :2]
                     if self.ce:
                             shape_rep = self.Softmax(shape_rep)
-                else:
-                    shape_rep = penult
 
             if self.train_on == 'both':
                 # x = torch.concat((xy, shape_rep.detach().clone()), dim=1)
+                # gate just before concatenating two streams
+                # if self.gate:
+                    # input_to_gate = torch.cat((pix, shape_rep), dim=1)
+                    # gate = self.gater(input_to_gate)
+                    # xy = torch.mul(gate, xy)
+                    # xy = torch.mul(xy.T, shape_rep[:,1]).T
+
                 x = torch.cat((xy, shape_rep), dim=1)
             elif self.train_on == 'shape':
                 x = shape_rep
         elif self.train_on == 'xy':
             x = xy
-
-        num, shape, map_, hidden, premap, penult = self.rnn(x, hidden)
-        return num, shape, map_, hidden, premap, penult
+            shape_pred = None
+        
+        num, pix, map_, hidden, premap, penult = self.rnn(x, hidden)
+        return num, shape_pred, map_, hidden, premap, penult
 
 
 class RNNClassifier2stream2map(nn.Module):
@@ -433,11 +464,12 @@ class RNNClassifier2stream2map(nn.Module):
         self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
         drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
         self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
+        self.xy_size = kwargs['xy_sz'] if 'xy_sz' in kwargs.keys() else 2
 
         self.pix_embedding = nn.Linear(pix_size, hidden_size//2)
         self.shape_readout = nn.Linear(hidden_size//2, n_shapes)
 
-        self.xy_embedding = nn.Linear(2, hidden_size//2)
+        self.xy_embedding = nn.Linear(self.xy_size, hidden_size//2)
         self.joint_embedding = nn.Linear(hidden_size + n_shapes, hidden_size)
         self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
         self.drop_layer = nn.Dropout(p=drop)
@@ -462,8 +494,8 @@ class RNNClassifier2stream2map(nn.Module):
 
     def forward(self, x, hidden):
         if self.train_on == 'both':
-            xy = x[:,:2]  # xy coords are first two input features
-            pix = x[:,2:]
+            xy = x[:,:self.xy_size]  # xy coords are first two input features
+            pix = x[:,self.xy_size:]
             xy = self.LReLU(self.xy_embedding(xy))
             pix = self.LReLU(self.pix_embedding(pix))
             shape = self.shape_readout(pix)
@@ -699,6 +731,7 @@ class GatedSymbolicRNN(nn.Module):
         return num, shape, map_, hidden
 
 class RNNClassifier2stream(nn.Module):
+    """Main dual-stream network."""
     def __init__(self, pix_size, hidden_size, map_size, output_size, **kwargs):
         super().__init__()
         # map_size = 9
@@ -709,24 +742,43 @@ class RNNClassifier2stream(nn.Module):
         self.detach = kwargs['detach'] if 'detach' in kwargs.keys() else False
         drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
         self.par = kwargs['parallel'] if 'parallel' in kwargs.keys() else False
-        self.pix_embedding = nn.Linear(pix_size, hidden_size//2)
+        self.xy_size = kwargs['xy_sz'] if 'xy_sz' in kwargs.keys() else 2
+        self.mult = kwargs['mult'] if 'mult' in kwargs.keys() else False
+        self.sig = kwargs['sigmoid'] if 'sigmoid' in kwargs.keys() else False
+        if self.mult:
+            embedding_size = 64
+        else:
+            embedding_size = hidden_size
+            self.pix_embedding = nn.Linear(pix_size, embedding_size//2)
         # self.pix_embedding2 = nn.Linear(hidden_size//2, hidden_size//2)
         # self.shape_readout = nn.Linear(hidden_size, n_shapes)
-        self.xy_embedding = nn.Linear(2, hidden_size//2)
+            self.xy_embedding = nn.Linear(self.xy_size, embedding_size//2)
         # self.joint_embedding = nn.Linear(hidden_size//2 + n_shapes, hidden_size)
         if self.train_on == 'both':
-            self.joint_embedding = nn.Linear(hidden_size, hidden_size)
+            if self.mult:
+                # self.joint_embedding = MultiplicativeLayer(embedding_size//2, embedding_size//2, embedding_size)
+                # self.joint_embedding = MultiplicativeLayer( 2, 42*48, embedding_size)
+                self.joint_embedding = nn.Linear(self.xy_size*pix_size, embedding_size)
+            else:
+                self.joint_embedding = nn.Linear(embedding_size, embedding_size)
         else:
-            self.joint_embedding = nn.Linear(hidden_size//2, hidden_size)
-        self.rnn = RNN(hidden_size, hidden_size, hidden_size, self.act)
+            self.joint_embedding = nn.Linear(embedding_size//2, embedding_size)
+        # self.joint_BN = nn.BatchNorm1d(embedding_size, affine=False)
+        # self.gater = nn.Linear(hidden_size//2, 1)
+        # if self.mult:
+        #     factor_size = 10
+        #     self.rnn = MultRNN(hidden_size, hidden_size, factor_size, hidden_size, False)
+        # else:
+        self.rnn = RNN(embedding_size, hidden_size, hidden_size, self.act)
+        # self.hidden_BN = nn.BatchNorm1d(hidden_size, affine=False)
         self.drop_layer = nn.Dropout(p=drop)
         self.map_readout = nn.Linear(hidden_size, map_size)
-        self.after_map = nn.Linear(map_size, map_size)
+        # self.after_map = nn.Linear(map_size, map_size)
         if self.par:
             self.notmap = nn.Linear(hidden_size, map_size)
-            self.num_readout = nn.Linear(map_size * 2, output_size)
+            self.num_readout = nn.Linear(map_size * 2, output_size, bias=False)
         else:
-            self.num_readout = nn.Linear(map_size, output_size)
+            self.num_readout = nn.Linear(map_size, output_size, bias=False)
 
         self.initHidden = self.rnn.initHidden
         self.sigmoid = nn.Sigmoid()
@@ -734,16 +786,21 @@ class RNNClassifier2stream(nn.Module):
 
     def forward(self, x, hidden):
         if self.train_on == 'both':
-            xy = x[:, :2]  # xy coords are first two input features
-            pix = x[:, 2:]
-            xy = self.LReLU(self.xy_embedding(xy))
-            pix = self.LReLU(self.pix_embedding(pix))
+            xy = x[:, :self.xy_size]  # xy coords are first two input features typically unless place code
+            pix = x[:, self.xy_size:]
+            
+            if not self.mult:
+                xy = self.LReLU(self.xy_embedding(xy))
+                pix = self.LReLU(self.pix_embedding(pix))
+                combined = torch.cat((xy, pix), dim=-1)
+            else:
+                combined = torch.einsum('ij,ik->ijk', xy, pix).reshape(-1, xy.shape[1]*pix.shape[1])
             # pix = self.LReLU(self.pix_embedding2(pix))
             # shape = self.shape_readout(pix)
             # shape_detached = shape.detach().clone()
             # combined = torch.cat((shape, xy, pix), dim=-1)
             # combined = torch.cat((shape_detached, xy), dim=-1)
-            combined = torch.cat((xy, pix), dim=-1)
+            
         elif self.train_on == 'xy':
             xy = x
             xy = self.LReLU(self.xy_embedding(xy))
@@ -753,25 +810,42 @@ class RNNClassifier2stream(nn.Module):
             pix = x
             pix = self.LReLU(self.pix_embedding(pix))
             combined = pix
+            
+        # if self.mult:
+            
+        #     x = self.LReLU(self.joint_embedding(xy, pix))
+        # else:
+        # x = self.LReLU(self.joint_BN(self.joint_embedding(combined)))
         x = self.LReLU(self.joint_embedding(combined))
         x, hidden = self.rnn(x, hidden)
+        # hidden = self.hidden_BN(hidden)
         x = self.drop_layer(x)
 
         map_ = self.map_readout(x)
-        sig = self.sigmoid(map_)
+        # If not including the map loss term in the optimized objective function, this sigmoid is unncessary and 
+        # contributes to vanishing gradients. Therefore, when use_loss == num, replace with LReLu.
+        if self.sig:
+            sig = self.sigmoid(map_)
+        else:
+            sig = self.LReLU(map_)
         if self.detach:
-            map_to_pass_on = sig.detach().clone()
+            map_to_pass_on = torch.round(sig.detach()).clone()
         else:
             map_to_pass_on = sig
 
-        penult = self.LReLU(self.after_map(map_to_pass_on))
+        # penult = self.LReLU(self.after_map(map_to_pass_on))
+        # function fom map to number should be linear so best to omit notlinearity, although because you allready applied sigmoid, lrelu wouldn't do anything anyway
+        # penult = self.after_map(map_to_pass_on) # this extra layer probably isn't helping with anything and just increases the number of params
         if self.par:
             # Two parallel layers, one to be a map, the other not
             notmap = self.notmap(x)
-            penult = torch.cat((penult, notmap), dim=1)
-        # num = self.num_readout(map_to_pass_on)
+            penult = torch.cat((map_to_pass_on, notmap), dim=1)
+        else:
+            penult = map_to_pass_on
         num = self.num_readout(penult)
+        # num = self.num_readout(penult)
         return num, pix, map_, hidden, x, penult
+        # return num, pix, map_, hidden, x, map_to_pass_on
 
 
 # class RNNClassifier(nn.Module):
