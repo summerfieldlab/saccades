@@ -47,9 +47,12 @@ def main(config):
     base_name = get_base_name(config)
     if os.path.isfile(f'{fig_dir}/accuracy_{base_name}.png') and config.if_exists != 'force':
         if config.if_exists == 'ask':
-            ui = input(f"{base_name} exists. Would you like to increment rep counter? (y/n) If no, previous results will be overwritten.  ")
-            if ui == 'y':
+            ui = input(f"{base_name} exists. Would you like to increment rep counter(i), skip (s), or overwrite (o)? ")
+            if ui == 'i':
                 config.rep += 1
+            elif ui == 's':
+                print(f'Skipping {base_name}.')
+                quit()
         elif config.if_exists == 'skip':
             print(f'{base_name} already exists. \n QUITTING.')
             quit()
