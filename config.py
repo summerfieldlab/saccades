@@ -39,7 +39,7 @@ def get_base_name(config):
     # model_desc = f'{model_type}{detach}{act}{pretrain}_hsize-{config.h_size}_input-{train_on}{kernel}_{config.shape_input}'
     model_desc = f'{model_type}{detach}{pretrain}_hsize-{config.h_size}_input-{train_on}{kernel}_{config.shape_input}'
     # data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_grid{config.grid}_policy-{policy}_trainshapes-{shapes}{same}_{challenge}_{transform}{n_glimpses}{train_size}'
-    data_desc = f'num{min_num}-{max_num}_policy-{policy}_trainshapes-{shapes}{same}_{challenge}_{transform}{n_glimpses}{train_size}'
+    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_policy-{policy}_trainshapes-{shapes}{same}_{challenge}_{transform}{n_glimpses}{train_size}'
     # train_desc = f'loss-{use_loss}_niters-{n_iters}_{n_epochs}eps'
     withshape = '+shape' if config.learn_shape else ''
     train_desc = f'loss-{use_loss}{withshape}_opt-{config.opt}_drop{drop}_{sort}count-{target_type}_{n_epochs}eps_rep{config.rep}'
@@ -100,6 +100,10 @@ def get_config():
     parser.add_argument('--batch_size', type=int, default=512)
     parser.add_argument('--policy', type=str, default='cheat+jitter', help='humanlike or cheat+jitter or cheat') 
     parser.add_argument('--gpu', type=int, default=0, help='which gpu to use')
+    parser.add_argument('--mult', action='store_true', default=False)
+    parser.add_argument('--pass_penult', action='store_true', default=False)
+    parser.add_argument('--constant_contrast', action='store_true', default=False)
+    parser.add_argument('--if_exists', type=str, default='ask', help='What to do if results for this config already exist? skip, force overwrite, or ask to increase rep counter.')
     config = parser.parse_args()
     config.solarize = False if config.no_solarize else True
     if config.model_type == 'rnn_regression':
