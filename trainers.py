@@ -761,8 +761,7 @@ class Trainer():
         n_glimpses = config.n_glimpses
         test_names = ['validation', 'new-luminances', 'new-shapes', 'new_both']
         # test_names = ['val_free', 'val_fixed', 'ood_free', 'ood_fixed']
-        is_cnn = 'cnn' in config.model_type and 'ventral' not in config.model_type
-        sets_to_save = [1, 3] if is_cnn else [3] # also save acts of validation set if CNN
+        sets_to_save = [3] 
         # 
         for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(test_loaders, shape_lum)):
         # only save new-both test set for now
@@ -774,12 +773,9 @@ class Trainer():
             start = 0
             test_size = len(test_loader.dataset)
             
-            if is_cnn:
-                premap_act = np.zeros((test_size, model.fc1_size))
-            else:
-                hidden_act = np.zeros((test_size, n_glimpses, config.h_size))
-                # premap_act = np.zeros((test_size, n_glimpses, config.h_size))
-                # penult_act = np.zeros((test_size, n_glimpses, config.grid**2))
+            hidden_act = np.zeros((test_size, n_glimpses, config.h_size))
+            # premap_act = np.zeros((test_size, n_glimpses, config.h_size))
+            # penult_act = np.zeros((test_size, n_glimpses, config.grid**2))
             glimpse_coords = np.zeros((test_size, n_glimpses, 2))
             numerosity = np.zeros((test_size,))
             dist_num = np.zeros((test_size,))
@@ -793,18 +789,15 @@ class Trainer():
                 index[start: start + batch_size] = ind.numpy()
                 numerosity[start: start + batch_size] = target.cpu().detach().numpy()
                 dist_num[start: start + batch_size] = num_dist.cpu().detach().numpy()
-                if is_cnn:
-                    pred_num, _, premap  = model(input_)
-                    premap_act[start: start + batch_size] = premap.cpu().detach().numpy()
-                else:
-                    hidden = model.initHidden(batch_size).to(device)
-                    xy = input_[:, :, :2].cpu().detach().numpy()
-                    glimpse_coords[start: start + batch_size] = xy
-                    for t in range(n_glimpses):
-                        pred_num, _, _, hidden, premap, penult = model(input_[:, t, :], hidden)
-                        hidden_act[start: start + batch_size, t] = hidden.cpu().detach().numpy()
-                        # premap_act[start: start + batch_size, t] = premap.cpu().detach().numpy()
-                        # penult_act[start: start + batch_size, t] = penult.cpu().detach().numpy()
+
+                hidden = model.initHidden(batch_size).to(device)
+                xy = input_[:, :, :2].cpu().detach().numpy()
+                glimpse_coords[start: start + batch_size] = xy
+                for t in range(n_glimpses):
+                    pred_num, _, _, hidden, premap, penult = model(input_[:, t, :], hidden)
+                    hidden_act[start: start + batch_size, t] = hidden.cpu().detach().numpy()
+                    # premap_act[start: start + batch_size, t] = premap.cpu().detach().numpy()
+                    # penult_act[start: start + batch_size, t] = penult.cpu().detach().numpy()
 
                 pred = pred_num.argmax(dim=1, keepdim=True)
                 predicted_num[start: start + batch_size] = softmax(pred_num).cpu().detach().numpy()
@@ -818,42 +811,30 @@ class Trainer():
             distractor_locations = np.array([np.array([]) if dl is None else dl for dl in image_data.distract_coords_scaled[index].values], dtype=object)
             # Save to file
             savename = f'activations/{basename}_test-{test_names[ts]}'
-            if is_cnn:
-                # Compressed numpy
-                np.savez(savename, numerosity=numerosity, num_distractor=dist_num, 
-                        act_premap=premap_act, 
-                        predicted_num=predicted_num, correct=correct, 
-                        target_locations=target_locations,
-                        distractor_locations=distractor_locations)
-                to_save = {'numerosity':numerosity, 'num_distractor':dist_num, 
-                        'act_premap':premap_act, 
-                        'predicted_num':predicted_num, 'correct':correct, 
+
+            # Put into pandas dataframe
+            # image_data.loc(index)
+            # variables = [index, numerosity, dist_num, hidden_act, predicted_num, correct, glimpse_coords]
+            # columns=['index', 'numerosity', 'num_distractor', 'act_hidden', 'predicted_num', 'correct', 'glimpse_xy']
+            # df = pd.DataFrame(columns=columns)
+            # for var, col in zip(variables, columns): df[col] = var
+            # df = df.join(image_data)
+            
+            # Compressed numpy
+            np.savez(savename, numerosity=numerosity, num_distractor=dist_num, 
+                    act_hidden=hidden_act, 
+                    # act_premap=premap_act, act_penult=penult_act, 
+                    predicted_num=predicted_num, correct=correct,
+                    glimpse_xy=glimpse_coords, 
+                    target_locations=target_locations,
+                    distractor_locations=distractor_locations)
+            to_save = {'numerosity':numerosity, 'num_distractor':dist_num, 
+                        'act_hidden':hidden_act, 
+                        # 'act_premap':premap_act, 'act_penult':penult_act, 
+                        'predicted_num':predicted_num, 'correct':correct,
+                        'glimpse_xy':glimpse_coords, 
                         'target_locations': target_locations,
                         'distractor_locations': distractor_locations}
-            else:
-                # Put into pandas dataframe
-                # image_data.loc(index)
-                # variables = [index, numerosity, dist_num, hidden_act, predicted_num, correct, glimpse_coords]
-                # columns=['index', 'numerosity', 'num_distractor', 'act_hidden', 'predicted_num', 'correct', 'glimpse_xy']
-                # df = pd.DataFrame(columns=columns)
-                # for var, col in zip(variables, columns): df[col] = var
-                # df = df.join(image_data)
-                
-                # Compressed numpy
-                np.savez(savename, numerosity=numerosity, num_distractor=dist_num, 
-                        act_hidden=hidden_act, 
-                        # act_premap=premap_act, act_penult=penult_act, 
-                        predicted_num=predicted_num, correct=correct,
-                        glimpse_xy=glimpse_coords, 
-                        target_locations=target_locations,
-                        distractor_locations=distractor_locations)
-                to_save = {'numerosity':numerosity, 'num_distractor':dist_num, 
-                            'act_hidden':hidden_act, 
-                            # 'act_premap':premap_act, 'act_penult':penult_act, 
-                            'predicted_num':predicted_num, 'correct':correct,
-                            'glimpse_xy':glimpse_coords, 
-                            'target_locations': target_locations,
-                            'distractor_locations': distractor_locations}
             # MATLAB
             savemat(savename + '.mat', to_save)
 
@@ -1066,8 +1047,83 @@ class FeedForwardTrainer(Trainer):
 
     @torch.no_grad()
     def save_activations(self, model, test_loaders, basename, config):
-        pass
-        # TODO
+        """
+        Pass data through model and save activations at various points in the architecture.
+
+        Include other trial details: number of targets, number of distractors, model prediction
+        (softmax outputs), xy coordinates (in pixels).
+
+        Args:
+            model (torch nn.Module): The torch model whose activations should be calculated and saved
+            test_loaders (list): torch DataLoaders for each of the test datasets
+            basename (str): base file name indicating relevant model, data, and training parameters
+            config (Namespace): configuration variables for these model run
+        """
+        model.eval()
+        device = self.config.device
+        softmax = nn.Softmax(dim=1)
+        shape_lum = product(config.test_shapes, config.lum_sets)
+        n_glimpses = config.n_glimpses
+        test_names = ['validation', 'new-luminances', 'new-shapes', 'new_both']
+        # test_names = ['val_free', 'val_fixed', 'ood_free', 'ood_fixed']
+        sets_to_save = [1, 3] # also save acts of validation set if baseline model
+        # 
+        for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(test_loaders, shape_lum)):
+        # only save new-both test set for now
+        # ts = 3
+        # test_loader = test_loaders[-1]
+            if ts not in sets_to_save:
+                continue
+            # Initialize
+            start = 0
+            test_size = len(test_loader.dataset)
+            
+            premap_act = np.zeros((test_size, model.fc1_size))
+
+            glimpse_coords = np.zeros((test_size, n_glimpses, 2))
+            numerosity = np.zeros((test_size,))
+            dist_num = np.zeros((test_size,))
+            predicted_num = np.zeros((test_size, model.output_size))
+            correct = np.zeros((test_size,))
+            index = np.zeros((test_size,))
+            # Loop through minibatches
+            for i, (ind, input_, target, num_dist, all_loc, pass_count) in enumerate(test_loader):
+                input_ = input_.to(device)
+                batch_size = input_.shape[0]
+                index[start: start + batch_size] = ind.numpy()
+                numerosity[start: start + batch_size] = target.cpu().detach().numpy()
+                dist_num[start: start + batch_size] = num_dist.cpu().detach().numpy()
+
+                pred_num, _, premap  = model(input_)
+                premap_act[start: start + batch_size] = premap.cpu().detach().numpy()
+
+
+                pred = pred_num.argmax(dim=1, keepdim=True)
+                predicted_num[start: start + batch_size] = softmax(pred_num).cpu().detach().numpy()
+                correct[start: start + batch_size] = pred.eq(target.view_as(pred)).cpu().detach().numpy().squeeze()
+                
+                start += batch_size
+            # Retrieve image metadata in order for this epoch
+            image_data = self.image_metadata[ts]
+            # Can't save None to .mat so replace with empty array
+            target_locations = np.array([np.array([]) if tl is None else tl for tl in image_data.target_coords_scaled[index].values], dtype=object)
+            distractor_locations = np.array([np.array([]) if dl is None else dl for dl in image_data.distract_coords_scaled[index].values], dtype=object)
+            # Save to file
+            savename = f'activations/{basename}_test-{test_names[ts]}'
+            # Compressed numpy
+            np.savez(savename, numerosity=numerosity, num_distractor=dist_num, 
+                    act_premap=premap_act, 
+                    predicted_num=predicted_num, correct=correct, 
+                    target_locations=target_locations,
+                    distractor_locations=distractor_locations)
+            to_save = {'numerosity':numerosity, 'num_distractor':dist_num, 
+                    'act_premap':premap_act, 
+                    'predicted_num':predicted_num, 'correct':correct, 
+                    'target_locations': target_locations,
+                    'distractor_locations': distractor_locations}
+
+            # MATLAB
+            savemat(savename + '.mat', to_save)
     
 class FeedForwardTrainerDistract(FeedForwardTrainer, TrainerDistract):
     def __init__(self, model, loaders, test_xarray, config):
