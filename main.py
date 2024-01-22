@@ -45,10 +45,14 @@ def main(config):
     
     # Load data, init model and trainer
     base_name = get_base_name(config)
-    if os.path.isfile(f'{fig_dir}/accuracy_{base_name}.png'):
-        ui = input(f"{base_name} exists. Would you like to increment rep counter? (y/n) If no, previous results will be overwritten.  ")
-        if ui == 'y':
-            config.rep += 1
+    if os.path.isfile(f'{fig_dir}/accuracy_{base_name}.png') and config.if_exists != 'force':
+        if config.if_exists == 'ask':
+            ui = input(f"{base_name} exists. Would you like to increment rep counter? (y/n) If no, previous results will be overwritten.  ")
+            if ui == 'y':
+                config.rep += 1
+        elif config.if_exists == 'skip':
+            print(f'{base_name} already exists. \n QUITTING.')
+            quit()
     config.base_name = base_name
     loaders, test_xarray = choose_loader(config)
     model = choose_model(config, model_dir)
@@ -58,7 +62,9 @@ def main(config):
     model, results = trainer.train_network()
     print('Saving trained model and results files...')
     # torch.save(model.state_dict(), f'{model_dir}/toy_model_{base_name}_ep-{config.n_epochs}.pt')
-    torch.save(model, f'{model_dir}/{base_name}_ep-{config.n_epochs}.pt')
+    model_file_name = f'{model_dir}/{base_name}_ep-{config.n_epochs}.pt'
+    torch.save(model, model_file_name)
+    print(f'model file: {model_file_name}')
 
     # Organize and save results
     train_losses, train_accs, test_losses, test_accs, confs, test_results = results
@@ -67,7 +73,7 @@ def main(config):
     (train_count_num_loss, train_dist_num_loss, train_all_num_loss) = train_num_losses
     (train_count_map_loss, train_dist_map_loss, train_full_map_loss) = train_map_losses
     (test_num_losses, test_map_losses, test_shape_loss) = test_losses
-    (test_acc_count, test_acc_dist, test_acc_all) = test_accs
+    (test_acc_count, test_acc_map, test_acc_dist, test_acc_all) = test_accs
     (test_count_num_loss, test_dist_num_loss, test_all_num_loss) = test_num_losses
     (test_count_map_loss, test_dist_map_loss, test_full_map_loss) = test_map_losses
 
@@ -103,6 +109,7 @@ def main(config):
         df_test_list[ts]['count map loss'] = test_count_map_loss[ts]
         df_test_list[ts]['dist map loss'] = test_count_map_loss[ts]
         df_test_list[ts]['accuracy count'] = test_acc_count[ts]
+        df_test_list[ts]['accuracy map'] = test_acc_map[ts]
         df_test_list[ts]['accuracy dist'] = test_acc_dist[ts]
         df_test_list[ts]['accuracy all'] = test_acc_all[ts]
         df_test_list[ts]['dataset'] = loader.testset
@@ -116,7 +123,7 @@ def main(config):
     df_test = pd.concat(df_test_list)
     df_test['rnn iterations'] = config.n_iters
     df = pd.concat((df_train, df_test))
-    df.to_pickle(f'{results_dir}/toy_results_{base_name}.pkl')
+    df.to_pickle(f'{results_dir}/results_{base_name}.pkl')
     timer.stop_timer()
 
 
