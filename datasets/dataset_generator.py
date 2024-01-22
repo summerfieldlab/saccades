@@ -61,6 +61,7 @@ class DatasetGenerator():
         self.char_width = 4
         self.char_height = 5
         self.shape_holder = np.zeros((self.char_height, self.char_width))
+        self.logscale = conf.logscale
         # global GRID, GRID_SIZE, CENTROID_ARRAY, POSSIBLE_CENTROIDS
         # global PIXEL_HEIGHT, PIXEL_WIDTH, MAP_SCALE_PIXEL
 
@@ -184,18 +185,39 @@ class DatasetGenerator():
                 coords_glimpsed_objects = [self.possible_centroids[object] for object in glimpsed_objects]
 
             # Take noisy observations of glimpsed objects
-            noise_x = np.random.normal(loc=0, scale=nl/2, size=n_glimpses)
-            noise_y = np.random.normal(loc=0, scale=nl/2, size=n_glimpses)
+            # variance is squared standard deviation
+
+            glimpse_coords = []
+            for x,y in coords_glimpsed_objects:
+                noise_x, noise_y  = np.random.multivariate_normal([0,0], [[nl**2, 0],[0, nl**2]], 1)[0]
+                coordx = noise_x + x
+                coordy = noise_y + y
+                while coordx > 1 or coordx < 0 or coordy > 1 or coordy < 0:
+                    noise_x, noise_y  = np.random.multivariate_normal([0,0], [[nl**2, 0],[0, nl**2]], 1)[0]
+                    coordx = noise_x + x
+                    coordy = noise_y + y
+                glimpse_coords.append((coordx, coordy))
+
+
+            # noise_x = np.random.normal(loc=0, scale=nl/2, size=n_glimpses)
+            # noise_y = np.random.normal(loc=0, scale=nl/2, size=n_glimpses)
+            # Sample from 2d Gaussian instead of 2 1d
+            # noise_xy = np.random.multivariate_normal([0,0], [[nl**2, 0],[0, nl**2]], n_glimpses)
             # Enfore a hard bound on how far the glimpse coordinate can be from the item that generated it.
-            while any(abs(noise_x) > nl):
-                idx = np.where(abs(noise_x) > nl)[0]
-                noise_x[idx] = np.random.normal(loc=0, scale=nl, size=len(idx))
-            while any(abs(noise_y) > nl):
-                idx = np.where(abs(noise_y) > nl)[0]
-                noise_y[idx] = np.random.normal(loc=0, scale=nl, size=len(idx))
-            # Add noise to generate sequence of saccadic targets
-            noise_xy = zip(noise_x, noise_y)
-            glimpse_coords = [(x+del_x, y+del_y) for ((x,y), (del_x, del_y)) in zip(coords_glimpsed_objects, noise_xy)]
+            # TODO: if you ever want to generate sample from truncated guassians again, reimplement to sample from 2d 
+            # gauss instead of from 2 1d
+            # if truncate:
+            #     print('not implemented truncated version')
+            # while any(abs(noise_x) > nl):
+            #     idx = np.where(abs(noise_x) > nl)[0]
+            #     noise_x[idx] = np.random.normal(loc=0, scale=nl, size=len(idx))
+            # while any(abs(noise_y) > nl):
+            #     idx = np.where(abs(noise_y) > nl)[0]
+            #     noise_y[idx] = np.random.normal(loc=0, scale=nl, size=len(idx))
+            # # Add noise to generate sequence of saccadic targets
+            # noise_xy = zip(noise_x, noise_y)
+            # glimpse_coords = [(x+del_x, y+del_y) for ((x,y), (del_x, del_y)) in zip(coords_glimpsed_objects, noise_xy)]
+
             # Add 0,1 or 2 random glimpses
             if 'random' in challenge:
                 for r_gl in range(n_rand_gl):
@@ -208,33 +230,42 @@ class DatasetGenerator():
             coords_glimpsed_objects = np.array(coords_glimpsed_objects)
         return glimpse_coords, glimpsed_objects, coords_glimpsed_objects, objects2count, distractors
     
-    def calculate_proximity(self, glimpse_coords, item_coords, item_slots, shape_map, max_dist):
+    def calculate_proximity(self, glimpse_coords, item_coords, item_slots, shape_map):
         """Calculate proximity of fixation point to nearby item shape categories. 
         
         e.g. proximity to the letter A will be the first element of the vector, 
         which may be greater than 1 if there are multiple As in the vicinity.
+
+        object_idx indexes into the items in the image
+        shape_idx indexes into the shape category label 0 (A) through 25 or so
+
         """
         shape_coords = np.zeros((self.n_glimpses, self.n_shapes), dtype=np.float32)
         # Calculate a weighted 'glimpse label' that indicates the proximity of each
         # glimpse to neighboring shapes
         eu_dist = euclidean_distances(glimpse_coords, item_coords)
-        # max_dist = np.sqrt((noise_level*0.1)**2 + (noise_level*0.1)**2)
-        glimpse_idx, object_idx = np.where(eu_dist <= max_dist + self.eps)
+        glimpse_idx, object_idx = np.where(eu_dist <= self.shape_max_dist + self.eps)
         shape_idx = [shape_map[obj] for obj in item_slots[object_idx]]
         # proximity = {idx:np.zeros(9,) for idx in glimpse_idx}
         # The same cell of the shape_coords matrix may by incremented several
         # times if there are multiple occurances of a shape "within" a single
         # glimpse.
+        eps = 1e-10
         for gl_idx, obj_idx, sh_idx in zip(glimpse_idx, object_idx, shape_idx):
-            if max_dist != 0:
-                prox = 1 - (eu_dist[gl_idx, obj_idx]/max_dist)
-            else:  # avoid division by zero
-                prox  = 1
-            # print(f'gl:{gl_idx} obj:{obj_idx} sh:{sh_idx}, prox:{prox}')
-            shape_coords[gl_idx, sh_idx] += prox
+            if self.logscale:
+                shape_coords[gl_idx, sh_idx] += -np.log(eu_dist[gl_idx, obj_idx]+eps)
+            else:
+                if self.shape_max_dist != 0:
+                    prox = 1 - (eu_dist[gl_idx, obj_idx]/self.shape_max_dist)
+                else:  # avoid division by zero
+                    prox  = 1
+                # print(f'gl:{gl_idx} obj:{obj_idx} sh:{sh_idx}, prox:{prox}')
+                shape_coords[gl_idx, sh_idx] += prox
+
+        # logscale
         return shape_coords
         
-    def get_shape_coords(self, glimpse_coords, max_dist, shapes_set, same,
+    def get_shape_coords(self, glimpse_coords, shapes_set, same,
                          objects2count, distractors):
         """Generate glimpse shape feature vectors.
 
@@ -296,7 +327,7 @@ class DatasetGenerator():
             shape_map_vector[object] = shape_map[object]
         shape_hist = [sum(shape_map_vector == shape) for shape in range(self.n_shapes)]
 
-        shape_coords = self.calculate_proximity(glimpse_coords, item_coords, item_slots, shape_map, max_dist)
+        shape_coords = self.calculate_proximity(glimpse_coords, item_coords, item_slots, shape_map)
         # shape_coords[glimpse_idx, shape_idx] = 1 - eu_dist[glimpse_idx, obj_idx]/min_dist
         # make sure each glimpse has at least some shape info (not if random glimpses)
         # assert np.all(shape_coords.sum(axis=1) > 0)
@@ -308,6 +339,7 @@ class DatasetGenerator():
         # distract = config.distract
         # rand_g = config.random
         noise_level = config.noise_level
+        truncate = config.truncate
         min_pass_count = config.min_pass
         max_pass_count = config.max_pass
         num_low = config.min_num
@@ -341,7 +373,16 @@ class DatasetGenerator():
         # are generated uniform randomly.
 
         # Synthesize glimpses - paired observations of xy and shape coordinates
-        max_dist = np.sqrt((noise_level*0.1)**2 + (noise_level*0.1)**2)
+        # if xy_max_dist is not None, then glimpse positions are sampled from Gaussians truncated at xy_max_dist
+        # shape_max_dist indicates the maximum distance to be included in the proximity score. The shape vector for each
+        # glimpse will indicate proximity to nearby shapes within shape_max_dist.
+        if truncate:
+            # 2 standard deviations
+            self.xy_max_dist = 2*(noise_level*0.1) #np.sqrt((noise_level*0.1)**2 + (noise_level*0.1)**2)
+            self.shape_max_dist = self.xy_max_dist
+        else:
+            self.xy_max_dist = None
+            self.shape_max_dist = 3*(noise_level*0.1) # 3 standard deviations, 0.22
         # 0.12727922061357858
         # min_pass_count, max_pass_count = pass_count_range
         # num_low, num_high = num_range
@@ -352,44 +393,44 @@ class DatasetGenerator():
         # that limiting the pass count doesn't bias the distribution of numerosities
         # TODO: Make this such that pass count range is only considered if included as cli argument. 
         # Otherwise, range set to be inclusive. That way don't need to bother with setting those cli arguments when not relevant
-        while final_pass_count < min_pass_count or final_pass_count > max_pass_count:
-            xy_coords, objects, noiseless_coords, to_count, distractors = self.get_xy_coords(num, n_disract, noise_level, challenge, policy)
-            shape_coords, shape_map, shape_hist = self.get_shape_coords(xy_coords, max_dist, shapes_set, same, to_count, distractors)
-            # Initialize records
-            example = solver.GlimpsedImage(xy_coords, shape_coords, shape_map, shape_hist, objects, max_dist, num_range)
-            pass_count = 0
-            done = example.check_if_done(pass_count)
+        # while final_pass_count < min_pass_count or final_pass_count > max_pass_count:
+        xy_coords, objects, noiseless_coords, to_count, distractors = self.get_xy_coords(num, n_disract, noise_level, challenge, policy)
+        shape_coords, shape_map, shape_hist = self.get_shape_coords(xy_coords, shapes_set, same, to_count, distractors)
 
-            # First pass
-            example.process_xy()
-            if not done:
-                pass_count += 1
-                done = example.check_if_done(pass_count)
-            initial_candidates = example.candidates.copy()
-            initial_filled_locations = example.filled_locations.copy()
+        # Initialize records
+        # example = solver.GlimpsedImage(xy_coords, shape_coords, shape_map, shape_hist, objects, max_dist, num_range)
+        # pass_count = 0
+        # done = example.check_if_done(pass_count)
 
-            while not done and pass_count < max_pass_count:
-                pass_count += 1
+        # # First pass
+        # example.process_xy()
+        # if not done:
+        #     pass_count += 1
+        #     done = example.check_if_done(pass_count)
+        # initial_candidates = example.candidates.copy()
+        # initial_filled_locations = example.filled_locations.copy()
+        # while not done and pass_count < max_pass_count:
+        #     pass_count += 1
 
-                tbr = example.to_be_resolved
+        #     tbr = example.to_be_resolved
 
-                keys = list(tbr.keys())
-                idx = keys[0]
-                cand_list, loc_list = tbr[idx]
-                new_object_idxs = example.use_shape_to_resolve(idx, cand_list)
+        #     keys = list(tbr.keys())
+        #     idx = keys[0]
+        #     cand_list, loc_list = tbr[idx]
+        #     new_object_idxs = example.use_shape_to_resolve(idx, cand_list)
 
-                for loc in new_object_idxs:
-                    example.toggle(idx, loc)
+        #     for loc in new_object_idxs:
+        #         example.toggle(idx, loc)
 
-                # Check if done
-                done = example.check_if_done(pass_count)
+        #     # Check if done
+        #     done = example.check_if_done(pass_count)
 
-            if not done:
-                # print('DID NOT SOLVE \r')
-                example.pred_num = example.lower_bound
-                # example.plot_example(pass_count)
+        # if not done:
+        #     # print('DID NOT SOLVE \r')
+        #     example.pred_num = example.lower_bound
+        #     # example.plot_example(pass_count)
 
-            final_pass_count = pass_count
+        # final_pass_count = pass_count
         # unique_objects = set(example.objects)
         all_objects = to_count + distractors
         filled_locations = [1 if i in all_objects else 0 for i in range(self.grid_size)]
@@ -402,21 +443,21 @@ class DatasetGenerator():
                         'numerosity_target': num,
                         'numerosity_dist': len(distractors),
                         'num_unique': n_unique,
-                        'num_min': example.min_num,
-                        'predicted_num': example.pred_num, 'count': example.count,
+                        # 'num_min': example.min_num,
+                        # 'predicted_num': example.pred_num, 'count': example.count,
                         'locations': filled_locations,
                         'locations_count': locations_2count,
                         'locations_distract': locations_dist,
                         'object_coords': noiseless_coords,
                         'shape_map': shape_map,
-                        'pass_count': pass_count, 'unresolved_ambiguity': not done,
-                        'special_xy': example.special_case_xy,
-                        'special_shape': example.special_case_shape,
-                        'lower_bound': example.lower_bound,
-                        'upper_bound': example.upper_bound,
-                        'min_shape': example.min_shape, 
-                        'initial_candidates': initial_candidates,
-                        'initial_filled_locations': initial_filled_locations,
+                        # 'pass_count': pass_count, 'unresolved_ambiguity': not done,
+                        # 'special_xy': example.special_case_xy,
+                        # 'special_shape': example.special_case_shape,
+                        # 'lower_bound': example.lower_bound,
+                        # 'upper_bound': example.upper_bound,
+                        # 'min_shape': example.min_shape, 
+                        # 'initial_candidates': initial_candidates,
+                        # 'initial_filled_locations': initial_filled_locations,
                         'shape_hist': shape_hist,
                         'target_coords_1x1': target_coords_1x1,
                         'distract_coords_1x1': distract_coords_1x1
@@ -454,7 +495,13 @@ class DatasetGenerator():
             n_distract = np.zeros_like(nums)
             n_unique = np.empty_like(nums) * np.nan
 
-        data = [self.generate_one_example(nums[i], n_distract[i], n_unique[i], config) for i in range(n_examples)]
+        # data = [self.generate_one_example(nums[i], n_distract[i], n_unique[i], config) for i in range(n_examples)]
+        data = []
+        for i in range(n_examples):
+            if not i % 10:
+                print(f'Generating info for image {i}', end='\r')
+            example = self.generate_one_example(nums[i], n_distract[i], n_unique[i], config)
+            data.append(example)
         # data = [generate_one_example(nums[i], noise_level, pass_count_range, num_range, shapes_set, n_shapes, same) for i in range(n_examples)]
         df = pd.DataFrame(data)
         return df
@@ -474,20 +521,20 @@ class DatasetGenerator():
                 'numerosity_target': (["image"], np.stack(df['numerosity_target'].to_numpy())),
                 'numerosity_dist': (["image"], np.stack(df['numerosity_dist'].to_numpy())),
                 'num_unique': (["image"], np.stack(df['num_unique'].to_numpy())),
-                'num_min': (["image"], np.stack(df['num_min'].to_numpy())),
-                'predicted_num': (["image"], np.stack(df['predicted_num'].to_numpy())),
+                # 'num_min': (["image"], np.stack(df['num_min'].to_numpy())),
+                # 'predicted_num': (["image"], np.stack(df['predicted_num'].to_numpy())),
                 'locations': (["image", "slot"], np.stack(df['locations'].to_numpy())),
                 'locations_count': (["image", "slot"], np.stack(df['locations_count'].to_numpy())),
                 'locations_distract': (["image", "slot"], np.stack(df['locations_distract'].to_numpy())),
                 'object_coords': (["image", "glimpse", "coordinates"], np.stack(df['object_coords'].to_numpy())),
                 'shape_map': (["image", "slot"], np.stack(df['shape_map'].apply(get_stackable_shape_map))),
-                'pass_count': (["image"], np.stack(df['pass_count'].to_numpy())),
-                'unresolved_ambiguity': (["image"], np.stack(df['unresolved_ambiguity'].to_numpy())),
-                'special_xy': (["image"], np.stack(df['special_xy'].to_numpy())),
-                'special_shape': (["image"], np.stack(df['special_shape'].to_numpy())),
-                'lower_bound': (["image"], np.stack(df['lower_bound'].to_numpy())),
-                'upper_bound': (["image"], np.stack(df['upper_bound'].to_numpy())),
-                'min_shape': (["image"], np.stack(df['min_shape'].to_numpy())),
+                # 'pass_count': (["image"], np.stack(df['pass_count'].to_numpy())),
+                # 'unresolved_ambiguity': (["image"], np.stack(df['unresolved_ambiguity'].to_numpy())),
+                # 'special_xy': (["image"], np.stack(df['special_xy'].to_numpy())),
+                # 'special_shape': (["image"], np.stack(df['special_shape'].to_numpy())),
+                # 'lower_bound': (["image"], np.stack(df['lower_bound'].to_numpy())),
+                # 'upper_bound': (["image"], np.stack(df['upper_bound'].to_numpy())),
+                # 'min_shape': (["image"], np.stack(df['min_shape'].to_numpy())),
                 # 'initial_candidates': (["image"], df['initial_candidates']),
                 # 'initial_filled_locations': (["image"], df['initial_filled_locations']),
                 'shape_hist': (["image", "character"], np.stack(df['shape_hist'].to_numpy())),
@@ -630,7 +677,7 @@ class DatasetGenerator():
         return human_like_glimpse_coords
 
     def add_logpolar_glimpses_xr(self, data_pd, conf):
-        print('Adding logpolar glimpses...')
+        print('\n Adding logpolar glimpses...')
         if conf.policy == 'humanlike':
             # Load generative model of human fixations
             fix_dir = '/home/jessica/Dropbox/saccades/eye_tracking/'
@@ -658,8 +705,8 @@ class DatasetGenerator():
 
         # data['logpolar_pixels_humanlike'] = (("image", "glimpse", "row", "column"), np.empty((n_images, self.n_glimpses, 48, 42), dtype=np.float32))
             
-        data_pd['target_coords_scaled'] = None
-        data_pd['distract_coords_scaled'] = None
+        data_pd['target_coords_scaled'] = []
+        data_pd['distract_coords_scaled'] = []
         for i in range(n_images):
             if not i % 10:
                 print(f'Synthesizing image {i}', end='\r')
@@ -744,11 +791,12 @@ class DatasetGenerator():
                 data['glimpse_coords_humanlike'].loc[dict(image=i)] = humanlike_coords
                             
                 # Calculate shape proximity vector for humanlike glimpses
-                max_dist = 0.25
+                max_dist = self.max_dist
                 shape_coords = self.calculate_proximity(humanlike_coords, object_xy_coords, slots, row_pd.shape_map, max_dist)
                 data["symbolic_shape_humanlike"].loc[dict(image=i)] = shape_coords
                 
                 # Warp noised image to generate log-polar glimpses
+                # radius defaults to include the whole image np.sqrt(w/2**2 + h/2**2)
                 lp_glimpses = [warp_polar(noised, scaling=conf.scaling, output_shape=imsize_wbord, center=(y*48, x*48), mode='edge') for x, y in humanlike_coords]
             else:
                 # Warp noised image to generate log-polar glimpses
@@ -800,6 +848,8 @@ def main():
     parser.add_argument('--polar', action='store_true', default=False)
     parser.add_argument('--scaling', type=str, default='log')
     parser.add_argument('--constant_contrast', action='store_true', default=False)
+    parser.add_argument('--truncate', action='store_true', default=False)
+    parser.add_argument('--logscale', action='store_true', default=False)
     # parser.add_argument('--distract', action='store_true', default=False)
     # parser.add_argument('--distract_corner', action='store_true', default=False)
     # parser.add_argument('--random', action='store_true', default=False)
@@ -810,7 +860,13 @@ def main():
     same = 'same' if conf.same else ''
     challenge = f'_{conf.challenge}' if conf.challenge != '' else ''
     # solar = 'solarized_' if conf.solarize else ''
-    transform = 'polar_' if conf.polar else f'gw{conf.glimpse_wid}_'
+    if conf.polar:
+        if conf.scaling == 'log':
+            transform = 'logpolar_'
+        else:
+            transform = 'polar_'
+    else:
+        transform = f'gw{conf.glimpse_wid}_'
     shapes = ''.join(conf.shapes)
     if conf.no_glimpse:
         n_glimpses = 'nogl'
@@ -820,6 +876,8 @@ def main():
         n_glimpses = ''
     policy = conf.policy
     conf = process_args(conf)  # make sure this line is after 'shapes =' above
+    trunc = 'trunc' if conf.truncate else ''
+    logscale = '_logscale' if conf.logscale else ''
 
     # define_globals(conf)
     generator = DatasetGenerator(conf)
@@ -828,7 +886,7 @@ def main():
     data, data_pd = generator.add_logpolar_glimpses_xr(toydata, conf)
     
     dirname = 'datasets/image_sets'
-    fname_gw = f'{dirname}/num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}_{shapes}{same}{challenge}_grid{conf.grid}_policy-{policy}_lum{conf.luminances}_{transform}{n_glimpses}{conf.size}'
+    fname_gw = f'{dirname}/num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}{trunc}{logscale}_{shapes}{same}{challenge}_grid{conf.grid}_policy-{policy}_lum{conf.luminances}_{transform}{n_glimpses}{conf.size}'
     if not os.path.isdir(fname_gw):
             os.makedirs(fname_gw)
             
@@ -848,15 +906,19 @@ def main():
         
         plt.savefig(f'{fname_gw}/example_{idx}.png', bbox_inches='tight', dpi=300, transparent=True, pad_inches=0)
         plt.close() 
-    
-    # print(f'Saving {fname_gw}.pkl')
-    # data_pd.to_pickle(fname_gw + '.pkl')
+    # We want to save both netcdf (xarray) and pickle (pandas) because some variables can't be easily saved in xarray
+    # but we need xarray to be able to load/process the data within the limits of our RAM
+    print(f'Saving {fname_gw}.pkl')
+    data_pd.to_pickle(fname_gw + '.pkl')
+        
     # data = data.drop('shape_map')# drop before saving because netcdf can't handle dicts
+        
     # data['noised_image'] -= data['noised_image'].min()
     # data['noised_image'] /= data['noised_image'].max()
     # data['logpolar_pixels'] -= data['logpolar_pixels'].min()
     # data['logpolar_pixels'] /= data['logpolar_pixels'].max()
     # WE WANT TO PRESERVE DIFFERENCES IN LUMINANCE BETWEEN DIFFERENT DATASETS
+        
     print(f'Saving {fname_gw}.nc')
     data.to_netcdf(fname_gw + '.nc')
 
