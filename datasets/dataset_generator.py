@@ -705,8 +705,8 @@ class DatasetGenerator():
 
         # data['logpolar_pixels_humanlike'] = (("image", "glimpse", "row", "column"), np.empty((n_images, self.n_glimpses, 48, 42), dtype=np.float32))
             
-        data_pd['target_coords_scaled'] = []
-        data_pd['distract_coords_scaled'] = []
+        data_pd['target_coords_scaled'] = np.empty((n_images, 0)).tolist()
+        data_pd['distract_coords_scaled'] = np.empty((n_images, 0)).tolist()
         for i in range(n_images):
             if not i % 10:
                 print(f'Synthesizing image {i}', end='\r')
@@ -898,7 +898,8 @@ def main():
         target_loc = data_pd.iloc[idx].target_coords_scaled * [42.0, 48.0]
         plt.scatter(target_loc[:, 0], target_loc[:, 1], label='targets')
         distract_loc = data_pd.iloc[idx].distract_coords_scaled 
-        if distract_loc is not None:
+        # if distract_loc is not None:
+        if len(distract_loc) > 0:
             distract_loc = distract_loc * [42.0, 48.0]
             plt.scatter(distract_loc[:, 0], distract_loc[:, 1], label='distractor')
         plt.legend()
