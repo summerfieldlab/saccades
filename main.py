@@ -52,14 +52,15 @@ def main(config):
                 config.rep += 1
             elif ui == 's':
                 print(f'Skipping {base_name}.')
-                quit()
+                exit()
         elif config.if_exists == 'skip':
             print(f'{base_name} already exists. \n QUITTING.')
-            quit()
+            exit()
     config.base_name = base_name
-    loaders, test_xarray = choose_loader(config)
+    # loaders, test_xarray = choose_loader(config)
+    loaders = choose_loader(config)
     model = choose_model(config, model_dir)
-    trainer = choose_trainer(model, loaders, test_xarray, config)
+    trainer = choose_trainer(model, loaders, config)
 
     # Train model and save trained model
     model, results = trainer.train_network()
@@ -97,7 +98,7 @@ def main(config):
     df_train['accuracy dist'] = train_acc_dist
     df_train['accuracy all'] = train_acc_all
     df_train['epoch'] = np.arange(config.n_epochs + 1)
-    df_train['rnn iterations'] = config.n_iters
+    # df_train['rnn iterations'] = config.n_iters
     df_train['dataset'] = 'train'
     _, test_loaders = loaders
     # for ts, (test_shapes, test_lums) in enumerate(product(config.test_shapes, config.lum_sets)):
@@ -122,9 +123,11 @@ def main(config):
         df_test_list[ts]['epoch'] = np.arange(config.n_epochs + 1)
 
     np.save(f'{results_dir}/confusion_{base_name}', confs)
+    if config.save_batch_confusion:
+        np.save(f'{results_dir}/batch_confusion_{base_name}', trainer.batch_confusion)
 
     df_test = pd.concat(df_test_list)
-    df_test['rnn iterations'] = config.n_iters
+    # df_test['rnn iterations'] = config.n_iters
     df = pd.concat((df_train, df_test))
     df.to_pickle(f'{results_dir}/results_{base_name}.pkl')
     timer.stop_timer()

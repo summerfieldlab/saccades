@@ -37,8 +37,6 @@ def choose_model(config, model_dir):
     xy_sz = 48*42 if config.place_code else 2
     sigmoid = False if config.use_loss == 'num' else True
     mod_args = {'h_size': config.h_size, 'act': config.act,
-                # 'small_weights': config.small_weights, 
-                'outer':config.outer,
                 'detach': config.detach, 'format':config.shape_input,
                 'n_classes':n_classes, 'dropout': drop, 'grid': config.grid,
                 'n_shapes':n_shapes, 'ventral':ventral, 'train_on':config.train_on,
@@ -78,12 +76,12 @@ def choose_model(config, model_dir):
     elif 'logpolar' in shape_format:
         sh_sz = height * width
     else:
-        sh_sz = 6 * 6
+        sh_sz = 42 * 48
     if '2channel' in shape_format:
         sh_sz *= 2
     in_sz = xy_sz if train_on=='xy' else sh_sz if train_on =='shape' else sh_sz + xy_sz
-    if train_on == 'both' and mod_args['outer']:
-        in_sz += xy_sz * sh_sz
+    # if train_on == 'both' and mod_args['outer']:
+    #     in_sz += xy_sz * sh_sz
 
     # Initialize the selected model class
     if 'num_as_mapsum' in model_type:
@@ -126,7 +124,7 @@ def choose_model(config, model_dir):
             # model = RNNClassifier(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     elif model_type == 'recurrent_control':
         # in_sz = 21 * 27  # Size of the images
-        in_size = height * width
+        in_sz = height * width
         model = RNNClassifier2stream(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
     elif model_type == 'rnn_regression':
         model = RNNRegression(in_sz, hidden_size, map_size, output_size, **mod_args).to(device)
@@ -262,6 +260,7 @@ class FeedForward(nn.Module):
         super().__init__()
         self.output_size = output_size
         drop = kwargs['dropout'] if 'dropout' in kwargs.keys() else 0
+        self.sig = kwargs['sigmoid']
         self.layer1 = nn.Linear(in_size, hidden_size)
         self.layer2 = nn.Linear(hidden_size, hidden_size)
         self.layer3 = nn.Linear(hidden_size, hidden_size)
@@ -270,6 +269,7 @@ class FeedForward(nn.Module):
         self.layer6 = nn.Linear(map_size, output_size)
         self.drop_layer = nn.Dropout(p=drop)
         self.LReLU = nn.LeakyReLU(0.1)
+        self.Sigmoid = nn.Sigmoid()
 
     def forward(self, x):
         x = self.LReLU(self.layer1(x))
@@ -277,7 +277,11 @@ class FeedForward(nn.Module):
         x = self.LReLU(self.layer3(x))
         x = self.LReLU(self.layer4(x))
         x = self.drop_layer(x)
-        map = self.LReLU(self.layer5(x))
+        map = self.layer5(x) # want to return the map without any nonlinearity applied because that is what BCEWithLogitsLoss is expecting
+        if self.sig:
+            map_to_pass_on = self.Sigmoid(map) # Only apply sigmoid if the map loss is being optimised, otherwise it makes learning less stable for no reason, at least in RNNs. Maybe less so here.
+        else:
+            map_to_pass_on = self.LReLU(map)
         out = self.layer6(map)
         return out, map, x
 

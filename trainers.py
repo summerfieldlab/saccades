@@ -23,41 +23,51 @@ criterion_mse_noreduce = nn.MSELoss(reduction='none')
 model_dir = 'models/logpolar'
 results_dir = 'results/logpolar'
 fig_dir = 'figures/logpolar'
-
-def choose_trainer(model, loaders, test_xarray, config):
+eps=1e-10
+def choose_trainer(model, loaders, config):
     if config.model_type in ['cnn', 'bigcnn', 'mlp', 'unserial', 'map2num_decoder']:
         if 'distract' in config.challenge:
             print('Using FeedForwardTrainerDistract class')
-            trainer = FeedForwardTrainerDistract(model, loaders, test_xarray, config)
+            trainer = FeedForwardTrainerDistract(model, loaders, config)
         else:
             print('Using FeedForwardTrainer class')
-            trainer = FeedForwardTrainer(model, loaders, test_xarray, config)
+            trainer = FeedForwardTrainer(model, loaders, config)
     elif config.model_type == 'gated_mapper':
-        trainer = TorchRNNTrainer(model, loaders, test_xarray, config)
+        trainer = TorchRNNTrainer(model, loaders, config)
     elif 'recurrent_control' in config.model_type:
         if 'distract' in config.challenge:
-            trainer = RecurrentTrainerDistract(model, loaders, test_xarray, config)
+            trainer = RecurrentTrainerDistract(model, loaders, config)
         else:
-            trainer = RecurrentTrainer(model, loaders, test_xarray, config)
+            trainer = RecurrentTrainer(model, loaders, config)
     elif 'distract' in config.challenge:
         print('Using TrainerDistract class')
-        trainer = TrainerDistract(model, loaders, test_xarray, config)
+        trainer = TrainerDistract(model, loaders, config)
     else:
         print('Using Trainer class')
-        trainer = Trainer(model, loaders, test_xarray, config)
+        trainer = Trainer(model, loaders, config)
     return trainer
 
+def get_f1(map, locations):
+    """Calculate F1 Score"""
+    map_pred = torch.round(torch.sigmoid(map))
+    correct_map = map_pred.eq(locations)*1.0
+    positive = map_pred.eq(1.)*1.0
+    true_positive = torch.logical_and(correct_map, positive) * 1.0
+    precision = true_positive.sum(dim=0) / positive.sum(dim=0)
+    true = locations.sum(dim=0)
+    recall = true_positive.sum(dim=0)/true
+    f1 = 2*((precision * recall)/(precision + recall + eps))
+    return f1.nanmean().item()
+
 class Trainer():
-    def __init__(self, model, loaders, test_xarray, config):
+    def __init__(self, model, loaders, config):
         self.model = model
         self.train_loader, self.test_loaders = loaders
-        # self.valid_set = test_xarray['validation']
-        # self.OOD_set = test_xarray['OOD']
         self.config = config
         self.current_map_f1 = 0
         # Set up optimizer and scheduler
         if config.opt == 'SGD':
-            start_lr = 0.1
+            start_lr = 0.01
             mom = 0.9
             self.optimizer = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=config.wd)
             # scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)
@@ -73,7 +83,7 @@ class Trainer():
             print('Selected optimizer not implemented')
             exit()
 
-        self.shuffle = True
+        self.shuffle = True  # Whether the sequence of glimpses should be reshuffled on each epoch
 
         self.nclasses = self.model.output_size
         if 'unique' in config.challenge:
@@ -86,10 +96,13 @@ class Trainer():
             self.ticks = list(range(config.max_num - config.min_num + 1))
             self.ticklabels = [str(tick + config.min_num) for tick in self.ticks]
             self.to_subtract = config.min_num
+
         if config.save_act:
             # Load image metadata for testsets to be saved with activations
             self.image_metadata = [pd.read_pickle(f'{loader.filename}.pkl') for loader in self.test_loaders]
             # self.image_metadata = [xr.open_dataset(f'{loader.filename}.nc') for loader in self.test_loaders]
+        if config.save_batch_confusion:
+            self.batch_confusion = np.zeros((config.n_epochs, len(self.train_loader), self.nclasses, self.nclasses))
     
     def train_network(self):
         config = self.config
@@ -135,6 +148,7 @@ class Trainer():
         test_acc_dist = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
         test_acc_all = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
         test_results = pd.DataFrame()
+        confs = [[None for _ in self.test_loaders] for _ in range(n_epochs + 1)]
 
         ###### ASSESS PERFORMANCE BEFORE TRAINING #####
         ep_tr_loss, ep_tr_num_loss, tr_accuracy, ep_tr_sh_loss, ep_tr_map_loss, _, _, tr_map_acc = self.test(self.train_loader, 0)
@@ -147,7 +161,7 @@ class Trainer():
         shape_lum = product(config.test_shapes, config.lum_sets)
         # for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(self.test_loaders, shape_lum)):
         for ts, test_loader in enumerate(self.test_loaders):
-            epoch_te_loss, epoch_te_num_loss, te_accuracy, epoch_te_sh_loss, epoch_te_map_loss, epoch_df, _, te_map_acc = self.test(test_loader, 0)
+            epoch_te_loss, epoch_te_num_loss, te_accuracy, epoch_te_sh_loss, epoch_te_map_loss, epoch_df, conf, te_map_acc = self.test(test_loader, 0)
             epoch_df['train shapes'] = str(config.train_shapes)
             # epoch_df['test shapes'] = str(test_shapes)
             # epoch_df['test lums'] = str(lums)
@@ -163,6 +177,7 @@ class Trainer():
             test_count_map_loss[ts][0], test_full_map_loss[ts][0] = epoch_te_map_loss
             test_loss[ts][0] = epoch_te_loss
             test_sh_loss[ts][0] = epoch_te_sh_loss
+            confs[0][ts] = conf
         print(f'Before Training:')
         print(f'Train (Count/Dist/All) Num Loss={train_count_num_loss[0]:.4}/{train_dist_num_loss[0]:.4}/{train_all_num_loss[0]:.4} \t Accuracy={train_acc_count[0]:.3}%/{train_acc_dist[0]:.3}%/{train_acc_all[0]:.3}')
         print(f'Train (Count/Dist/All) Map Loss={train_count_map_loss[0]:.4}/{train_dist_map_loss[0]:.4}/{train_full_map_loss[0]:.4}')
@@ -170,7 +185,7 @@ class Trainer():
         print(f'Test (Count/Dist/All) Map Loss={test_count_map_loss[-1][0]:.4}/{test_dist_map_loss[-1][0]:.4}/{test_full_map_loss[-1][0]:.4}')
         
         savethisep = False
-        threshold = 51
+        threshold = 26 # 1 greater than the checkpoint we actually want because this is at the beginning of the loop atfer ep has incremented (but no additional training has occurred)
         if config.save_act:
             print('Saving untrained activations...')
             self.save_activations(self.model, self.test_loaders, base_name + '_init', config)
@@ -180,9 +195,12 @@ class Trainer():
             if tr_accuracy > threshold:
                 savethisep = True
                 threshold += 25 # This will be 51,76, and then 101 so we'll save at 51 and 76
-            if config.save_act and savethisep:
-                print(f'Saving midway activations at {threshold-26}% accuracy...')
-                self.save_activations(self.model, self.test_loaders, f'{base_name}_acc{threshold-26}', config)
+            if savethisep:
+                # Save confusion
+                np.save(f'{results_dir}/confusion_at_{threshold-26}_{base_name}', confs[ep - 1])
+                if config.save_act and savethisep:
+                    print(f'Saving activations at {threshold-26}% accuracy...')
+                    self.save_activations(self.model, self.test_loaders, f'{base_name}_acc{threshold-26}', config)
                 savethisep = False
             epoch_timer = Timer()
 
@@ -196,7 +214,7 @@ class Trainer():
             train_sh_loss[ep] = ep_tr_sh_loss
 
             ##### TEST ######
-            confs = [None for _ in self.test_loaders]
+           
             # shape_lum = product(config.test_shapes, config.lum_sets)
             for ts, test_loader in enumerate(self.test_loaders):
                 epoch_te_loss, epoch_te_num_loss, te_accuracy, epoch_te_sh_loss, epoch_te_map_loss, epoch_df, conf, te_map_acc = self.test(test_loader, ep)
@@ -216,15 +234,15 @@ class Trainer():
                 test_sh_loss[ts][ep] = epoch_te_sh_loss
                 test_losses = (test_loss, test_count_num_loss, test_count_map_loss, test_sh_loss)
                 test_accs = (test_acc_count, test_acc_map)
-                confs[ts] = conf
+                confs[ep][ts] = conf
 
             if not ep % 10 or ep == n_epochs - 1 or ep==1:
                 train_num_losses = (train_count_num_loss, train_dist_num_loss, train_all_num_loss)
                 train_map_losses = (train_count_map_loss, train_dist_map_loss, train_full_map_loss)
                 train_accs = (train_acc_count, train_acc_dist, train_acc_all, train_acc_map)
                 train_losses = (train_num_losses, train_map_losses, train_sh_loss)
-                # self.plot_performance(test_results, train_losses, train_accs, confs, ep + 1, config)
-                self.plot_performance_quick(test_losses, test_accs, train_losses, train_accs, confs, ep + 1, config)
+                # self.plot_performance(test_results, train_losses, train_accs, confs[ep], ep + 1, config)
+                self.plot_performance_quick(test_losses, test_accs, train_losses, train_accs, confs[ep], ep + 1, config)
             epoch_timer.stop_timer()
             if isinstance(test_loss, list):
                 print(f'Epoch {ep}. LR={self.optimizer.param_groups[0]["lr"]:.4}')
@@ -234,15 +252,25 @@ class Trainer():
                 # print(f'Test (Count/Dist/All) Num Loss={test_count_num_loss[-2][ep]:.4}/{test_dist_num_loss[-2][ep]:.4}/{test_all_num_loss[-2][ep]:.4} \t Accuracy={test_acc_count[-2][ep]:.3}%/{test_acc_dist[-2][ep]:.3}%/{test_acc_all[-2][ep]:.3}')
                 # print(f'Test (Count/Dist/All) Map Loss={test_count_map_loss[-2][ep]:.4}/{test_dist_map_loss[-2][ep]:.4}/{test_full_map_loss[-2][ep]:.4}')
                 # -2 to get ood_free
-                print(f'Train Loss={train_loss[ep]:.4} \t Accuracy={train_acc_count[ep]:.3}% \t Map Accuracy={train_acc_map[ep]:.3}%' )
-                print(f'Test Val (Free/Fixed) Loss={test_count_num_loss[0][ep]:.4}/{test_count_num_loss[1][ep]:.4} \t Accuracy={test_acc_count[0][ep]:.3}%/{test_acc_count[1][ep]:.3}%')
-                print(f'Test OOD (Free/Fixed) Loss={test_count_num_loss[2][ep]:.4}/{test_count_num_loss[3][ep]:.4} \t Accuracy={test_acc_count[2][ep]:.3}%/{test_acc_count[3][ep]:.3}%')
-                print(f'Test Val (Free/Fixed) Map Loss={test_count_map_loss[0][ep]:.4}/{test_count_map_loss[1][ep]:.4} ')
-                print(f'Test OOD (Free/Fixed) Map Loss={test_count_map_loss[2][ep]:.4}/{test_count_map_loss[3][ep]:.4} ')
-                if config.learn_shape:
-                    print(f'Test Val (Free/Fixed) Shape Loss={test_sh_loss[0][ep]:.4}/{test_sh_loss[1][ep]:.4} ')
-                    print(f'Test OOD (Free/Fixed) Shape Loss={test_sh_loss[2][ep]:.4}/{test_sh_loss[3][ep]:.4} ')
-
+                print(f'Train Loss={train_loss[ep]:.4} \t Accuracy={train_acc_count[ep]:.3}% \t Map F1={train_acc_map[ep]:.3}%' )
+                if config.human_sim:
+                    print(f'Test Val (Free/Fixed) Loss={test_count_num_loss[0][ep]:.4}/{test_count_num_loss[1][ep]:.4} \t Accuracy={test_acc_count[0][ep]:.3}%/{test_acc_count[1][ep]:.3}%')
+                    print(f'Test OOD (Free/Fixed) Loss={test_count_num_loss[2][ep]:.4}/{test_count_num_loss[3][ep]:.4} \t Accuracy={test_acc_count[2][ep]:.3}%/{test_acc_count[3][ep]:.3}%')
+                    if config.use_loss != 'num':
+                        print(f'Test Val (Free/Fixed) Map Loss={test_count_map_loss[0][ep]:.4}/{test_count_map_loss[1][ep]:.4} ')
+                        print(f'Test OOD (Free/Fixed) Map Loss={test_count_map_loss[2][ep]:.4}/{test_count_map_loss[3][ep]:.4} ')
+                    if config.learn_shape:
+                        print(f'Test Val (Free/Fixed) Shape Loss={test_sh_loss[0][ep]:.4}/{test_sh_loss[1][ep]:.4} ')
+                        print(f'Test OOD (Free/Fixed) Shape Loss={test_sh_loss[2][ep]:.4}/{test_sh_loss[3][ep]:.4} ')
+                else:
+                    print(f'Test Val Loss={test_count_num_loss[0][ep]:.4} \t Accuracy={test_acc_count[0][ep]:.3}%')
+                    print(f'Test OOD (Shape/Lum/Both) Loss={test_count_num_loss[1][ep]:.4}/{test_count_num_loss[2][ep]:.4}/{test_count_num_loss[3][ep]:.4} \t Accuracy={test_acc_count[1][ep]:.3}%/{test_acc_count[2][ep]:.3}%/{test_acc_count[3][ep]:.3}%')
+                    if config.use_loss != 'num':
+                        print(f'Test Val Map Loss={test_count_map_loss[0][ep]:.4}')
+                        print(f'Test OOD (Shape/Lum/Both) Map Loss={test_count_map_loss[1][ep]:.4}/{test_count_map_loss[2][ep]:.4}/{test_count_map_loss[3][ep]:.4} ')
+                    if config.learn_shape:
+                        print(f'Test Val Shape Loss={test_sh_loss[0][ep]:.4}')
+                        print(f'Test OOD (Shape/Lum/Both) Shape Loss={test_sh_loss[1][ep]:.4}/{test_sh_loss[2][ep]:.4}/{test_sh_loss[3][ep]:.4} ')
             # else:
             #     print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]:.4} \t (Train/Test) Num Loss={train_num_loss[ep]:.4}/{test_num_loss[ep]:.4}/ \t Accuracy={train_acc[ep]:.3}%/{test_acc[ep]:.3}% \t Shape loss: {train_sh_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
         
@@ -443,22 +471,17 @@ class Trainer():
             self.optimizer.step()
 
             correct += pred.eq(target.view_as(pred)).sum().item()
-            map_pred = torch.round(torch.sigmoid(map))
-            correct_map = map_pred.eq(locations)*1.0
-            positive = map_pred.eq(1.)*1.0
-            true_positive = torch.logical_and(correct_map, positive) * 1.0
-            precision = true_positive.sum(dim=0) / positive.sum(dim=0)
-            true = locations.sum(dim=0)
-            recall = true_positive.sum(dim=0)/true
-            f1 = 2*((precision * recall)/(precision + recall)) 
-            f1_sum += f1.nanmean().item()
-            
+            f1_sum += get_f1(map, locations)
             epoch_loss += loss.item()
             num_epoch_loss += num_loss.item()
             # if not isinstance(map_loss_to_add, int):
                 # map_loss_to_add = map_loss_to_add.item()
             count_map_epoch_loss += map_loss_to_add
-            # count_map_epoch_loss += count_map_loss_to_add 
+            # count_map_epoch_loss += count_map_loss_to_add
+            if self.config.save_batch_confusion:
+                conf_tr = self.calculate_confusion(target, pred)
+                conf_tr = np.divide(conf_tr, conf_tr.sum(axis=0), where=conf_tr.sum(axis=0)!=0 ) # normalise by number of instances of each class seen this minibatch
+                self.batch_confusion[ep-1, i] = conf_tr
             
         accuracy = 100. * (correct/len(loader.dataset))
         # map_acc = 100 * (correct_map/(len(loader)))
@@ -527,6 +550,10 @@ class Trainer():
             self.plot_confusion(confs)
             
     def plot_performance_quick(self, test_losses, test_accs, train_losses, train_acc, confs, ep, config):
+        if config.human_sim:
+            labels = ['valid free', 'valid fixed', 'ood free', 'ood fixed']
+        else:
+            labels = ['validation', 'ood_shape', 'ood_lum', 'ood_both']
         plt.style.use('tableau-colorblind10')
         base_name = config.base_name
         # test_results['accuracy'] = test_results['correct'].astype(int)*100
@@ -549,10 +576,10 @@ class Trainer():
         #             style='test lums', y='accuracy', alpha=0.7)
         # sns.lineplot(data=accuracy, x='epoch', hue='testset',
         #             style='viewing', y='accuracy', alpha=0.7)
-        ax1.plot(te_acc_count[0][:ep], label='Validation')
-        ax1.plot(te_acc_count[1][:ep], label='OODshape')
-        ax1.plot(te_acc_count[2][:ep], label='OODlum')
-        ax1.plot(te_acc_count[3][:ep], label='OODboth')
+        ax1.plot(te_acc_count[0][:ep], label=labels[0])
+        ax1.plot(te_acc_count[1][:ep], label=labels[1])
+        ax1.plot(te_acc_count[2][:ep], label=labels[2])
+        ax1.plot(te_acc_count[3][:ep], label=labels[3])
         ax1.set_title('Number Accuracy')
         ax1.legend()
         ax1.grid()
@@ -562,10 +589,10 @@ class Trainer():
         # ax1.set_ylabel('Accuracy on number task')
         
         ax2.plot(train_map_acc[1:ep], ':', color='green', label='training accuracy')
-        ax2.plot(te_acc_map[0][:ep], label='Validation')
-        ax2.plot(te_acc_map[1][:ep], label='OODshape')
-        ax2.plot(te_acc_map[2][:ep], label='OODlum')
-        ax2.plot(te_acc_map[3][:ep], label='OODboth')
+        ax2.plot(te_acc_map[0][:ep], label=labels[0])
+        ax2.plot(te_acc_map[1][:ep], label=labels[1])
+        ax2.plot(te_acc_map[2][:ep], label=labels[2])
+        ax2.plot(te_acc_map[3][:ep], label=labels[2])
         ax2.set_ylim([0, 102])
         ax2.grid()
         ax2.set_title('Map F1')
@@ -606,8 +633,16 @@ class Trainer():
             # confusion_matrix[label - self.to_subtract, prediction - self.to_subtract] += 1
             confusion_matrix[label, prediction] += 1
         return confusion_matrix
+    
+    def calculate_confusion(self, target, pred):
+        confusion_matrix = np.zeros((self.nclasses, self.nclasses))
+        for label, prediction in zip(target, pred):
+            # confusion_matrix[label - self.to_subtract, prediction - self.to_subtract] += 1
+            confusion_matrix[label, prediction] += 1
+        return confusion_matrix
 
     def plot_confusion(self, confs):
+        
         fig, axs = plt.subplots(2, 2, figsize=(19, 16))
         maxes = [mat.max() for mat in confs]
         vmax = max(maxes)
@@ -685,6 +720,10 @@ class Trainer():
         
     def make_loss_plot_quick(self, test_losses, train_losses, ep, config):
         plt.style.use('tableau-colorblind10')
+        if config.human_sim:
+            labels = ['valid free', 'valid fixed', 'ood free', 'ood fixed']
+        else:
+            labels = ['validation', 'ood_shape', 'ood_lum', 'ood_both']
         (test_loss, test_count_num_loss, test_count_map_loss, test_sh_loss) = test_losses
         (train_num_losses, train_map_losses, train_sh_loss) = train_losses
         (train_num_loss, _, _) = train_num_losses
@@ -692,10 +731,10 @@ class Trainer():
                 ## PLOT LOSS FOR BOTH OBJECTIVES
         fig, (ax1, ax2, ax3) = plt.subplots(3, 1, figsize=[9,9], sharex=True)
         # sns.lineplot(data=data, x='epoch', y='num loss', hue='pass count', ax=ax1)
-        ax1.plot(test_count_num_loss[0][:ep], label='validation loss', alpha=0.7)
-        ax1.plot(test_count_num_loss[1][:ep], label='ood_shape loss', alpha=0.7)
-        ax1.plot(test_count_num_loss[2][:ep], label='ood_lum loss', alpha=0.7)
-        ax1.plot(test_count_num_loss[3][:ep], label='ood_both loss', alpha=0.7)
+        ax1.plot(test_count_num_loss[0][:ep], label=f'{labels[0]} loss', alpha=0.7)
+        ax1.plot(test_count_num_loss[1][:ep], label=f'{labels[1]} loss', alpha=0.7)
+        ax1.plot(test_count_num_loss[2][:ep], label=f'{labels[2]} loss', alpha=0.7)
+        ax1.plot(test_count_num_loss[3][:ep], label=f'{labels[3]} loss', alpha=0.7)
         ax1.plot(train_num_loss[:ep], ':', color='green', label='training loss')
         ax1.set_ylabel('Number Loss')
         mt = config.model_type #+ '-nosymbol' if nonsymbolic else config.model_type
@@ -710,10 +749,10 @@ class Trainer():
         # plt.close()
 
         # sns.lineplot(data=data, x='epoch', y='map loss', hue='pass count', ax=ax2, estimator='mean')
-        ax2.plot(test_count_map_loss[0][:ep], label='validation loss', alpha=0.7)
-        ax2.plot(test_count_map_loss[1][:ep], label='ood_shape loss', alpha=0.7)
-        ax2.plot(test_count_map_loss[2][:ep], label='ood_lum loss', alpha=0.7)
-        ax2.plot(test_count_map_loss[3][:ep], label='ood_both loss', alpha=0.7)
+        ax2.plot(test_count_map_loss[0][:ep], label=f'{labels[0]} loss', alpha=0.7)
+        ax2.plot(test_count_map_loss[1][:ep], label=f'{labels[1]} loss', alpha=0.7)
+        ax2.plot(test_count_map_loss[2][:ep], label=f'{labels[2]} loss', alpha=0.7)
+        ax2.plot(test_count_map_loss[3][:ep], label=f'{labels[3]} loss', alpha=0.7)
         ax2.plot(train_count_map_loss[:ep], ':', color='green', label='training loss')
         ax2.legend()
         ax2.set_ylabel('Count Map Loss')
@@ -722,10 +761,10 @@ class Trainer():
         ax2.set_ylim([-0.05, ylim[1]])
         ax2.grid()
         
-        ax3.plot(test_sh_loss[0][:ep], label='validation loss', alpha=0.7)
-        ax3.plot(test_sh_loss[1][:ep], label='ood_shape loss', alpha=0.7)
-        ax3.plot(test_sh_loss[2][:ep], label='ood_lum loss', alpha=0.7)
-        ax3.plot(test_sh_loss[3][:ep], label='ood_both loss', alpha=0.7)
+        ax3.plot(test_sh_loss[0][:ep], label=f'{labels[0]} loss', alpha=0.7)
+        ax3.plot(test_sh_loss[1][:ep], label=f'{labels[1]} loss', alpha=0.7)
+        ax3.plot(test_sh_loss[2][:ep], label=f'{labels[2]} loss', alpha=0.7)
+        ax3.plot(test_sh_loss[3][:ep], label=f'{labels[3]} loss', alpha=0.7)
         ax3.plot(train_sh_loss[:ep], ':', color='green', label='training loss')
         ax3.legend()
         ax3.set_ylabel('Shape Loss')
@@ -738,8 +777,6 @@ class Trainer():
         plt.savefig(f'{fig_dir}/loss_{config.base_name}.png', dpi=300)
         plt.close()
         
-        
-
     @torch.no_grad()
     def save_activations(self, model, test_loaders, basename, config):
         """
@@ -759,8 +796,11 @@ class Trainer():
         softmax = nn.Softmax(dim=1)
         shape_lum = product(config.test_shapes, config.lum_sets)
         n_glimpses = config.n_glimpses
-        test_names = ['validation', 'new-luminances', 'new-shapes', 'new_both']
-        # test_names = ['val_free', 'val_fixed', 'ood_free', 'ood_fixed']
+        if config.human_sim:
+            test_names = ['val_free', 'val_fixed', 'ood_free', 'ood_fixed']
+        else:
+            test_names = ['validation', 'new-luminances', 'new-shapes', 'new_both']
+       
         sets_to_save = [3] 
         # 
         for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(test_loaders, shape_lum)):
@@ -881,8 +921,9 @@ class Trainer():
 
 
 class TrainerDistract(Trainer):
-    def __init__(self, model, loaders, test_xarray, config):
-        super().__init__(model, loaders, test_xarray, config)
+    def __init__(self, model, loaders, config):
+        super().__init__(model, loaders, config)
+        self.batch_confusion = np.zeros((config.n_epochs, len(loaders[0]), 3, self.nclasses, self.nclasses))
     
     def update_confusion(self, target, pred, num_dist, confusion_matrix):
         if confusion_matrix is None:
@@ -927,8 +968,8 @@ class TrainerDistract(Trainer):
 
 
 class FeedForwardTrainer(Trainer):
-    def __init__(self, model, loaders, test_xarray, config):
-        super().__init__(model, loaders, test_xarray, config)
+    def __init__(self, model, loaders, config):
+        super().__init__(model, loaders, config)
     
     @torch.no_grad()
     def test(self, loader, ep):
@@ -975,7 +1016,8 @@ class FeedForwardTrainer(Trainer):
             test_results = pd.concat((test_results, batch_results))
 
             n_correct += correct.sum().item()
-            correct_map += (torch.round(torch.sigmoid(map)).eq(all_loc)*1.0).mean().item()
+            # correct_map += (torch.round(torch.sigmoid(map)).eq(all_loc)*1.0).mean().item()
+            correct_map += get_f1(map, all_loc)
             epoch_loss += loss.mean().item()
             num_epoch_loss += num_loss.mean().item()
             count_map_epoch_loss += map_loss_to_add
@@ -1020,19 +1062,25 @@ class FeedForwardTrainer(Trainer):
             losses, pred = self.get_losses(pred_num, target, map, locations, ep, noreduce)
             loss, num_loss, _, map_loss_to_add = losses
             loss.backward()
+
             self.optimizer.step()
 
             correct += pred.eq(target.view_as(pred)).sum().item()
-            correct_map += (torch.round(torch.sigmoid(map)).eq(locations)*1.0).mean().item()
+            # correct_map += (torch.round(torch.sigmoid(map)).eq(locations)*1.0).mean().item()
+            correct_map += get_f1(map, locations)
             epoch_loss += loss.item()
             num_epoch_loss += num_loss.item()
             # if not isinstance(map_loss_to_add, int):
                 # map_loss_to_add = map_loss_to_add.item()
             count_map_epoch_loss += map_loss_to_add
             # count_map_epoch_loss += count_map_loss_to_add
+            if self.config.save_batch_confusion:
+                conf_tr = self.calculate_confusion(target, pred)
+                conf_tr = np.divide(conf_tr, conf_tr.sum(axis=0), where=conf_tr.sum(axis=0)!=0 ) # normalise by number of instances of each class seen this minibatch
+                self.batch_confusion[ep-1, i] = conf_tr
         
-        accuracy = 100. * (correct/len(loader.dataset))
-        map_acc = 100 * (correct_map/(len(loader)))
+        accuracy = 100. * (correct/len(loader.dataset)) # scale by number of images
+        map_acc = 100 * (correct_map/(len(loader))) # scale by number of minibatches
         epoch_loss /= i+1
         if self.scheduler is not None:
             self.scheduler.step() # for scheduler that is not metric dependent
@@ -1066,7 +1114,7 @@ class FeedForwardTrainer(Trainer):
         n_glimpses = config.n_glimpses
         test_names = ['validation', 'new-luminances', 'new-shapes', 'new_both']
         # test_names = ['val_free', 'val_fixed', 'ood_free', 'ood_fixed']
-        sets_to_save = [1, 3] # also save acts of validation set if baseline model
+        sets_to_save = [0, 3] # also save acts of validation set if baseline model
         # 
         for ts, (test_loader, (test_shapes, lums)) in enumerate(zip(test_loaders, shape_lum)):
         # only save new-both test set for now
@@ -1126,13 +1174,14 @@ class FeedForwardTrainer(Trainer):
             savemat(savename + '.mat', to_save)
     
 class FeedForwardTrainerDistract(FeedForwardTrainer, TrainerDistract):
-    def __init__(self, model, loaders, test_xarray, config):
-        super().__init__(model, loaders, test_xarray, config)
+    def __init__(self, model, loaders, config):
+        super().__init__(model, loaders, config)
     
     
 class RecurrentTrainer(Trainer):
-    def __init__(self, model, loaders, test_xarray, config):
-        super().__init__(model, loaders, test_xarray, config)
+    """For nonglimpsing recurrent models that process the whole image."""
+    def __init__(self, model, loaders, config):
+        super().__init__(model, loaders, config)
     
     @torch.no_grad()
     def test(self, loader, ep):
@@ -1140,6 +1189,7 @@ class RecurrentTrainer(Trainer):
         noreduce = True
         config = self.config
         n_correct = 0
+        correct_map = 0
         epoch_loss = 0
         num_epoch_loss = 0
         count_map_epoch_loss = 0
@@ -1156,7 +1206,7 @@ class RecurrentTrainer(Trainer):
 
             for t in range(n_glimpses):
                 pred_num, _, map, hidden, _, _ = self.model(input, hidden)
-            pred_num, map, _ = self.model(input)
+            # pred_num, map, _ = self.model(input)
 
             losses, pred = self.get_losses(pred_num, target, map, all_loc, ep, noreduce)
             loss, num_loss, map_loss, map_loss_to_add = losses
@@ -1185,6 +1235,8 @@ class RecurrentTrainer(Trainer):
             test_results = pd.concat((test_results, batch_results))
 
             n_correct += correct.sum().item()
+            # correct_map += (torch.round(torch.sigmoid(map)).eq(all_loc)*1.0).mean().item()
+            correct_map += get_f1(map, all_loc)
             epoch_loss += loss.mean().item()
             num_epoch_loss += num_loss.mean().item()
             count_map_epoch_loss += map_loss_to_add
@@ -1197,6 +1249,7 @@ class RecurrentTrainer(Trainer):
         # test_results['map loss'].mean()
 
         accuracy = 100. * (n_correct/len(loader.dataset))
+        map_acc = 100 * (correct_map/(len(loader)))
         epoch_loss /= len(loader)
         num_epoch_loss /= len(loader)
         # map_epoch_loss /= len(loader)
@@ -1208,12 +1261,13 @@ class RecurrentTrainer(Trainer):
         map_epoch_loss = (count_map_epoch_loss, -1)
         shape_epoch_loss = -1
         return (epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss,
-                map_epoch_loss, test_results, confusion_matrix)
+                map_epoch_loss, test_results, confusion_matrix, map_acc)
     
     def train(self, loader, ep):
         self.model.train()
         noreduce = False
         correct = 0
+        correct_map = 0
         epoch_loss = 0
         num_epoch_loss = 0
         # map_epoch_loss = 0
@@ -1233,9 +1287,20 @@ class RecurrentTrainer(Trainer):
             losses, pred = self.get_losses(pred_num, target, map, locations, ep, noreduce)
             loss, num_loss, _, map_loss_to_add = losses
             loss.backward()
+            # Debugging code to monitor gradient norm at each layer
+            # if i == len(loader) - 1:
+            #     for name, layer in self.model.named_parameters():
+            #         if layer.grad is not None:
+            #             print(f'{name}:\t\t{layer.grad.norm().item():.4f}')
+            #         else:
+            #             print(f'{name}:\t\tgrad is None')
+            
+            nn.utils.clip_grad_norm_(self.model.parameters(), 2)
             self.optimizer.step()
 
             correct += pred.eq(target.view_as(pred)).sum().item()
+            # correct_map += (torch.round(torch.sigmoid(map)).eq(locations)*1.0).mean().item()
+            correct_map += get_f1(map, locations)
             epoch_loss += loss.item()
             num_epoch_loss += num_loss.item()
             # if not isinstance(map_loss_to_add, int):
@@ -1244,6 +1309,7 @@ class RecurrentTrainer(Trainer):
             # count_map_epoch_loss += count_map_loss_to_add
         
         accuracy = 100. * (correct/len(loader.dataset))
+        map_acc = 100 * (correct_map/(len(loader)))
         epoch_loss /= i+1
         if self.scheduler is not None:
             self.scheduler.step()
@@ -1254,12 +1320,12 @@ class RecurrentTrainer(Trainer):
         count_map_epoch_loss /= i+1
         map_epoch_loss = (count_map_epoch_loss, -1)
         shape_epoch_loss = -1
-        return epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss, map_epoch_loss
+        return epoch_loss, num_epoch_loss, accuracy, shape_epoch_loss, map_epoch_loss, map_acc
 
 
 class RecurrentTrainerDistract(RecurrentTrainer, TrainerDistract):
-    def __init__(self, model, loaders, test_xarray, config):
-        super().__init__(model, loaders, test_xarray, config)
+    def __init__(self, model, loaders, config):
+        super().__init__(model, loaders, config)
 
 class TorchRNNTrainer(Trainer):
     @torch.no_grad()
@@ -1401,8 +1467,8 @@ class TorchRNNTrainer(Trainer):
             self.optimizer.step()
 
             correct += pred.eq(target.view_as(pred)).sum().item()
-            correct_map += (torch.round(torch.sigmoid(map)).eq(locations)*1.0).mean().item()
-            
+            # correct_map += (torch.round(torch.sigmoid(map)).eq(locations)*1.0).mean().item()
+            correct_map += get_f1(map, locations)
             
             epoch_loss += loss.item()
             num_epoch_loss += num_loss.item()
