@@ -1,6 +1,7 @@
 import os
 import gc
 from itertools import product
+import random
 import numpy as np
 import pandas as pd
 import xarray as xr
@@ -12,9 +13,9 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     """If specified dataset already exists, load it.
     """
     noise_level = config.noise_level
-    min_pass_count = config.min_pass
-    max_pass_count = config.max_pass
-    pass_count_range = (min_pass_count, max_pass_count)
+    # min_pass_count = config.min_pass
+    # max_pass_count = config.max_pass
+    # pass_count_range = (min_pass_count, max_pass_count)
     min_num = config.min_num
     max_num = config.max_num
     num_range = (min_num, max_num)
@@ -80,14 +81,14 @@ def get_dataset(size, shapes_set, config, lums, solarize):
 
 def get_loader(dataset, config, batch_size=None, gaze=None):
     train_on = config.train_on
-    cross_entropy_loss = config.cross_entropy
-    outer = config.outer
     shape_format = config.shape_input
     model_type = config.model_type
     target_type = config.target_type
     n_glimpses = config.n_glimpses
     convolutional = True if config.model_type in ['cnn', 'bigcnn'] else False
     nex = len(dataset.image)
+    half_idx = list(range(nex))  # for mixed datasets with half free half fixed
+    random.shuffle(half_idx)
     ### NUMBER LABEL ###
     if target_type == 'all':
         total_num = np.sum(dataset['locations'].values, axis=1)
@@ -206,21 +207,23 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
                     # glimpse_array /= glimpse_array.max()
                     nex, n_gl, h, w = glimpse_array.shape
                     assert n_glimpses == n_gl
-                    
                         
                     # glimpse_array -= glimpse_array.min()
                     # glimpse_array /= glimpse_array.max()
                     print(f'pixel range: {glimpse_array.min()}-{glimpse_array.max()}')
                     shape_input = torch.tensor(glimpse_array)
 
-                elif 'mixed' in shape_format:
-                    # Take first half free viewing, second half centre fixated
+                elif gaze == 'mixed':
+                    # Take one half free viewing, second half centre fixated
+                    # select halves randomly so as to not indtroduce biases
+                    
                     glimpse_array = dataset['logpolar_pixels'].values
                     # glimpse_array -= glimpse_array.min()
                     # glimpse_array /= glimpse_array.max()
                     nex, n_gl, h, w = glimpse_array.shape
+
                     assert n_glimpses == n_gl
-                    free = glimpse_array[::2]
+                    free = glimpse_array[half_idx[::2]]
                     del glimpse_array
                     free = torch.tensor(free)
                     
@@ -228,15 +231,15 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
                     logpolar_centre = dataset['centre_fixation'].values
                     # logpolar_centre -= logpolar_centre.min()
                     # logpolar_centre /= logpolar_centre.max()
-                    fixed = logpolar_centre[1::2]
+                    fixed = logpolar_centre[half_idx[1::2]]
                     nex2, h, w = fixed.shape
                     del logpolar_centre
                     fixed = torch.tensor(fixed).unsqueeze(1).expand(nex2, n_glimpses, h, w)
                     
                     # Merge free and fixed
                     shape_input = torch.empty((nex, n_gl, h, w))
-                    shape_input[::2] = free
-                    shape_input[1::2] = fixed
+                    shape_input[half_idx[::2]] = free
+                    shape_input[half_idx[1::2]] = fixed
 
                 else:
                     glimpse_array = dataset['logpolar_pixels'].values
@@ -288,8 +291,21 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
                     except:
                         xy_array = dataset['humanlike_coords'].values
                 else:
-
-                    xy_array = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
+                    if 'no_covert' in gaze:
+                        coords = dataset['glimpse_coords_scaled'].values
+                        tile_shape = list(coords.shape)
+                        tile_shape[-1] -= 1
+                        if 'fixed' in gaze:
+                            # just repeat the center coordinate over and over
+                            xy_array = np.tile([42//2, 48//2], tile_shape)
+                        elif 'mixed' in gaze:
+                            free = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
+                            fixed = np.tile([42//2, 48//2], tile_shape)
+                            xy_array = np.empty(coords.shape)
+                            xy_array[half_idx[::2]] = free[half_idx[::2]]
+                            xy_array[half_idx[1::2]] = fixed[half_idx[1::2]]
+                    else:
+                        xy_array = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
                 
                     
                 xy = torch.tensor(xy_array).float()
@@ -569,24 +585,91 @@ def choose_loader(config):
     lums1 = [0.1, 0.4, 0.7]
     lums2 = [0.3, 0.6, 0.9]
     lums12 = [0.1, 0.4, 0.7, 0.3, 0.6, 0.9]
-    if config.constant_contrast:
+    if config.human_sim:
         train_lums = lums2
         val_lums = lums2
         ood_lums = lums1
+        trainset = get_dataset(train_size, config.shapestr, config, train_lums, solarize=config.solarize)
+        validation_set = get_dataset(test_size, config.shapestr, config, val_lums, solarize=config.solarize)
+        OODboth_set = get_dataset(test_size, config.testshapestr[-1], config, ood_lums, solarize=config.solarize)
+        # test_xarray = {'validation': validation_set, "OODboth":OODboth_set}
+        fixed_gaze = 'fixed no_covert' if 'no_covert' in config.shape_input else 'fixec'
+        val_free = get_loader(validation_set, config, batch_size=2500, gaze='free')
+        val_free.testset = 'validation'
+        val_free.viewing = 'free'
+        val_free.shapes = config.shapestr
+        val_free.lums = [0.1, 0.4, 0.7]
+
+        val_fixed = get_loader(validation_set, config, batch_size=2500, gaze=fixed_gaze)
+        val_fixed.testset = 'validation'
+        val_fixed.viewing = 'fixed'
+        val_fixed.shapes = config.shapestr
+        val_fixed.lums = [0.1, 0.4, 0.7]
+
+        
+        ood_free = get_loader(OODboth_set, config, batch_size=2500, gaze='free')
+        ood_free.testset = 'ood'
+        ood_free.viewing = 'free'
+        ood_free.shapes = config.testshapestr[-1]
+        ood_free.lums = config.lum_sets[-1]
+
+        ood_fixed = get_loader(OODboth_set, config, batch_size=2500, gaze=fixed_gaze)
+        ood_fixed.testset = 'ood'
+        ood_fixed.viewing = 'fixed'
+        ood_fixed.shapes = config.testshapestr[-1]
+        ood_fixed.lums = config.lum_sets[-1]
+    
+        test_loaders = [val_free, val_fixed, ood_free, ood_fixed]
     else: 
         train_lums = lums1
         val_lums = lums1
         ood_lums = lums2
-    # Get xarrays
-    trainset = get_dataset(train_size, config.shapestr, config, train_lums, solarize=config.solarize)
-    # testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
-    validation_set = get_dataset(test_size, config.shapestr, config, val_lums, solarize=config.solarize)
-    
-    OODshape_set = get_dataset(test_size, config.testshapestr[-1], config, val_lums, solarize=config.solarize)
-    OODlum_set = get_dataset(test_size, config.shapestr, config, ood_lums, solarize=config.solarize)
-    OODboth_set = get_dataset(test_size, config.testshapestr[-1], config, ood_lums, solarize=config.solarize)
-    
-    test_xarray = {'validation': validation_set, 'OODshape': OODshape_set, 'OODlum':OODlum_set, "OODboth":OODboth_set}
+        
+        # Get xarrays
+        trainset = get_dataset(train_size, config.shapestr, config, train_lums, solarize=config.solarize)
+        # testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
+        validation_set = get_dataset(test_size, config.shapestr, config, val_lums, solarize=config.solarize)
+        
+        OODshape_set = get_dataset(test_size, config.testshapestr[-1], config, val_lums, solarize=config.solarize)
+        OODlum_set = get_dataset(test_size, config.shapestr, config, ood_lums, solarize=config.solarize)
+        OODboth_set = get_dataset(test_size, config.testshapestr[-1], config, ood_lums, solarize=config.solarize)
+        
+        # test_xarray = {'validation': validation_set, 'OODshape': OODshape_set, 'OODlum':OODlum_set, "OODboth":OODboth_set}
+
+         # Large batch size for test loader to test quicker
+        val_free = get_loader(validation_set, config, batch_size=2500, gaze='free')
+        val_free.testset = 'validation'
+        val_free.viewing = 'free'
+        val_free.shapes = config.shapestr
+        val_free.lums = [0.1, 0.4, 0.7]
+        ood_shape_free = get_loader(OODshape_set, config, batch_size=2500, gaze='free')
+        ood_shape_free.testset = 'ood'
+        ood_shape_free.viewing = 'free'
+        ood_shape_free.shapes = config.testshapestr[-1]
+        ood_shape_free.lums = val_lums
+        
+        ood_lum_free = get_loader(OODlum_set, config, batch_size=2500, gaze='free')
+        ood_lum_free.testset = 'ood'
+        ood_lum_free.viewing = 'free'
+        ood_lum_free.shapes = config.shapestr
+        ood_lum_free.lums = config.lum_sets[-1]
+        
+        ood_both_free = get_loader(OODboth_set, config, batch_size=2500, gaze='free')
+        ood_both_free.testset = 'ood'
+        ood_both_free.viewing = 'free'
+        ood_both_free.shapes = config.testshapestr[-1]
+        ood_both_free.lums = config.lum_sets[-1]
+        test_loaders = [val_free, ood_shape_free, ood_lum_free, ood_both_free]
+
+    if 'mixed' in config.shape_input:
+        if 'no_covert' in config.shape_input:
+            traingaze = 'mixed no_covert'
+        else:
+            traingaze = 'mixed'
+    else:
+        traingaze = 'free'
+    # traingaze = 'mixed' if 'mixed' in config.shape_input else 'free'
+    train_loader = get_loader(trainset, config, gaze=traingaze)
     # except:
     #     config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
     #     trainset = get_dataset(train_size, config.shapestr, config, [0.0, 0.5, 1.0], solarize=config.solarize)
@@ -594,52 +677,10 @@ def choose_loader(config):
     
     # train_loader = get_loader(trainset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type, target_type)
     # test_loaders = [get_loader(testset, config.train_on, config.cross_entropy, config.outer, config.shape_input, model_type, target_type) for testset in testsets]
-    train_loader = get_loader(trainset, config)
-    # Large batch size for test loader to test quicker
+ 
+   
     # test_loaders = [get_loader(testset, config, batch_size=2500) for testset in testsets]
-    val_free = get_loader(validation_set, config, batch_size=2500, gaze='free')
-    val_free.testset = 'validation'
-    val_free.viewing = 'free'
-    val_free.shapes = config.shapestr
-    val_free.lums = [0.1, 0.4, 0.7]
     
-    # val_fixed = get_loader(validation_set, config, batch_size=2500, gaze='fixed')
-    # val_fixed.testset = 'validation'
-    # val_fixed.viewing = 'fixed'
-    # val_fixed.shapes = config.shapestr
-    # val_fixed.lums = [0.1, 0.4, 0.7]
-    
-    # ood_free = get_loader(OOD_set, config, batch_size=2500, gaze='free')
-    # ood_free.testset = 'ood'
-    # ood_free.viewing = 'free'
-    # ood_free.shapes = config.testshapestr[-1]
-    # ood_free.lums = config.lum_sets[-1]
-    ood_shape_free = get_loader(OODshape_set, config, batch_size=2500, gaze='free')
-    ood_shape_free.testset = 'ood'
-    ood_shape_free.viewing = 'free'
-    ood_shape_free.shapes = config.testshapestr[-1]
-    ood_shape_free.lums = val_lums
-    
-    ood_lum_free = get_loader(OODlum_set, config, batch_size=2500, gaze='free')
-    ood_lum_free.testset = 'ood'
-    ood_lum_free.viewing = 'free'
-    ood_lum_free.shapes = config.shapestr
-    ood_lum_free.lums = config.lum_sets[-1]
-    
-    ood_both_free = get_loader(OODboth_set, config, batch_size=2500, gaze='free')
-    ood_both_free.testset = 'ood'
-    ood_both_free.viewing = 'free'
-    ood_both_free.shapes = config.testshapestr[-1]
-    ood_both_free.lums = config.lum_sets[-1]
-    
-    # ood_fixed = get_loader(OOD_set, config, batch_size=2500, gaze='fixed')
-    # ood_fixed.testset = 'ood'
-    # ood_fixed.viewing = 'fixed'
-    # ood_fixed.shapes = config.testshapestr[-1]
-    # ood_fixed.lums = config.lum_sets[-1]
-    
-    # test_loaders = [val_free, val_fixed, ood_free, ood_fixed]
-    test_loaders = [val_free, ood_shape_free, ood_lum_free, ood_both_free]
     
     loaders = [train_loader, test_loaders]
-    return loaders, test_xarray
+    return loaders  #, test_xarray
