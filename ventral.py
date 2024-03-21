@@ -169,9 +169,6 @@ def load_data(config, device):
     # Prepare datasets and torch dataloaders
     train_size = config.train_size
     test_size = config.test_size
-    model_type = config.model_type
-    target_type = config.target_type
-    sort = config.sort
     # lums = [0.1, 0.2, 0.4, 0.5, 0.6, 0.8, 0.9]
     lums = config.lums
     trainframe = get_dataframe(train_size, config.shapestr, config, lums, solarize=True)
@@ -180,18 +177,7 @@ def load_data(config, device):
     testframe = get_dataframe(test_size, config.testshapestr[0], config, lums, solarize=True)
     # testset = get_dataset_pd(testframe, config, device)
     testset = get_dataset_xr(testframe, config, device)
-    # try:
-    #     config.lum_sets = [[0.1, 0.5, 0.9], [0.2, 0.4, 0.6, 0.8]]
-    #     trainframe = get_dataframe(train_size, config.shapestr, config, [0.1, 0.5, 0.9], solarize=config.solarize)
-    #     trainset = get_dataset(trainframe, model_type, target_type)
-    #     testframes = [get_dataframe(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
-    #     testsets = [get_dataset(frame, model_type, target_type) for frame in testframes]
-    # except:
-    #     config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
-    #     trainframe = get_dataframe(train_size, config.shapestr, config, [0.0, 0.5, 1.0], solarize=config.solarize)
-    #     trainset = get_dataset(trainframe, model_type, target_type)
-    #     testframes = [get_dataframe(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
-    #     testsets = [get_dataset(frame, model_type, target_type) for frame in testframes]
+
     return trainset, testset
 
 def te_accuracy(net, cla, device="cpu"):
@@ -571,10 +557,10 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
         DataFrame: _description_
     """
     noise_level = config.noise_level
-    min_pass_count = config.min_pass
-    max_pass_count = config.max_pass
+    # min_pass_count = config.min_pass
+    # max_pass_count = config.max_pass
     n_glimpses = config.n_glimpses
-    pass_count_range = (min_pass_count, max_pass_count)
+    # pass_count_range = (min_pass_count, max_pass_count)
     min_num = config.min_num
     max_num = config.max_num
     num_range = (min_num, max_num)
@@ -634,9 +620,8 @@ def get_dataset_pd(dataframe, config, device):
 
     Args:
         dataset (DataFrame): _description_
-        shape_format (str): _description_
-        model_type (str): _description_
-        target_type (str): _description_
+        config (Namespace): _description_
+        device (str): _description_
 
     Returns:
         DataLoader: _description_
@@ -723,10 +708,9 @@ def get_dataset_xr(dataframe, config, device):
     """_summary_
 
     Args:
-        dataset (DataFrame): _description_
-        shape_format (str): _description_
-        model_type (str): _description_
-        target_type (str): _description_
+        dataframe (DataFrame): _description_
+        config (Namespace): _description_
+        device (str): _description_
 
     Returns:
         DataLoader: _description_
@@ -848,7 +832,6 @@ def get_model(config, device):
 def get_config():
     parser = argparse.ArgumentParser(description='PyTorch network settings')
     parser.add_argument('--model_type', type=str, default='mlp', help='mlp or cnn')
-    parser.add_argument('--target_type', type=str, default='multi', help='all or notA ')
 
     parser.add_argument('--noise_level', type=float, default=1.6)
     parser.add_argument('--train_size', type=int, default=100000)
