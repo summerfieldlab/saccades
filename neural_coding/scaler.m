@@ -1,0 +1,1 @@
+function output = scaler(input,minmaxval)% output = Scale(input)% Perform an affine scaling to put data in range [0-1].r = ranger(input);minval=r(1); maxval=r(2);output = (input - minval) ./ (maxval-minval);if nargin>1;    output=minmaxval(1)+(output.*(minmaxval(2)-minmaxval(1)));end
