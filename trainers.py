@@ -133,7 +133,8 @@ class Trainer():
         train_acc_dist = np.zeros((n_epochs + 1,))
         train_acc_all = np.zeros((n_epochs + 1,))
         train_acc_map = np.zeros((n_epochs + 1,))
-        n_test_sets = len(config.test_shapes) * len(config.lum_sets)
+        # n_test_sets = len(config.test_shapes) * len(config.lum_sets)
+        n_test_sets = len(self.test_loaders)
         test_loss = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
         # test_map_loss = [np.zeros((n_epochs,)) for _ in range(n_test_sets)]
         test_full_map_loss = [np.zeros((n_epochs + 1,)) for _ in range(n_test_sets)]
@@ -242,9 +243,9 @@ class Trainer():
                 train_accs = (train_acc_count, train_acc_dist, train_acc_all, train_acc_map)
                 train_losses = (train_num_losses, train_map_losses, train_sh_loss)
                 # self.plot_performance(test_results, train_losses, train_accs, confs[ep], ep + 1, config)
-                self.plot_performance_quick(test_losses, test_accs, train_losses, train_accs, confs[ep], ep + 1, config)
+                # self.plot_performance_quick(test_losses, test_accs, train_losses, train_accs, confs[ep], ep + 1, config)
             epoch_timer.stop_timer()
-            if isinstance(test_loss, list):
+            if isinstance(test_loss, list) and len(test_loss) > 3:
                 print(f'Epoch {ep}. LR={self.optimizer.param_groups[0]["lr"]:.4}')
                 # print(f'Train (Count/Dist/All) Num Loss={train_count_num_loss[ep]:.4}/{train_dist_num_loss[ep]:.4}/{train_all_num_loss[ep]:.4} \t Accuracy={train_acc_count[ep]:.3}%/{train_acc_dist[ep]:.3}%/{train_acc_all[ep]:.3}')
                 # Shape loss: {train_sh_loss[ep]:.4}')
@@ -271,6 +272,10 @@ class Trainer():
                     if config.learn_shape:
                         print(f'Test Val Shape Loss={test_sh_loss[0][ep]:.4}')
                         print(f'Test OOD (Shape/Lum/Both) Shape Loss={test_sh_loss[1][ep]:.4}/{test_sh_loss[2][ep]:.4}/{test_sh_loss[3][ep]:.4} ')
+            elif isinstance(test_loss, list) and len(test_loss) == 2:
+                print(f'Train Loss={train_loss[ep]:.4} \t Accuracy={train_acc_count[ep]:.3}% \t Map F1={train_acc_map[ep]:.3}%' )
+                print(f'Test Diff Loss={test_count_num_loss[0][ep]:.4} \t Accuracy={test_acc_count[0][ep]:.3}%')
+                print(f'Test Same Loss={test_count_num_loss[1][ep]:.4} \t Accuracy={test_acc_count[1][ep]:.3}%')
             # else:
             #     print(f'Epoch {ep}. LR={optimizer.param_groups[0]["lr"]:.4} \t (Train/Test) Num Loss={train_num_loss[ep]:.4}/{test_num_loss[ep]:.4}/ \t Accuracy={train_acc[ep]:.3}%/{test_acc[ep]:.3}% \t Shape loss: {train_sh_loss[ep]:.5} \t Map loss: {train_map_loss[ep]:.5}')
         

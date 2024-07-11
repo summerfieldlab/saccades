@@ -1,4 +1,5 @@
 import os
+from copy import deepcopy
 import gc
 from itertools import product
 import random
@@ -32,7 +33,13 @@ def get_dataset(size, shapes_set, config, lums, solarize):
 
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}{tet}.pkl'
     # fname_notet = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}'
-    samee = 'same' if same else ''
+    # samee = 'same' if same else ''
+    if config.same:
+        shape_distinctiveness = 'same'
+    elif config.mixed:
+        shape_distinctiveness = 'mixed'
+    else:
+        shape_distinctiveness = ''
     challenge = '_' + config.challenge if config.challenge != '' else ''
     # distract = '_distract' if config.distract else ''
     solar = 'solarized_' if solarize else ''
@@ -49,7 +56,7 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     # fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}.pkl'
     # fname_gw = f'toysets/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}.nc'
     datadir = 'datasets/image_sets'
-    fname_gw = f'{datadir}/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}'
+    fname_gw = f'{datadir}/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{shape_distinctiveness}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}'
     
     if os.path.exists(fname_gw + '.nc'):
         print(f'Loading saved dataset {fname_gw}')
@@ -60,13 +67,13 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     #     data = pd.read_pickle(fname)
     else:
         transform = 'logpolar_'
-        fname_gw = f'{datadir}/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}'
+        fname_gw = f'{datadir}/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{shape_distinctiveness}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}'
         if os.path.exists(fname_gw + '.nc'):
             print(f'Loading saved dataset {fname_gw}')
             data = xr.open_dataset(fname_gw + '.nc')
         elif config.whole_image:
             transform = 'polar_'
-            fname_gw = f'{datadir}/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{samee}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}'
+            fname_gw = f'{datadir}/num{min_num}-{max_num}_nl-{noise_level}_{shapes}{shape_distinctiveness}{challenge}_grid{config.grid}_policy-{policy}_lum{lums}_{transform}{n_glimpses}{size}'
             if os.path.exists(fname_gw + '.nc'):
                 print(f'Loading saved dataset {fname_gw}')
                 data = xr.open_dataset(fname_gw + '.nc')
@@ -80,12 +87,14 @@ def get_dataset(size, shapes_set, config, lums, solarize):
 
 
 def get_loader(dataset, config, batch_size=None, gaze=None):
+    """Prepare torch DataLoader."""
     train_on = config.train_on
     shape_format = config.shape_input
     model_type = config.model_type
     target_type = config.target_type
     n_glimpses = config.n_glimpses
     convolutional = True if config.model_type in ['cnn', 'bigcnn'] else False
+    misalign = config.misalign
     nex = len(dataset.image)
     half_idx = list(range(nex))  # for mixed datasets with half free half fixed
     random.shuffle(half_idx)
@@ -306,13 +315,22 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
                             xy_array[half_idx[1::2]] = fixed[half_idx[1::2]]
                     else:
                         xy_array = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
-                
+            if misalign:
+                # shuffle the sequence order of the glimpse positions so that they are misaligned with the glimpse contents
+                # shuffle each sequence separately so that the mapping is not consistent
+                # size should be nex, seq_len, 2
+                for i in range(nex):
+                    new_order = np.random.permutation(n_glimpses)
+                    xy_array[i] = xy_array[i, new_order, :]
                     
                 xy = torch.tensor(xy_array).float()
             if 'logpolar' not in shape_format:
                 xy = xy.to(config.device)
             if 'unserial' in model_type:
                 xy = xy.view((nex, -1))
+
+                
+
     
     # Create merged input (or not)
     if config.whole_image:
@@ -620,6 +638,30 @@ def choose_loader(config):
         ood_fixed.lums = config.lum_sets[-1]
     
         test_loaders = [val_free, val_fixed, ood_free, ood_fixed]
+    elif config.mixed:
+        train_lums = lums1
+
+        trainset = get_dataset(train_size, config.shapestr, config, train_lums, solarize=config.solarize)
+        diff_config = deepcopy(config)
+        diff_config.mixed = False
+        diff_testset = get_dataset(test_size, config.shapestr, diff_config, train_lums, solarize=config.solarize)
+
+        same_config = deepcopy(config)
+        same_config.mixed = False
+        same_config.same = True
+        same_testset = get_dataset(test_size, config.shapestr, same_config, train_lums, solarize=config.solarize)
+
+        diff_loader = get_loader(diff_testset, diff_config, batch_size=2500, gaze='free')
+        diff_loader.testset = 'Distinctive'
+        diff_loader.viewing = 'free'
+        diff_loader.lums = config.lum_sets[-1]
+        diff_loader.shapes = config.testshapestr[-1]
+        same_loader = get_loader(same_testset, same_config,batch_size=2500, gaze='free' )
+        same_loader.testset = 'Same'
+        same_loader.viewing = 'free'
+        same_loader.lums = config.lum_sets[-1]
+        same_loader.shapes = config.testshapestr[-1]
+        test_loaders = [diff_loader, same_loader]
     else: 
         train_lums = lums1
         val_lums = lums1

@@ -3,6 +3,7 @@ import argparse
 
 
 def get_base_name(config):
+    """Prepare base file name for results files to be saved."""
     model_type = config.model_type
     target_type = config.target_type
     train_on = config.train_on
@@ -14,23 +15,30 @@ def get_base_name(config):
     use_loss = config.use_loss
     drop = config.dropout
 
-    # Prepare base file name for results files
+    # 
     n_glimpses = f'{config.n_glimpses}_' if config.n_glimpses is not None else ''
     detach = '-detach' if config.detach else ''
     pretrain = '-nopretrain' if config.no_pretrain else ''
 
-    same = 'same' if config.same else ''
+    # same = 'same' if config.same else ''
+    if config.same:
+        shape_distinctiveness = 'same'
+    elif config.mixed:
+        shape_distinctiveness = 'mixed'
+    else:
+        shape_distinctiveness = ''
     challenge = config.challenge
     # solar = 'solarized_' if config.solarize else ''
     transform = f'{config.shape_input}_' if 'logpolar' in config.shape_input else 'gw6_'
     shapes = ''.join([str(i) for i in config.shapestr])
     sort = 'sort_' if config.sort else ''
     policy = config.policy
+    misalign = 'misalign_' if config.misalign else ''
     
     # model_desc = f'{model_type}{detach}{act}{pretrain}_hsize-{config.h_size}_input-{train_on}{kernel}_{config.shape_input}'
     model_desc = f'{model_type}{detach}{pretrain}_hsize-{config.h_size}_input-{train_on}_{config.shape_input}'
     # data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_grid{config.grid}_policy-{policy}_trainshapes-{shapes}{same}_{challenge}_{transform}{n_glimpses}{train_size}'
-    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_policy-{policy}_trainshapes-{shapes}{same}_{challenge}_{transform}{n_glimpses}{train_size}'
+    data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_policy-{policy}_trainshapes-{shapes}{shape_distinctiveness}_{challenge}_{transform}{n_glimpses}{misalign}{train_size}'
     # train_desc = f'loss-{use_loss}_niters-{n_iters}_{n_epochs}eps'
     withshape = '+shape' if config.learn_shape else ''
     train_desc = f'loss-{use_loss}{withshape}_opt-{config.opt}_drop{drop}_{sort}count-{target_type}_{n_epochs}eps_rep{config.rep}'
@@ -41,13 +49,16 @@ def get_base_name(config):
 
 
 def get_config():
+    """Parse command line arguments."""
     parser = argparse.ArgumentParser(description='PyTorch network settings')
-    # Params that determine what datasets to load 
+    # Params that determine what datasets to load
     parser.add_argument('--noise_level', type=float, default=0.74)
     parser.add_argument('--train_size', type=int, default=100000)
     parser.add_argument('--test_size', type=int, default=5000)
     parser.add_argument('--grid', type=int, default=6)
     parser.add_argument('--same', action='store_true', default=False, help='whether all target characters within the image are the same')
+    parser.add_argument('--mixed', action='store_true', default=False, help='whether to train on a mixture of images whose items are all the same or all distinctive')
+    # the above two params should be combined into one for conciseness
     parser.add_argument('--challenge', type=str, default='', help='Which images/task to train on. ignore012, ignore123, or "" for simple counting (no special challenge)')
     parser.add_argument('--no_solarize', action='store_true', default=False)
     parser.add_argument('--n_glimpses', type=int, default=None, help='How long is each glimpse sequence.')
@@ -57,7 +68,7 @@ def get_config():
     parser.add_argument('--min_num', type=int, default=1, help='minimum target numerosity')
     parser.add_argument('--max_num', type=int, default=5, help='maximum target numerosity')
     # parser.add_argument('--min_pass', type=int, default=0)
-    # parser.add_argument('--max_pass', type=int, default=6) # related to symbolic model, which hasn't been updated
+    # parser.add_argument('--max_pass', type=int, default=6) # related to symbolic model, which hasn't been updated 
 
 
     # Once loaded, how to prepare the data for training. What goes into the loaders?
@@ -69,7 +80,7 @@ def get_config():
     parser.add_argument('--target_type', type=str, default='notA', help='If "all", target numerosity will include all items regardless of their identity.') 
     # parser.add_argument('--outer', action='store_true', default=False) # not currently implemented. Previously, whether to calculate the outer product of the two inputs to pass to the network
     # parser.add_argument('--rotate', action='store_true', default=False)  # not implemented. whether to apply a random rotation to the inputs. Especially relevant for sparse inputs (like place code) which can be difficult to learn from
-
+    parser.add_argument('--misalign', action='store_true', default=False, help='Shuffle the glimpse positions relative to the glimpse contents.')
 
     # Model parameters
     parser.add_argument('--model_type', type=str, default='rnn_classifier', help='rnn_classifier rnn_regression num_as_mapsum cnn')
@@ -107,7 +118,6 @@ def get_config():
     parser.add_argument('--gpu', type=int, default=0, help='which gpu to use')
 
 
-    
     config = parser.parse_args()
     config.solarize = False if config.no_solarize else True
     if config.model_type == 'rnn_regression':

@@ -37,6 +37,18 @@ python3 datasets/dataset_generator.py --policy=cheat+jitter --polar --scaling=lo
 python3 datasets/merge_datasets.py # merge subsets
 
 
+# To test coherence illusion
+# Test sets where items in images are not all the same shape/letter. 
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=0 --noise_level=0.74 --size=5000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.3 0.6 0.9 --seed=1 --noise_level=0.74 --size=5000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=2 --noise_level=0.74 --size=5000 --shapes FGHJ --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.3 0.6 0.9 --seed=3 --noise_level=0.74 --size=5000 --shapes FGHJ --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12
+# Training set
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=50000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=50000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --same --n_glimpses=12
+
+python3 datasets/merge_coherence_datasets.py # merge subsets
+
 
 # FOR SIMULATING HUMAN EXPERIMENT
 # Human experiment uses numerosities 3-6, letters ESUZFCKJA and images have constant (average) contrast of 0.3 from the set of luminances 0.3, 0.6, 0.9

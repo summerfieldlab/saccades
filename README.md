@@ -14,15 +14,19 @@ experiments. To create a conda environment from this file:
 ```conda env create -f environment.yml```
 
 ## Dataset Generation
+
+To generate all image datasets used in the published work run `datasets/make_all_datasets.sh`
+
 Image sets are synthesized with `datasets/dataset_generator.py`
-The dataset generator synthesizes images and preglimpses them accordin to a 
+The dataset generator synthesizes images and preglimpses them according to a 
 specified saccadic policy. Configuration parameters control the number of items,
 the shape of the items, the average background and foreground luminances, the
 size of the image, and the number of glimpses. Glimpse contents consist of 
 logpolar transformed images centred on a fixation point. Datasets are 
-manipulated with xarray and stored and netcdf files. Only a handful of literal 
+manipulated with xarray and stored in netcdf files. Only a handful of literal 
 image files are saved for visual inspection. The rest of the image data are
-saved along with their corresponding metadata in the netcdf files.
+saved along with their corresponding metadata in the netcdf files for ease of
+loading and manipulating.
 
 ```python3 datasets/dataset_generator.py --policy=random --logpolar  --n_glimpses=20 --luminances 0.1 0.4 0.7 --seed=0 --noise_level=0.9 --size=100000 --shapes ESUZ --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6 --same```
 
@@ -44,3 +48,5 @@ module can then be loaded into a recurrent dual-stream model using the
 All code written by Jessica Thompson unless otherwise indicated. An earlier 
 version of this project was started by Hannah Sheahan. This code does not build 
 directly on hers, but I certainly took inspiration on how to structure the code.
+
+
