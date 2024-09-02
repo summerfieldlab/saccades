@@ -21,7 +21,7 @@ def get_base_name(config):
     pretrain = '-nopretrain' if config.no_pretrain else ''
 
     # same = 'same' if config.same else ''
-    if config.same:
+    if config.same or config.distinctive==0 and not config.mixed:
         shape_distinctiveness = 'same'
     elif config.mixed:
         shape_distinctiveness = 'mixed'
@@ -58,7 +58,8 @@ def get_config():
     parser.add_argument('--grid', type=int, default=6)
     parser.add_argument('--same', action='store_true', default=False, help='whether all target characters within the image are the same')
     parser.add_argument('--mixed', action='store_true', default=False, help='whether to train on a mixture of images whose items are all the same or all distinctive')
-    # the above two params should be combined into one for conciseness
+    # The above two params are replaced with one param --distinctive which can also represent graded levels of distinctiveness, but perhaps we leave the above two for backwards compatibility
+    parser.add_argument('--distinctive', type=float, default=0, help='How distinctive should items within a single image be? 0 means all the same shape, 1 means as distinctive as possible, 0.3 and 0.6 in between.')
     parser.add_argument('--challenge', type=str, default='', help='Which images/task to train on. ignore012, ignore123, or "" for simple counting (no special challenge)')
     parser.add_argument('--no_solarize', action='store_true', default=False)
     parser.add_argument('--n_glimpses', type=int, default=None, help='How long is each glimpse sequence.')

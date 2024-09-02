@@ -34,10 +34,14 @@ def get_dataset(size, shapes_set, config, lums, solarize):
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}{tet}.pkl'
     # fname_notet = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes_set}_{size}'
     # samee = 'same' if same else ''
-    if config.same:
+    if config.same or config.distinctive == 0:
         shape_distinctiveness = 'same'
     elif config.mixed:
         shape_distinctiveness = 'mixed'
+    elif config.distinctive ==0.3:
+        shape_distinctiveness = 'distinct-0.3'
+    elif config.distinctive == 0.6:
+        shape_distinctiveness = 'distinct-0.6'
     else:
         shape_distinctiveness = ''
     challenge = '_' + config.challenge if config.challenge != '' else ''
@@ -96,6 +100,8 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
     convolutional = True if config.model_type in ['cnn', 'bigcnn'] else False
     misalign = config.misalign
     nex = len(dataset.image)
+    image_width = dataset.image_width
+    image_height = dataset.image_height
     half_idx = list(range(nex))  # for mixed datasets with half free half fixed
     random.shuffle(half_idx)
     ### NUMBER LABEL ###
@@ -272,24 +278,26 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
         if train_on == 'both' or train_on == 'xy':
             if config.place_code and 'human'  not in shape_format:
                 coordinates = dataset['glimpse_coords_image'].values.astype(int) # pretty sure these are x (in [0]) then y (in [1])
-                coordinates[coordinates==48] = 47
+                import pdb;pdb.set_trace()
+                max_pixel_idx = max(image_width, image_height)
+                coordinates[coordinates>=max_pixel_idx] = max_pixel_idx - 1 # bound
                 # Sparse Tensor to Dense Tensor
                 # # coordinates should be 4* nex where the 4 corresponds too nex, glimpse_no, x, y
                 glimpse_idx = np.tile(range(n_glimpses), nex)
                 image_idx = np.repeat(range(nex), n_glimpses)
                 coordinates = np.concatenate((image_idx[:, np.newaxis], glimpse_idx[:, np.newaxis], coordinates.reshape((-1,2))), axis=1).T
-                xy = torch.sparse_coo_tensor(coordinates, torch.ones((nex*n_glimpses)), (nex, n_glimpses, 42, 48))
+                xy = torch.sparse_coo_tensor(coordinates, torch.ones((nex*n_glimpses)), (nex, n_glimpses, image_width, image_height))
                 xy = xy.to_dense().view((nex, n_glimpses, -1)).float()
                 
                 # Sparse Tensor flattened - Can't give mixed sparse and dense dimensions so this didn't work. Need to index glimpse somewhow
-                # flat = np.ravel_multi_index(coordinates.reshape(nex*n_glimpses, 2).T, dims=(42, 48))
+                # flat = np.ravel_multi_index(coordinates.reshape(nex*n_glimpses, 2).T, dims=(image_width, image_height))
                 # coordinates = np.concatenate((image_idx[:, np.newaxis], glimpse_idx[:, np.newaxis], flat[:, np.newaxis]), axis=1).T
-                # xy = torch.sparse_coo_tensor(coordinates, torch.ones((nex*n_glimpses)), (nex, n_glimpses, 42*48))
+                # xy = torch.sparse_coo_tensor(coordinates, torch.ones((nex*n_glimpses)), (nex, n_glimpses, image_width*image_height))
                 # xy = xy.to_dense().to_sparse(sparse_dim=2)
                 
                 
                 # Dense Tensor  - THIS IS TOO SLOW, faster to create as Sparse Tensor and then convert to dense if you want to stay in dense
-                # xy_array = torch.zeros((nex, n_glimpses, 48, 42), dtype=torch.int8)
+                # xy_array = torch.zeros((nex, n_glimpses, image_height, image_width), dtype=torch.int8)
                 # xy_array[:, :, coordinates[:,:,1], coordinates[:,:,0]] = 1
                 # xy = torch.tensor(xy_array).view((nex, n_glimpses, -1)).float()
 
@@ -306,32 +314,29 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
                         tile_shape[-1] -= 1
                         if 'fixed' in gaze:
                             # just repeat the center coordinate over and over
-                            xy_array = np.tile([42//2, 48//2], tile_shape)
+                            xy_array = np.tile([image_width//2, image_height//2], tile_shape)
                         elif 'mixed' in gaze:
                             free = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
-                            fixed = np.tile([42//2, 48//2], tile_shape)
+                            fixed = np.tile([image_width//2, image_height//2], tile_shape)
                             xy_array = np.empty(coords.shape)
                             xy_array[half_idx[::2]] = free[half_idx[::2]]
                             xy_array[half_idx[1::2]] = fixed[half_idx[1::2]]
                     else:
                         xy_array = dataset['glimpse_coords_scaled'].values # scaled to [0, 1] from the pixel coordinates
-            if misalign:
-                # shuffle the sequence order of the glimpse positions so that they are misaligned with the glimpse contents
-                # shuffle each sequence separately so that the mapping is not consistent
-                # size should be nex, seq_len, 2
-                for i in range(nex):
-                    new_order = np.random.permutation(n_glimpses)
-                    xy_array[i] = xy_array[i, new_order, :]
-                    
+                if misalign:
+                    # shuffle the sequence order of the glimpse positions so that they are misaligned with the glimpse contents
+                    # shuffle each sequence separately so that the mapping is not consistent
+                    # size should be nex, seq_len, 2
+                    for i in range(nex):
+                        new_order = np.random.permutation(n_glimpses)
+                        xy_array[i] = xy_array[i, new_order, :]
+                        
                 xy = torch.tensor(xy_array).float()
             if 'logpolar' not in shape_format:
                 xy = xy.to(config.device)
             if 'unserial' in model_type:
                 xy = xy.view((nex, -1))
 
-                
-
-    
     # Create merged input (or not)
     if config.whole_image:
         input = image_input
@@ -366,6 +371,8 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
     bs = config.batch_size if batch_size is None else batch_size
     loader = DataLoader(dset, batch_size=bs, shuffle=True)
     loader.filename = dataset.filename.data
+    loader.image_width = image_width
+    loader.image_height = image_height
     dataset.close()
     
     return loader
@@ -642,26 +649,48 @@ def choose_loader(config):
         train_lums = lums1
 
         trainset = get_dataset(train_size, config.shapestr, config, train_lums, solarize=config.solarize)
-        diff_config = deepcopy(config)
-        diff_config.mixed = False
-        diff_testset = get_dataset(test_size, config.shapestr, diff_config, train_lums, solarize=config.solarize)
+        diff1_config = deepcopy(config)
+        diff1_config.mixed = False
+        diff1_config.distinctive = 1
+        diff1_testset = get_dataset(test_size, config.shapestr, diff1_config, train_lums, solarize=config.solarize)
+        diff06_config = deepcopy(config)
+        diff06_config.mixed = False
+        diff06_config.distinctive = 0.6
+        diff06_testset = get_dataset(test_size, config.shapestr, diff06_config, train_lums, solarize=config.solarize)
+        diff03_config = deepcopy(config)
+        diff03_config.mixed = False
+        diff03_config.distinctive = 0.3
+        diff03_testset = get_dataset(test_size, config.shapestr, diff03_config, train_lums, solarize=config.solarize)
+
+        
 
         same_config = deepcopy(config)
         same_config.mixed = False
         same_config.same = True
+        same_config.distinctive = 0
         same_testset = get_dataset(test_size, config.shapestr, same_config, train_lums, solarize=config.solarize)
 
-        diff_loader = get_loader(diff_testset, diff_config, batch_size=2500, gaze='free')
-        diff_loader.testset = 'Distinctive'
-        diff_loader.viewing = 'free'
-        diff_loader.lums = config.lum_sets[-1]
-        diff_loader.shapes = config.testshapestr[-1]
+        diff1_loader = get_loader(diff1_testset, diff1_config, batch_size=2500, gaze='free')
+        diff1_loader.testset = 'Distinctive1'
+        diff1_loader.viewing = 'free'
+        diff1_loader.lums = config.lum_sets[-1]
+        diff1_loader.shapes = config.testshapestr[-1]
+        diff03_loader = get_loader(diff03_testset, diff03_config, batch_size=2500, gaze='free')
+        diff03_loader.testset = 'Distinctive03'
+        diff03_loader.viewing = 'free'
+        diff03_loader.lums = config.lum_sets[-1]
+        diff03_loader.shapes = config.testshapestr[-1]
+        diff06_loader = get_loader(diff06_testset, diff06_config, batch_size=2500, gaze='free')
+        diff06_loader.testset = 'Distinctive06'
+        diff06_loader.viewing = 'free'
+        diff06_loader.lums = config.lum_sets[-1]
+        diff06_loader.shapes = config.testshapestr[-1]
         same_loader = get_loader(same_testset, same_config,batch_size=2500, gaze='free' )
         same_loader.testset = 'Same'
         same_loader.viewing = 'free'
         same_loader.lums = config.lum_sets[-1]
         same_loader.shapes = config.testshapestr[-1]
-        test_loaders = [diff_loader, same_loader]
+        test_loaders = [diff1_loader, diff06_loader, diff03_loader, same_loader]
     else: 
         train_lums = lums1
         val_lums = lums1

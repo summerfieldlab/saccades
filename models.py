@@ -34,7 +34,8 @@ def choose_model(config, model_dir):
         ventral = None
     finetune = True if 'finetune' in model_type else False
     whole_im = True if 'whole' in model_type else False
-    xy_sz = 48*42 if config.place_code else 2
+    height, width = config.height, config.width
+    xy_sz = height*width if config.place_code else 2
     sigmoid = False if config.use_loss == 'num' else True
     mod_args = {'h_size': config.h_size, 'act': config.act,
                 'detach': config.detach, 'format':config.shape_input,
@@ -55,8 +56,8 @@ def choose_model(config, model_dir):
     train_on = mod_args['train_on']
     grid = mod_args['grid']
     n_shapes = mod_args['n_shapes']
-    grid_to_im_shape = {3:[27, 24], 6:[48, 42], 9:[69, 60]}
-    height, width = grid_to_im_shape[grid]
+    # grid_to_im_shape = {3:[27, 24], 6:[48, 42], 9:[69, 60]}
+    # height, width = grid_to_im_shape[grid]
     map_size = grid**2
     
     if shape_format == 'tetris':
@@ -71,12 +72,8 @@ def choose_model(config, model_dir):
             sh_sz = n_shapes#20#25
     elif 'pixel' in shape_format:
         sh_sz = 2 if '+' in shape_format else 1
-
-        # sh_sz = (6 * 6) * 2
-    elif 'logpolar' in shape_format:
-        sh_sz = height * width
     else:
-        sh_sz = 42 * 48
+        sh_sz = width * height
     if '2channel' in shape_format:
         sh_sz *= 2
     in_sz = xy_sz if train_on=='xy' else sh_sz if train_on =='shape' else sh_sz + xy_sz

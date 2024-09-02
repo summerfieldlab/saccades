@@ -59,6 +59,7 @@ def main(config):
     config.base_name = base_name
     # loaders, test_xarray = choose_loader(config)
     loaders = choose_loader(config)
+    config.height, config.width = loaders[0].image_height, loaders[0].image_width
     model = choose_model(config, model_dir)
     trainer = choose_trainer(model, loaders, config)
 

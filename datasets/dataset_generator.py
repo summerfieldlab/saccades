@@ -22,33 +22,33 @@ import random
 from math import isclose
 
 import symbolic_model as solver
-from letters import get_alphabet
+from letters import get_alphabet, get_alphabet_5x5
 import utils
 
 
-class NoConvNet(nn.Module):
-    """For generating humanlike fixation heatmaps from which to sample fixations."""
-    def __init__(self):
-        super().__init__()
-        self.relu = nn.LeakyReLU()
-        # self.fc1 = nn.Linear(72, 75)
-        self.fc1 = nn.Linear(36, 128)
-        self.fc2 = nn.Linear(128, 256)
-        self.fc3 = nn.Linear(256, 512)
-        self.fc4 = nn.Linear(512, 1024)
-        self.dropout = nn.Dropout(p=0.5)
-        self.fc5 = nn.Linear(1024, 48*48)
+# class NoConvNet(nn.Module):
+#     """For generating humanlike fixation heatmaps from which to sample fixations."""
+#     def __init__(self):
+#         super().__init__()
+#         self.relu = nn.LeakyReLU()
+#         # self.fc1 = nn.Linear(72, 75)
+#         self.fc1 = nn.Linear(36, 128)
+#         self.fc2 = nn.Linear(128, 256)
+#         self.fc3 = nn.Linear(256, 512)
+#         self.fc4 = nn.Linear(512, 1024)
+#         self.dropout = nn.Dropout(p=0.5)
+#         self.fc5 = nn.Linear(1024, self.image_height*self.image_height)
 
-    def forward(self, x):
-        x = self.relu(self.fc1(x))
-        x = self.relu(self.fc2(x))
-        x = self.relu(self.fc3(x))
-        x = self.relu(self.fc4(x))
-        x = self.dropout(x)
-        x = self.relu(self.fc5(x))
-        nex = x.shape[0]
-        heat_map = x.view((nex, 1, 48, 48))
-        return heat_map, heat_map
+#     def forward(self, x):
+#         x = self.relu(self.fc1(x))
+#         x = self.relu(self.fc2(x))
+#         x = self.relu(self.fc3(x))
+#         x = self.relu(self.fc4(x))
+#         x = self.dropout(x)
+#         x = self.relu(self.fc5(x))
+#         nex = x.shape[0]
+#         heat_map = x.view((nex, 1, self.image_height, self.image_height))
+#         return heat_map, heat_map
 
 class DatasetGenerator():
     def __init__(self, conf):
@@ -58,8 +58,9 @@ class DatasetGenerator():
         self.n_glimpses = conf.n_glimpses
         self.conf = conf
         self.eps = 1e-7
-        self.char_width = 4
+        self.char_width = 5#4
         self.char_height = 5
+        self.border = 6
         self.shape_holder = np.zeros((self.char_height, self.char_width))
         self.logscale = conf.logscale
         # global GRID, GRID_SIZE, CENTROID_ARRAY, POSSIBLE_CENTROIDS
@@ -76,6 +77,8 @@ class DatasetGenerator():
         self.ncols = len(self.grid)
         self.pixel_height = (self.char_height + 2) * self.ncols
         self.pixel_width = (self.char_width + 2) * self.ncols
+        self.image_height = self.pixel_height + self.border
+        self.image_width = self.pixel_width + self.border
         self.pixel_X = [col*(self.char_width + 2) + 1 for col in range(self.ncols)]   #[1, 6, 11] # col *5 + 1
         self.pixel_Y = [row*(self.char_height + 2) + 1 for row in range(self.ncols)]
         self.pixel_topleft = [(x, y) for (x, y) in product(self.pixel_X, self.pixel_Y)]
@@ -265,7 +268,7 @@ class DatasetGenerator():
         # logscale
         return shape_coords
         
-    def get_shape_coords(self, glimpse_coords, shapes_set, same,
+    def get_shape_coords(self, glimpse_coords, shapes_set, distinctiveness,
                          objects2count, distractors):
         """Generate glimpse shape feature vectors.
 
@@ -310,13 +313,21 @@ class DatasetGenerator():
         num = len(objects2count)
         
         # Assign a random shape to each object
-        if same:  # All shapes in the image will be the same
+        if distinctiveness == 0:  # All shapes in the image will be the same
             shape = np.random.choice(shapes_set)
             shape_assign = np.repeat(shape, num)
         else:
             shapes_copy = shapes_set.copy()
             random.shuffle(shapes_copy)
-            shape_assign = np.tile(shapes_copy, int(np.ceil(num/len(shapes_set))))[:num]
+            if distinctiveness == 1: # As distinctive as possible
+                shape_assign = np.tile(shapes_copy, int(np.ceil(num/len(shapes_set))))[:num]
+            elif distinctiveness == 0.6:
+                shape_subset = shapes_copy[:3] # 3 out of 4 shapes (assuming 4 total shapes)
+                shape_assign = np.tile(shape_subset, int(np.ceil(num/len(shape_subset))))[:num]
+            elif distinctiveness == 0.3:
+                shape_subset = shapes_copy[:2] # 2/4 shapes
+                shape_assign = np.tile(shape_subset, int(np.ceil(num/len(shape_subset))))[:num]
+
             # shape_assign = np.random.choice(shapes_set, size=num, replace=True)
         dist_map = {dist_loc: distractor_shape for dist_loc in distractors}
         shape_map = {object: shape for (object, shape) in zip(objects2count, shape_assign)}
@@ -335,7 +346,7 @@ class DatasetGenerator():
 
     def generate_one_example(self, num, n_disract, n_unique, config):
         """Synthesize a single toy glimpse sequence and apply symbolic solver."""
-        same = config.same
+        distinctiveness = config.distinctive
         # distract = config.distract
         # rand_g = config.random
         noise_level = config.noise_level
@@ -395,7 +406,7 @@ class DatasetGenerator():
         # Otherwise, range set to be inclusive. That way don't need to bother with setting those cli arguments when not relevant
         # while final_pass_count < min_pass_count or final_pass_count > max_pass_count:
         xy_coords, objects, noiseless_coords, to_count, distractors = self.get_xy_coords(num, n_disract, noise_level, challenge, policy)
-        shape_coords, shape_map, shape_hist = self.get_shape_coords(xy_coords, shapes_set, same, to_count, distractors)
+        shape_coords, shape_map, shape_hist = self.get_shape_coords(xy_coords, shapes_set, distinctiveness, to_count, distractors)
 
         # Initialize records
         # example = solver.GlimpsedImage(xy_coords, shape_coords, shape_map, shape_hist, objects, max_dist, num_range)
@@ -508,8 +519,9 @@ class DatasetGenerator():
     
     def pandas_to_xr(self, df):
         """Convert pandas DataFrame to Xarray Dataset."""
+        n_locations = len(df.locations[0])
         def get_stackable_shape_map(shape_map):
-            stackable = np.zeros((36,))
+            stackable = np.zeros((n_locations,))
             for key in shape_map.keys():
                 stackable[key] = shape_map[key]
             return stackable
@@ -548,14 +560,16 @@ class DatasetGenerator():
                 "glimpse": range(self.n_glimpses),
                 "coordinate": ["x", "y"],
                 "character": range(25),
-                "slot": range(36)
+                "slot": range(n_locations)
             },
             attrs={
                 "char_width": self.char_width,
                 "char_height": self.char_height,
                 "grid": self.grid,
-                "pixel_height": self.pixel_height,
-                "pixel_width": self.pixel_width,
+                "pixel_height": self.pixel_height, # without border
+                "pixel_width": self.pixel_width, # without border
+                "image_height": self.image_height,
+                "image_width": self.image_width,
             }
         )
         return ds
@@ -670,7 +684,7 @@ class DatasetGenerator():
 
             # Take this index and adjust it so it matches the original array
             adjusted_index = [np.unravel_index(index, dist.shape) for index in sample_index]
-            human_like_glimpse_coords = [[np.float32(x/48.0), np.float32(y/48.0)] for y, x in adjusted_index]
+            human_like_glimpse_coords = [[np.float32(x/self.image_height), np.float32(y/self.image_height)] for y, x in adjusted_index]
             
         
 
@@ -686,24 +700,23 @@ class DatasetGenerator():
         
         # Convert to xarray
         data = self.pandas_to_xr(data_pd)
-        chars = get_alphabet()
-        glim_wid = 6
+        chars = get_alphabet_5x5()
         lums = conf.luminances
-        half_glim = glim_wid//2
+        half_glim = self.border//2
         n_images = len(data.image)
         image_size_nobord = [self.pixel_height, self.pixel_width]
-        imsize_wbord = [self.pixel_height+glim_wid, self.pixel_width+glim_wid]
+        imsize_wbord = [self.pixel_height+self.border, self.pixel_width+self.border]
         data['glimpse_coords_image'] = (("image", "glimpse", "coordinate"), np.empty((n_images, self.n_glimpses, 2), dtype=np.float32))
         data['glimpse_coords_scaled'] = (("image", "glimpse", "coordinate"), np.empty((n_images, self.n_glimpses, 2), dtype=np.float32))
         data['glimpse_coords_humanlike'] = (("image", "glimpse", "coordinate"), np.empty((n_images, self.n_glimpses, 2), dtype=np.float32))
         data['symbolic_shape_humanlike'] = (("image", "glimpse", "character"), np.empty((n_images, self.n_glimpses, self.n_shapes), dtype=np.float32))
 
         data['luminances'] = (("image", "ground"), np.empty((n_images, 2)))
-        data['noised_image'] = (("image", "row", "column"), np.empty((n_images, 48, 42), dtype=np.float32))
-        data['centre_fixation'] =(("image", "row", "column"), np.empty((n_images, 48, 42), dtype=np.float32))
-        data['logpolar_pixels'] = (("image", "glimpse", "row", "column"), np.empty((n_images, self.n_glimpses, 48, 42), dtype=np.float32))
+        data['noised_image'] = (("image", "row", "column"), np.empty((n_images, self.image_height, self.image_width), dtype=np.float32))
+        data['centre_fixation'] =(("image", "row", "column"), np.empty((n_images, self.image_height, self.image_width), dtype=np.float32))
+        data['logpolar_pixels'] = (("image", "glimpse", "row", "column"), np.empty((n_images, self.n_glimpses, self.image_height, self.image_width), dtype=np.float32))
 
-        # data['logpolar_pixels_humanlike'] = (("image", "glimpse", "row", "column"), np.empty((n_images, self.n_glimpses, 48, 42), dtype=np.float32))
+        # data['logpolar_pixels_humanlike'] = (("image", "glimpse", "row", "column"), np.empty((n_images, self.n_glimpses, self.image_height, self.image_width), dtype=np.float32))
             
         data_pd['target_coords_scaled'] = np.empty((n_images, 0)).tolist()
         data_pd['distract_coords_scaled'] = np.empty((n_images, 0)).tolist()
@@ -753,8 +766,12 @@ class DatasetGenerator():
             target_slots = np.where(row_pd['locations_count'])[0]
             target_coords_1x1 = self.centroid_array[target_slots]
             # target_coords_image = (target_coords_1x1 * image_size_nobord[::-1]) + half_glim
-            target_coords_image = np.array([self.map_scale_pixel[tuple(xy)]for xy in target_coords_1x1]) + half_glim 
-            target_coords_image = target_coords_image + [(self.char_width/2) - 0.5, (self.char_height/2) - 0.5]
+            target_coords_image = np.array([self.map_scale_pixel[tuple(xy)]for xy in target_coords_1x1]) + half_glim
+
+            half_width = (self.char_width/2) - 0.5
+            half_height = (self.char_height/2) - 0.5
+
+            target_coords_image = target_coords_image + [half_width, half_height]
             target_coords_scaled = target_coords_image/imsize_wbord[::-1]
             data_pd.at[i, 'target_coords_scaled'] = target_coords_scaled
             
@@ -762,8 +779,9 @@ class DatasetGenerator():
             if len(distract_slots) > 0:
                 distract_coords_1x1 = self.centroid_array[distract_slots]
                 # distract_coords_image = (distract_coords_1x1 * image_size_nobord[::-1]) + half_glim
-                distract_coords_image = np.array([self.map_scale_pixel[tuple(xy)]for xy in distract_coords_1x1]) + half_glim 
-                distract_coords_image = distract_coords_image + [(self.char_width/2) - 0.5, (self.char_height/2) - 0.5]
+                distract_coords_image = np.array([self.map_scale_pixel[tuple(xy)]for xy in distract_coords_1x1]) + half_glim
+                # distract_coords_image = distract_coords_image + [(self.char_width/2) - 0.5, (self.char_height/2) - 0.5]
+                distract_coords_image = distract_coords_image + [(half_width), (half_height)]
                 distract_coords_scaled = distract_coords_image/imsize_wbord[::-1]
                 data_pd.at[i, 'distract_coords_scaled'] = distract_coords_scaled
                 
@@ -797,7 +815,7 @@ class DatasetGenerator():
                 
                 # Warp noised image to generate log-polar glimpses
                 # radius defaults to include the whole image np.sqrt(w/2**2 + h/2**2)
-                lp_glimpses = [warp_polar(noised, scaling=conf.scaling, output_shape=imsize_wbord, center=(y*48, x*48), mode='edge') for x, y in humanlike_coords]
+                lp_glimpses = [warp_polar(noised, scaling=conf.scaling, output_shape=imsize_wbord, center=(y*self.image_height, x*self.image_height), mode='edge') for x, y in humanlike_coords]
             else:
                 # Warp noised image to generate log-polar glimpses
                 lp_glimpses = [warp_polar(noised, scaling=conf.scaling, output_shape=imsize_wbord, center=(y, x), mode='edge') for x, y in glimpse_coords_image]
@@ -836,6 +854,8 @@ def main():
     parser.add_argument('--size', type=int, default=100)
     parser.add_argument('--n_shapes', type=int, default=10, help='How many shapes to the relevant training and test sets span?')
     parser.add_argument('--same', action='store_true', default=False)
+    parser.add_argument('--distinctive', type=float, default=0, help='How distinctive should items within a single image be? 0 means all the same shape, 1 means as distinctive as possible, 0.3 and 0.6 in between.')
+    # --distinctive would replace --same
     parser.add_argument('--grid', type=int, default=6)
     # parser.add_argument('--distract', action='store_true', default=False)
     # parser.add_argument('--distract_corner', action='store_true', default=False)
@@ -856,8 +876,19 @@ def main():
     parser.add_argument('--n_glimpses', type=int, default=12, help='how many glimpses to generate per image')
     parser.add_argument('--seed', type=int, default=0)
     conf = parser.parse_args()
+    if conf.same: # so you can still use this input argument (but the variable is not used later on)
+        conf.distinctive = 0
 
-    same = 'same' if conf.same else ''
+    if conf.distinctive == 0:
+        distinctiveness = 'same'
+    elif conf.distinctive == 0.3:
+        distinctiveness = 'distinct-0.3'
+    elif conf.distinctive == 0.6:
+        distinctiveness = 'distinct-0.6'
+    elif conf.distinctive == 1:
+        distinctiveness = '' # to be consisting with earlier labeling convention, 
+    else: 
+        distinctiveness = ''
     challenge = f'_{conf.challenge}' if conf.challenge != '' else ''
     # solar = 'solarized_' if conf.solarize else ''
     if conf.polar:
@@ -886,7 +917,7 @@ def main():
     data, data_pd = generator.add_logpolar_glimpses_xr(toydata, conf)
     
     dirname = 'datasets/image_sets'
-    fname_gw = f'{dirname}/num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}{trunc}{logscale}_{shapes}{same}{challenge}_grid{conf.grid}_policy-{policy}_lum{conf.luminances}_{transform}{n_glimpses}{conf.size}'
+    fname_gw = f'{dirname}/num{conf.min_num}-{conf.max_num}_nl-{conf.noise_level}{trunc}{logscale}_{shapes}{distinctiveness}{challenge}_grid{conf.grid}_policy-{policy}_lum{conf.luminances}_{transform}{n_glimpses}{conf.size}'
     if not os.path.isdir(fname_gw):
             os.makedirs(fname_gw)
             
@@ -895,12 +926,12 @@ def main():
     for idx in sample:
         # plt.matshow(data.iloc[idx]['noised_image'], vmin=0, vmax=1, cmap='Greys')
         plt.matshow(data['noised_image'].loc[dict(image=idx)], vmin=0, vmax=1, cmap='Greys')
-        target_loc = data_pd.iloc[idx].target_coords_scaled * [42.0, 48.0]
+        target_loc = data_pd.iloc[idx].target_coords_scaled * [generator.image_width, generator.image_height]
         plt.scatter(target_loc[:, 0], target_loc[:, 1], label='targets')
         distract_loc = data_pd.iloc[idx].distract_coords_scaled 
         # if distract_loc is not None:
         if len(distract_loc) > 0:
-            distract_loc = distract_loc * [42.0, 48.0]
+            distract_loc = distract_loc * [generator.image_width, generator.image_height]
             plt.scatter(distract_loc[:, 0], distract_loc[:, 1], label='distractor')
         plt.legend()
         plt.axis('off')
