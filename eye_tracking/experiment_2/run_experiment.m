@@ -1,4 +1,3 @@
-% PsychDebugWindowConfiguration()
 
 Screen('CloseAll');
 Screen('Preference', 'SkipSyncTests', 1);
@@ -8,32 +7,21 @@ addpath(genpath('CogToolbox'));
 KbName('UnifyKeyNames');
 
 practice = 1;  
-
 n_trial_total = 288;
-
 eyetracking = 1;
-
 debug_fixation = 0;
-
 abort_trigger = 0;
-
 cont_var = 0;
-
 recal_eye = 0;
-
 n_practice_trials = 32;
 
-
-
-global el; % not necessary because we're passing it to the response function?
-global fixation_condition; % not necessary because we're passing it to the response function?
-% fixation_condition = 1;
+global el;
+global fixation_condition;
 
 %%
-PsychDefaultSetup(2); %some default settings
+PsychDefaultSetup(2); % Some default settings
 
-
-data = cell(n_trial_total,15);%trial numer * number of variables to collect
+data = cell(n_trial_total,15); % Trial numer * number of variables to collect
 
 numColumns = 18;
 numRows = 0;
@@ -45,15 +33,11 @@ prompt = ('Subject Number:');%Collect information for the experiment
 title = 'Experiment information';
 definput = {''};
 
-% subject_n = repmat(inputdlg(prompt,title,[1,20],definput),n_trial_total,1);
 resu = inputdlg(prompt, title, [1 20], definput);
 subject_n_str = resu{1};
 subject_n = str2double(resu{1});
 
 data(1:n_trial_total) = repmat(inputdlg(prompt,title,[1,20],definput),n_trial_total,1);
-
-% data{:, 14} = factor_view(:);
-% data{:, 15} = factor_task(:);
 
 screens = Screen('Screens');
 
@@ -68,20 +52,20 @@ gray = GrayIndex(screenNumber);
 % Get the centre coordinate of the window
 [xCentre, yCentre] = RectCenter(windowRect);
 
-%set keycodes SmCircle_sqused
+% Set keycodes SmCircle_sqused
 keyCodes = [12:17];
 
-%Set the square which is image is in
+% Set the square which is image is in
 stimuli_pixels = screenYpixels - 280;
 ImSq = [0 0 stimuli_pixels stimuli_pixels];
 [ImSq, xOffsetsigB, yOffsetsigB] = CenterRect(ImSq, windowRect);
 InsSq = [0 0 screenXpixels screenYpixels];
 [InsSq, xOffsetsigB, yOffsetsigB] = CenterRect(InsSq, windowRect);
 
-%Set text format
+% Set text format
 Screen('TextSize', window ,24);
 
-%Hide cursor
+% Hide cursor
 HideCursor(window);
 
 %%
@@ -150,7 +134,7 @@ factor_task = factor_map_task(final_condition_order(:));
 factor_view = factor_map_view(final_condition_order(:));
 
 
-% practice trial and condition allocation
+% Practice trial and condition allocation
 
 practice_trial_list = zeros(1,32);
 for i = 1:4
@@ -163,7 +147,7 @@ practice_condition_order = [repmat(2, 1, 8), repmat(1, 1, 8), repmat(4, 1, 8), r
 practice_factor_task = factor_map_task(practice_condition_order(:));
 practice_factor_view = factor_map_view(practice_condition_order(:));
 
-% practice folder allocation
+% Practice folder allocation
 
 practice_folder_1{1} = strcat('num3-6_ESUZFCKJsame_ignore-distractors_A_practice');
 practice_folder_1{2} = strcat('num3-6_ESUZFCKJsame_count-all_A_practice');
@@ -172,7 +156,7 @@ practice_folder_1{4} = strcat('num3-6_ESUZFCKJsame_count-all_B_practice');
 
 practice_folder = practice_folder_1;
 
-%% eyetracker intialization
+%% Eyetracker intialization
 
 if eyetracking
     Eyelink Initialize;
@@ -221,17 +205,17 @@ Screen('Flip', window); % Flip the buffer to display the text
 KbStrokeWait; % Wait for a key press
 
 
-%% Practice trial
+%% Practice trials
 
 if practice
 
     Practice_Data = cell2table(emptyData, 'VariableNames', variableNames);
     
-    % start eyetracking 
+    % Start eyetracking 
     block = 0 % corresponds to practice trials
 
     if eyetracking
-        % set-up eye tracker file
+        % Set-up eye tracker file
         recal = 0;
         el_filename = [char(data{1,1}) '_pr' '.edf'];
         Eyelink('OpenFile', el_filename);
@@ -248,23 +232,16 @@ if practice
         end
     end
     
-    
-   % pos = randperm(72,32);
     fixation = {};
         
-    for trial = 1:n_practice_trials %depends on actual number of trials (32 usually)
+    for trial = 1:n_practice_trials % Depends on actual number of trials (here: 32)
         
         look_away(trial) = 0;
-
-       % pos_data = (block-1)*36 + trial;
         
-        % send trigger to eyetracker
+        % Send trigger to eyetracker
         if eyetracking
             Eyelink('message',['practice trial start ' num2str(trial)]);
-        end
-        
-%         pos_trial = pos(trial);
-        
+        end      
         
         if trial <= 8
             condition_prac = 2;
@@ -292,15 +269,12 @@ if practice
         myFiles = myFilestemp(order,:);
         myFiles = table2struct(myFiles);
 
-        % load meta data
+        % Load meta data
         f = char(practice_folder(condition_prac));
         meta_data_name = strcat('image_metadata_',f,'.mat');
         meta_data = load(meta_data_name);
      
-        % send trigger to eyetracker
-        
-        % Display option for vowel or consonant
-
+        % Block start message
         if ismember (trial, [1,9,17,25]) || recal_eye
             recal_eye = 0
             condition_opt = condition(condition_prac);
@@ -312,7 +286,6 @@ if practice
         end
         
         % Converging circle
-        
         for j = 0:51
             circle_size = screenYpixels - j*10 - 500;
             Circle_sq = [0 0 circle_size circle_size];
@@ -325,7 +298,6 @@ if practice
             WaitSecs(0.01);
         end
            
-        
         % Display stimuli
         trial_num = practice_trial_list(trial);
         trial_index = str2double(extractBefore(extractAfter(myFiles(trial_num).name,'_'),'.png'))+1;
@@ -347,11 +319,6 @@ if practice
             crossCoords = [-crossLength, crossLength, 0, 0; 0, 0, -crossLength, crossLength];
             crossColor = [255, 0, 0];
             Screen('DrawLines', window, crossCoords, 3, crossColor, [xCentre, yCentre]);  
-            
-%             % Overlay an X in the center of the screen
-%             Screen('TextSize', window, 50);
-%             Screen('TextFont', window, 'Courier');
-%             Screen('DrawText', window, 'X', windowRect(3)/2, windowRect(4)/2, [255, 0, 0]);
         end
         
         Screen('Flip', window);
@@ -361,7 +328,6 @@ if practice
         end
         
         % Check for fixation_condition
-        %     if ismember(final_condition_order(pos_data), [3,4]) || debug_fixation
         if ismember(condition_prac, [3,4]) || debug_fixation
             fixation_condition = 1;
         else
@@ -374,7 +340,7 @@ if practice
         
         t0 = GetSecs;
         
-        %Collect Responsresponse(e
+        % Collect response
         response_Confirmed = false; %false;
         first_time = true;
         t1 = 99999;
@@ -384,23 +350,21 @@ if practice
             [key_pressed,t1,t2, fixation{trial},first_time,first_time_poss_wrong] = response(window,t0,t1,eyetracking,trial, el, first_time, ImSq, fixation_condition, block, fixation{trial});
             disp(sum(~fixation{trial}));
             
-            % %
-            % if eyetracking && fixation_condition % !!!!!!!!!!!!!!!11
             if fixation_condition
-                look_away(trial) =  sum(~fixation{trial}); % saved per trial; we are summing across all samples recorded during that trial
+                look_away(trial) =  sum(~fixation{trial}); % Saved per trial; we are summing across all samples recorded during that trial
                 
                 if ~eyetracking
                     look_away(trial) = false ;
                 end       
                 
-                if abort_trigger && trial > 10           % also for debugging: to test aborting of only the first 2 trials
+                if abort_trigger && trial > 10           % Also for debugging (to test aborting of only the first 2 trials)
                     abort_trigger = 0 ;
                     look_away(trial) = false ;
                     cont_var = 0 ;
                 end
                 
                 if abort_trigger == true
-                    look_away(trial) = true ; % for Debugging!!!!!!!
+                    look_away(trial) = true ; % For debugging
                 end
                 
                 if look_away(trial)
@@ -416,11 +380,11 @@ if practice
             [secs, keyCode, deltaSecs] = KbWait([], 3);
             keycode = keyCodes(key_pressed-1);
             if keyCode(keycode)
-                key_press = key_pressed; % 3rd column
-                imagename = char(myFiles(trial_num).name); % 4th column
+                key_press = key_pressed;
+                imagename = char(myFiles(trial_num).name);
                 response_Confirmed = true;
                 t3 = GetSecs - t0;
-                disp(['response_Confirmed: ', num2str(key_pressed)]); % Add this line
+                disp(['response_Confirmed: ', num2str(key_pressed)]);
             end
         end
 
@@ -452,7 +416,7 @@ if practice
                     consec_look_away = 0;
                 end
                 
-                recalibrate_eyetracker; % should close the current file and transfer it and open the calibration sequence
+                recalibrate_eyetracker; % Closes the current file, transfers it, and opens the calibration sequence
 
             end
 
@@ -495,7 +459,7 @@ if practice
         end
         WaitSecs(1);
         
-        %Gap Between Intervals
+        % Gap Between Intervals
         
         Screen('Flip', window);
         if eyetracking
@@ -507,13 +471,13 @@ if practice
     
     %%
     
-    % save the .csv data
+    % Save the .csv data
     
     csvname = strcat('practice_data/','practice_subject_',char(data{1,1}),'.csv');
     writetable(Practice_Data, csvname);
     
     
-    % stop eyetracking
+    % Stop eyetracking
     
 	if eyetracking
         Eyelink('StopRecording');
@@ -540,19 +504,16 @@ end
 %% End of practice, start actual trials
 Screen('Preference', 'SkipSyncTests', 1);
 
-% Screen('DrawTexture',window,instruction_startexp,[],InsSq);
-
 % Display Instruction Start Experiment
 instruction_startexp_text = 'This is the end of practice.\n\nPress any keys to start the first \n block of the experiment.'; % Define your instruction text
 DrawFormattedText(window, instruction_startexp_text, 'center', 'center', [255, 255, 255]); % Draw the text in white
-% Screen('Flip', window); % Flip the buffer to display the text
 
-Screen('Flip', window);
+Screen('Flip', window); % Flip the buffer to display the text
 WaitSecs(1);
 KbStrokeWait;
 
 %%
-%run Trial
+% Run Trial
 
 Screen('Preference', 'SkipSyncTests', 1);
 
@@ -561,15 +522,14 @@ num_num_trial = num_trial;
 
 num_block = 8;
 for block = 1:num_block
-    % start eyetracking (keep this within block loop)
     
     num_trial = num_num_trial; % reset num_trial for the new block
     
-    % start eyetraking
+    % Start eyetraking
     
     if mod(block, 2) == 1
         if eyetracking
-            % set-up eye tracker file
+            % Set-up eye tracker file
             recal = 0;
             el_filename = [char(data{1,1}) '_' num2str(block) '.edf'];
             Eyelink('OpenFile', el_filename);
@@ -597,9 +557,9 @@ for block = 1:num_block
         DrawFormattedText(window, 'Press anything to start the block.', 'center', 'center', [255, 255, 255]); % text in white
     end
     
-    % DrawFormattedText(window, 'Press anything to start the block','center', 'center', [0 0 0],[],[],[],2);
     Screen('Flip', window);
     KbStrokeWait;
+    
     % Load images for the block
     if block > 2
         b = block - 2;
@@ -612,7 +572,7 @@ for block = 1:num_block
     participantNum = num2str(char(data{1,1}));
     fullDir = [baseDir, participantNum];
     filePattern = fullfile(fullDir, char(folder(final_condition_order(block*36))), filesep, '*.png');
-    myFiles = dir(filePattern); % the folder inwhich images exists 36
+    myFiles = dir(filePattern); % the folder in which images exist
     myFilestemp = struct2table(myFiles);
     
     
@@ -626,30 +586,22 @@ for block = 1:num_block
     myFiles = myFilestemp(order,:);
     myFiles = table2struct(myFiles);
     
-%     myFilestempsorted = sortrows(myFilestemp, 'name');
-%     myFiles=table2struct(myFilestempsorted);
 
     start_ = (block-1)*36+1;
     end_ = block*36;
     condition_block = final_condition_order(start_:end_);
     
-    % how do i change the instruction(s) (images)?
-    
-    % load meta data
+    % Load meta data
     f = char(folder(final_condition_order(block*36)));
-    %  meta_num = str2double(f(5));
     meta_data_name = strcat('image_metadata_',f,'.mat');
     meta_data = load(meta_data_name);
     
-    
     % Display Condition of the Block
-    %    condition_opt = condition(condition_block((pos_data-72*(block-1))));
     condition_opt = condition(final_condition_order(block*36));
     Screen('Preference', 'SkipSyncTests', 1);
     Screen(window, 'TextSize',60);
     fulltext = ['Block ' num2str(block) ':\n\n' char(condition_opt) '\n\n(Press any key to continue.)'];
     DrawFormattedText(window,fulltext,'center','center',[255 255 255],[],[],[],2);
-    %    data{pos_data, 5} = char(condition_opt);
     Screen('Flip', window);
     KbStrokeWait;
     
@@ -673,23 +625,19 @@ for block = 1:num_block
         end
             
         look_away(trial) = 0;
-        %    for trial = 1:num_trial %depends on actual number of trials (length (trial_order)?)
-        
-        % after checking lookaway
-        % if lookaway > 0
-        % trial_order(end+1)=trial_order
         
         pos_data = (block-1)*36 + trial;
-        % send trigger to eyetracker
+	
+        % Send trigger to eyetracker
         if eyetracking
             Eyelink('message',['trial start ' num2str(trial) ' Block ' num2str(block)]);
         end
         
-        data{pos_data, 2} = trial; %record trial number
+        data{pos_data, 2} = trial; % Record trial number
         data{pos_data, 5} = char(condition_opt);
         
         % Access the trial number for the current block and trial
-        trial_num = block_trials(trial); % this will be a number from 1-36
+        trial_num = block_trials(trial); % This will be a number from 1-36
         trial_index = str2double(extractBefore(extractAfter(myFiles(trial_num).name,'_'),'.png'))+1;
 
         
@@ -716,15 +664,9 @@ for block = 1:num_block
         % Display Stimuli
         
         stimuli_image = fullfile(char(folder(final_condition_order(block*36))), myFiles(trial_num).name);
-        %         %         t0 = GetSecs;
-        %         % Collect Response
-        %         response_Confirmed = false;
 
-
-        
-        % ORIGINAL stimuli_image = strrep(stimuli_image,'/._','/');
         stimuli_image = strrep(stimuli_image,'._','');
-        disp(['Attempting to load image: ', stimuli_image]); % Add this line
+        disp(['Attempting to load image: ', stimuli_image]);
         image_load = imread(stimuli_image);
         
         stimuli_image = Screen('MakeTexture',window,image_load);
@@ -740,24 +682,13 @@ for block = 1:num_block
             Screen('DrawLines', window, crossCoords, 3, crossColor, [xCentre, yCentre]);
         end
         
-%         Adding circle
-%         radius = 75;
-%         diameter = radius*2;
-%         rect = [(windowRect(3) - diameter) / 2, (windowRect(4) - diameter) / 2, (windowRect(3) + diameter) / 2, (windowRect(4) + diameter) / 2];
-% %         rect = [0 0 radius*2 radius*2]; % circle rectangle
-% %         rect = CenterRectOnPointd(rect, windowRect(3)/2, windowRect(4)/2); % center the circle
-%         Screen('FrameOval', window, [255 0 0], rect); % draw circle frame in red
-        
         Screen('Flip', window);
         presentation = GetSecs;
         if eyetracking
             Eyelink('message',['stimulus onset ' num2str(trial) ' Block ' num2str(block)]);
         end
         
-        %%
-        
-        %      CHeck for fixation_condition
-        %     if ismember(final_condition_order(pos_data), [3,4]) || debug_fixation
+        % Check for fixation_condition
         if ismember(condition_block(trial), [3,4]) || debug_fixation
             fixation_condition = 1;
         else
@@ -769,52 +700,44 @@ for block = 1:num_block
         %%
         
         % Collect stimulus offset
-        
-        
         t0 = GetSecs;
-        
-        
-        %WaitSecs(2);
         
         % "Aborted" value is set to 0.
         data{pos_data, 16} = 0;
         
-        %Collect Response
-        response_Confirmed = false; %false;
+        % Collect Response
+        response_Confirmed = false;
         first_time = true;
         t1 = 99999;
 	    fixation{trial} = 0;
-        
         
         while response_Confirmed == false
             [key_pressed,t1,t2, fixation{trial},first_time,first_time_poss_wrong] = response(window,t0,t1,eyetracking,trial, el, first_time, ImSq, fixation_condition, block, fixation{trial});
             disp(sum(~fixation{trial}));
             % %
-            % if eyetracking && fixation_condition % !!!!!!!!!!!!!!!11
 
             if fixation_condition
-                look_away(trial) =  sum(~fixation{trial}); % saved per trial; we are summing across all samples recorded during that trial
+                look_away(trial) =  sum(~fixation{trial}); % Saved per trial; we are summing across all samples recorded during that trial
 
                 if ~eyetracking
                     look_away(trial) = false ;
                 end
 
-                if abort_trigger && trial > 10           % also for debugging: to test aborting of only the first 2 trials
+                if abort_trigger && trial > 10           % Also for debugging
                         abort_trigger = 0 ;
                         look_away(trial) = false ;
                         cont_var = 0 ;
                 end
 
                 if abort_trigger == true
-                    look_away(trial) = true ; % for Debugging!!!!!!!
+                    look_away(trial) = true ; % For debugging
                 end
-
 
                 if look_away(trial)
                     
                     if first_time_poss_wrong
-                        block_trials(end+1) = block_trials(trial); % append the trial at the end of the block
-                        condition_block(end+1) = condition_block(trial); % append condition block at the end of the block
+                        block_trials(end+1) = block_trials(trial); % Append the trial at the end of the block
+                        condition_block(end+1) = condition_block(trial); % Append condition block at the end of the block
                         num_trial = num_trial + 1;
 
                         disp(['Participant looked away more than twice during trial ', num2str(trial), ',aborting trial.']);
@@ -822,19 +745,16 @@ for block = 1:num_block
                         data{pos_data, 16} = 1;
                     end
 
-
                     cont_var = 1;
 
                 end
             end
             
-            
-            
             [secs, keyCode, deltaSecs] = KbWait([], 3);
             keycode = keyCodes(key_pressed-1);
             if keyCode(keycode)
-                key_press = key_pressed; % 3rd column
-                imagename = char(myFiles(trial_num).name); % 4th column
+                key_press = key_pressed;
+                imagename = char(myFiles(trial_num).name);
                 data{pos_data, 3} = key_pressed;
                 data{pos_data, 4} = char(myFiles(trial_num).name);
                 response_Confirmed = true;
@@ -852,7 +772,6 @@ for block = 1:num_block
             DrawFormattedText(window, 'Participant looked away from center.\nTrial aborted.\n\n Press any key to continue.','center', 'center', [255 0 0],[],[],[],2);
             Screen('Flip', window);
             KbStrokeWait;
-            %    newRow = table(subject_n, trial, [], imagename, char(condition_opt), [], [], [], [], block, char(folder(final_condition_order(block*36))), meta_data.numerosity_target(trial_index), meta_data.numerosity_dist(trial_index), factor_view(block*36), factor_task(block*36), 1, 'VariableNames', {'Subject_Number','Trial_Num','Response','image_Name','Object_Type','Accuracy','Response_Time_1','Response_Time_2','Response_Time_3','block','image_folder', 'target_n', 'dist_n', 'View', 'Task', 'Aborted'});
             newRow = cell2table({subject_n, trial, key_press, imagename, char(condition_opt), -999, -999, -999, -999, block, char(folder(final_condition_order(block*36))), meta_data.numerosity_target(trial_index), meta_data.numerosity_dist(trial_index), meta_data.target_coords_scaled(trial_index), meta_data.distract_coords_scaled(trial_index), factor_view(block*36), factor_task(block*36), 1}, 'VariableNames', variableNames);
             Data = [Data; newRow];
             
@@ -878,10 +797,7 @@ for block = 1:num_block
                     consec_look_away = 0;
                 end
                 
-                recalibrate_eyetracker; % should close the current file and transfer it and open the calibration sequence
-                % check recalibration function and check check_fixation
-                % function (siz: what radius was fine; -> figure out
-                % (->!!!)
+                recalibrate_eyetracker; % Closes the current file and transfers it and opens the calibration sequence
             end
             
             trial = trial + 1;
@@ -903,13 +819,9 @@ for block = 1:num_block
         Screen(window,'TextFont','Arial');
         Screen(window,'TextSize',80);
         
-        %        trial_index = str2double(extractBefore(extractAfter(myFiles(trial_num).name,'_'),'.png'))+1;
-        %        (also have this included above now)
-        
         disp(meta_data.numerosity_target(trial_index));
         disp(meta_data.numerosity_target(trial_index) + meta_data.numerosity_dist(trial_index));
         
-        %    if ismember(final_condition_order(pos_data), [1,3])
         if ismember(condition_block(trial), [1,3])
             if key_pressed == meta_data.numerosity_target(trial_index)
                 DrawFormattedText(window, 'correct','center', 'center', [0 255 0],[],[],[],2);
@@ -935,7 +847,6 @@ for block = 1:num_block
         
         
         %%
-        % data{1,1}
         
         newRow = cell2table({subject_n, trial, key_press, imagename, char(condition_opt), answer, t1, t2, t3, block, char(folder(condition_block(trial))), meta_data.numerosity_target(trial_index), meta_data.numerosity_dist(trial_index), meta_data.target_coords_scaled(trial_index), meta_data.distract_coords_scaled(trial_index), factor_view(block*36), factor_task(block*36), 0}, 'VariableNames', variableNames);
         Data = [Data; newRow];
@@ -957,7 +868,7 @@ for block = 1:num_block
         end
         WaitSecs(1);
         
-        %Gap Between Intervals
+        % Gap Between Intervals
         
         Screen('Flip', window);
         if eyetracking
@@ -973,20 +884,14 @@ for block = 1:num_block
         
         Screen('Flip', window);
     end
-%         if eyetracking
-%             Eyelink('message',['stimulus onset ' num2str(trial)]);
-%         end
-        
     
     
+    % End of block
     
-    
-    % end of block
-    
-    % save the .csv data
+    % Save the .csv data
     saveData(data,data{1,1});
     
-    % save the .csv data
+    % Save the .csv data
     csvname = strcat('data/','subject_',char(data{1,1}),'.csv');
     writetable(Data, csvname);
     
@@ -994,20 +899,14 @@ for block = 1:num_block
     fix_filename = strcat('data/','fixations_subject_',char(data{1,1}),'_',char(num2str(block)),'.mat');
     save(fix_filename, 'fixation');
     
-    % set textsize
+    % Set textsize
     Screen('TextSize', window ,40);
     
-    
-    %     if block < num_block
-    
     if block == num_block
-        % Display Instruction End
-        % Screen('DrawTexture',window,instruction_end,[],InsSq);
+        % Display End Instructions
         
-        instruction_end_text = 'This is the end of the experiment.\n\nThank you for participating!'; % Define your instruction text
+        instruction_end_text = 'This is the end of the experiment.\n\nThank you for participating!';
         DrawFormattedText(window, instruction_end_text, 'center', 'center', [255, 255, 255]); % Draw the text in white
-        % Screen('Flip', window); % Flip the buffer to display the text
-        
         Screen('Flip', window);
         
         if eyetracking
@@ -1061,37 +960,16 @@ for block = 1:num_block
         
     end
 end
-    
-    
-    % stop eytracking (keep this within block loop)
-    
-    %stop recording and save file
-    
-    
-    
-    %     KbStrokeWait;
 
 
 %%
-%Display ending instructions        KbStrokeWait;
-
+% Close screen
 ShowCursor(window);
 sca;
 Screen('CloseAll');
 
 
-%%
-
-% shut down at end of experiment
+% Shut down the eyetracker at end of experiment
 if eyetracking
     Eyelink('ShutDown');
 end
-
-% %% Save data function
-% function saveData (data, subjectNumber)
-%     header = {'SubjectNumber','Trial_Num','Response','image_Name','Object_Type','Accuracy','Response_Time_1','Response_Time_2','Response_Time_3','block','image_folder', 'target_n', 'dist_n', 'View', 'Task', 'Aborted'};
-%     data_table = cell2table(data, 'VariableNames',header);
-%
-%     exp_data = strcat('data/','subject_cell_',char(data{1,1}),'.csv');
-%     writetable(data_table, exp_data);
-% end
