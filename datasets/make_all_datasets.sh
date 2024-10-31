@@ -47,6 +47,20 @@ python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.3 0.6
 python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=50000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12
 python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=50000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --same --n_glimpses=12
 
+# Test with 4 levels of coherence
+# Training set
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=25000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12 --distinctive=0
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=25000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12 --distinctive=0.3
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=25000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12 --distinctive=0.6
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=25000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12 --distinctive=1
+
+# Test sets
+# python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=5000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12 --distinctive=0
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=5000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12 --distinctive=0.3
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=5000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12 --distinctive=0.6
+python3 datasets/dataset_generator.py --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=5000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=6  --n_glimpses=12 --distinctive=1
+
+# 
 python3 datasets/merge_coherence_datasets.py # merge subsets
 
 
@@ -65,3 +79,16 @@ python3 datasets/dataset_generator.py --polar --scaling=log  --luminances 0.1 0.
 # for ventral for human sim
 python3 datasets/dataset_generator.py --polar --scaling=log  --luminances 0.3 0.6 0.9 --seed=5 --noise_level=0.74 --constant_contrast --size=20000 --shapes ESUZFCKJ --min_num=3 --max_num=6 --challenge=distract123 --solarize --n_shapes=25 --grid=6 --same --n_glimpses=12
 python3 datasets/dataset_generator.py --polar --scaling=log  --luminances 0.3 0.6 0.9 --seed=6 --noise_level=0.74 --constant_contrast --size=2000 --shapes ESUZFCKJ --min_num=3 --max_num=6 --challenge=distract123 --solarize --n_shapes=25 --grid=6 --same --n_glimpses=12
+
+
+# Simple counting, no distractors, 7x7 grid, for supplmental
+# square images, 5x5 characters
+# 7x7 with random image rotation
+# Test sets
+python3 datasets/dataset_generator.py --transform --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=0 --noise_level=0.74 --size=5000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=7  --same --n_glimpses=12
+python3 datasets/dataset_generator.py --transform --polar --scaling=log --luminances 0.3 0.6 0.9 --seed=1 --noise_level=0.74 --size=5000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=7  --same --n_glimpses=12
+python3 datasets/dataset_generator.py --transform --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=2 --noise_level=0.74 --size=5000 --shapes FGHJ --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=7  --same --n_glimpses=12
+python3 datasets/dataset_generator.py --transform --polar --scaling=log --luminances 0.3 0.6 0.9 --seed=3 --noise_level=0.74 --size=5000 --shapes FGHJ --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=7  --same --n_glimpses=12
+# Training set
+python3 datasets/dataset_generator.py --transform --polar --scaling=log --luminances 0.1 0.4 0.7 --seed=4 --noise_level=0.74 --size=100000 --shapes BCDE --min_num=1 --max_num=5 --solarize --n_shapes=25 --grid=7  --same --n_glimpses=12
+

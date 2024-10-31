@@ -30,6 +30,8 @@ def get_base_name(config):
     challenge = config.challenge
     # solar = 'solarized_' if config.solarize else ''
     transform = f'{config.shape_input}_' if 'logpolar' in config.shape_input else 'gw6_'
+    if config.transform:
+        transform += '-rotated'
     shapes = ''.join([str(i) for i in config.shapestr])
     sort = 'sort_' if config.sort else ''
     policy = config.policy
@@ -70,6 +72,7 @@ def get_config():
     parser.add_argument('--max_num', type=int, default=5, help='maximum target numerosity')
     # parser.add_argument('--min_pass', type=int, default=0)
     # parser.add_argument('--max_pass', type=int, default=6) # related to symbolic model, which hasn't been updated 
+    parser.add_argument('--transform', action='store_true', default=False, help='Whether to load augmented data with transposed and mirror images.')
 
 
     # Once loaded, how to prepare the data for training. What goes into the loaders?

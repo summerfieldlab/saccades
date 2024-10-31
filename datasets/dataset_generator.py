@@ -6,6 +6,9 @@ author: Jessica Thompson
 date: 2023-06-13
 """
 import os
+from itertools import product
+import random
+from math import isclose
 import argparse
 import numpy as np
 import pandas as pd
@@ -13,48 +16,21 @@ import xarray as xr
 import torch
 from torch import nn
 from matplotlib import pyplot as plt
-from scipy.io import savemat
+from tqdm import tqdm
 from sklearn.metrics.pairwise import euclidean_distances
-from scipy.spatial import distance
 from skimage.transform import warp_polar
-from itertools import product
-import random
-from math import isclose
 
-import symbolic_model as solver
+# import symbolic_model as solver
 from letters import get_alphabet, get_alphabet_5x5
 import utils
 
 
-# class NoConvNet(nn.Module):
-#     """For generating humanlike fixation heatmaps from which to sample fixations."""
-#     def __init__(self):
-#         super().__init__()
-#         self.relu = nn.LeakyReLU()
-#         # self.fc1 = nn.Linear(72, 75)
-#         self.fc1 = nn.Linear(36, 128)
-#         self.fc2 = nn.Linear(128, 256)
-#         self.fc3 = nn.Linear(256, 512)
-#         self.fc4 = nn.Linear(512, 1024)
-#         self.dropout = nn.Dropout(p=0.5)
-#         self.fc5 = nn.Linear(1024, self.image_height*self.image_height)
-
-#     def forward(self, x):
-#         x = self.relu(self.fc1(x))
-#         x = self.relu(self.fc2(x))
-#         x = self.relu(self.fc3(x))
-#         x = self.relu(self.fc4(x))
-#         x = self.dropout(x)
-#         x = self.relu(self.fc5(x))
-#         nex = x.shape[0]
-#         heat_map = x.view((nex, 1, self.image_height, self.image_height))
-#         return heat_map, heat_map
-
-class DatasetGenerator():
+class DatasetGenerator:
+    """Class for generating and glimpsing images with variable numbers of alphanumeric characeters."""
     def __init__(self, conf):
         random.seed(conf.seed)
         np.random.seed(conf.seed)
-        self.n_shapes = conf.n_shapes  # total number of shape classes, the length of any shape vectors, e.g. 25, 
+        self.n_shapes = conf.n_shapes  # total number of possible shape classes, the length of any shape vectors, e.g. 25
         self.n_glimpses = conf.n_glimpses
         self.conf = conf
         self.eps = 1e-7
@@ -75,12 +51,19 @@ class DatasetGenerator():
             self.grid = np.linspace(0.1, 0.9, conf.grid, dtype=np.float32)
 
         self.ncols = len(self.grid)
-        self.pixel_height = (self.char_height + 2) * self.ncols
-        self.pixel_width = (self.char_width + 2) * self.ncols
-        self.image_height = self.pixel_height + self.border
-        self.image_width = self.pixel_width + self.border
-        self.pixel_X = [col*(self.char_width + 2) + 1 for col in range(self.ncols)]   #[1, 6, 11] # col *5 + 1
-        self.pixel_Y = [row*(self.char_height + 2) + 1 for row in range(self.ncols)]
+
+        if conf.transform:
+            self.pixel_height = ((self.char_height + 1) * self.ncols) - 1 # Need to make images symmetrical for the transformations to work properly
+            self.pixel_width = ((self.char_width + 1) * self.ncols) - 1
+            self.image_height = self.pixel_height + self.border
+            self.image_width = self.pixel_width + self.border
+            self.pixel_X = [col*(self.char_width + 1) for col in range(self.ncols)]   #[1, 6, 11] # col *5 + 1
+            self.pixel_Y = [row*(self.char_height + 1) for row in range(self.ncols)]
+        else:
+            self.pixel_height = (self.char_height + 2) * self.ncols
+            self.pixel_width = (self.char_width + 2) * self.ncols
+            self.pixel_X = [col*(self.char_width + 2) + 1 for col in range(self.ncols)]   #[1, 6, 11] # col *5 + 1
+            self.pixel_Y = [row*(self.char_height + 2) + 1 for row in range(self.ncols)]
         self.pixel_topleft = [(x, y) for (x, y) in product(self.pixel_X, self.pixel_Y)]
         self.possible_centroids = [(x, y) for (x, y) in product(self.grid, self.grid)]
         self.centroid_array = np.array(self.possible_centroids)
@@ -90,7 +73,6 @@ class DatasetGenerator():
         # Map from the 1x1 reference frame to the x,y coordinate of the top left pixel for the corresponding slot
         self.map_scale_pixel = {scaled:pixel for scaled,pixel in zip(self.possible_centroids, self.pixel_topleft)}
         self.grid_size = len(self.possible_centroids)
-        
          
     def get_xy_coords(self, numerosity, n_distract, noise_level, challenge, policy):
         """Randomly select n spatial locations and take noisy observations of them.
@@ -508,9 +490,9 @@ class DatasetGenerator():
 
         # data = [self.generate_one_example(nums[i], n_distract[i], n_unique[i], config) for i in range(n_examples)]
         data = []
-        for i in range(n_examples):
-            if not i % 10:
-                print(f'Generating info for image {i}', end='\r')
+        for i in tqdm(range(n_examples)):
+            # if not i % 10:
+                # print(f'Generating info for image {i}', end='\r')
             example = self.generate_one_example(nums[i], n_distract[i], n_unique[i], config)
             data.append(example)
         # data = [generate_one_example(nums[i], noise_level, pass_count_range, num_range, shapes_set, n_shapes, same) for i in range(n_examples)]
@@ -589,72 +571,13 @@ class DatasetGenerator():
         dict = {0: bg_lum, 1: fg_lum}
         # dict = {0: np.random.normal(loc=bg_lum, scale=0.1), 1: np.random.normal(loc=fg_lum, scale=0.1)}
         solarized = np.vectorize(dict.get)(image)
-        noised = np.vectorize(np.random.normal)(loc=solarized, scale=0.05)
+        if self.conf.transform:
+            scale = np.random.choice([0.01, 0.02, 0.03, 0.04, 0.05]) # for the supplemental analysis with more diverse images
+        else:
+            scale = 0.05 # for the main experiments, 
+        noised = np.vectorize(np.random.normal)(loc=solarized, scale=scale)
         noised = np.float32(noised)
         return noised
-
-    # def add_logpolar_glimpses_pandas(self, data, conf):
-    #     """Synthesize and glimpse images from symbolic description."""
-    #     glim_wid = conf.glimpse_wid
-    #     lums = conf.luminances
-    #     half_glim = glim_wid//2
-    #     chars = get_alphabet()
-    #     data['glimpse_coords'] = None
-    #     data['luminances'] = None
-    #     data['noised_image'] = None
-    #     data['centre_fixation'] = None
-    #     data['logpolar_pixels'] = None
-
-    #     for i in range(len(data)):
-    #         filename = f'image_{i}.png'
-    #         if not i % 10:
-    #             print(f'Synthesizing image {i}', end='\r')
-    #         row = data.iloc[i]
-    #         # Coordinates in 1x1 space
-    #         object_xy_coords = self.centroid_array[np.where(row.locations)[0]]
-    #         # Calculate saliency map
-    #         # Saliency map should be the size of the image WITHOUT the added border
-    #         image_size_nobord = (self.pixel_height, self.pixel_width)
-    #         object_pixel_coords = [self.map_scale_pixel[tuple(xy)] for xy in object_xy_coords]
-    #         # Shape indices for the objects
-    #         object_shapes = [row['shape_map'][obj] for obj in np.where(row.locations)[0]]
-
-    #         # Insert the specified shapes into the image at the specified locations
-    #         image = np.zeros(image_size_nobord, dtype=np.float32)
-    #         for shape_idx, (x,y) in zip(object_shapes, object_pixel_coords):
-    #                 image[y:y+self.char_height:, x:x+self.char_width] = chars[shape_idx]
-
-    #         # Convert scaled glimpse coordinates to pixel coordinates
-    #         scaled_glimpse_coords = row.xy.copy()
-    #         scaled_glimpse_coords[:, 0] = scaled_glimpse_coords[:, 0]*self.pixel_width
-    #         scaled_glimpse_coords[:, 1] = scaled_glimpse_coords[:, 1]*self.pixel_height
-    #         glimpse_coords = np.round(scaled_glimpse_coords).astype(int)
-    #         data.at[i, 'glimpse_coords'] = glimpse_coords
-    #         imsize = [self.pixel_height+glim_wid, self.pixel_width+glim_wid]
-    #         image_wbord = np.zeros(imsize, dtype=np.float32)
-    #         image_wbord[half_glim:-half_glim,half_glim:-half_glim] = image
-    #         # data.at[i, 'bw image'] = image_wbord
-    #         glimpse_coords += half_glim
-            
-    #         # Solarize and add Gaussian noise
-    #         fg, bg = np.random.choice(lums, size=2, replace=False)
-    #         # ensure that the difference between the foreground and background
-    #         # is at least 0.2, which is the smallest difference in the test sets
-    #         while abs(fg - bg) < 0.2:
-    #             fg, bg = np.random.choice(lums, size=2, replace=False)
-    #         data.at[i, 'luminances'] = [fg, bg]
-    #         noised = self.get_solarized_noise(image_wbord, fg, bg)
-    #         data.at[i, 'noised_image'] = noised
-
-    #         # Warp noised image to generaye log-polar glimpses
-    #         # Fixed gaze at the centre
-    #         centre = [size//2 for size in imsize]
-    #         fixation = warp_polar(noised, scaling='log', output_shape=imsize, center=centre, mode='edge')  # rows, cols
-    #         data.at[i, 'centre_fixation'] = fixation
-    #         # Glimpses
-    #         lp_glimpses = [warp_polar(noised, scaling='log', output_shape=imsize, center=(y, x), mode='edge') for x, y in glimpse_coords]
-    #         data.at[i, 'logpolar_pixels'] = lp_glimpses
-    #     return data
     
     def sample_from_smooth_map(self, smooth_map, inhibition=False):
         dist = smooth_map
@@ -700,7 +623,8 @@ class DatasetGenerator():
         
         # Convert to xarray
         data = self.pandas_to_xr(data_pd)
-        chars = get_alphabet_5x5()
+        chars = get_alphabet_5x5() if conf.transform else get_alphabet() # I use the 5x5 version when applying transformations to get square images
+            
         lums = conf.luminances
         half_glim = self.border//2
         n_images = len(data.image)
@@ -715,14 +639,15 @@ class DatasetGenerator():
         data['noised_image'] = (("image", "row", "column"), np.empty((n_images, self.image_height, self.image_width), dtype=np.float32))
         data['centre_fixation'] =(("image", "row", "column"), np.empty((n_images, self.image_height, self.image_width), dtype=np.float32))
         data['logpolar_pixels'] = (("image", "glimpse", "row", "column"), np.empty((n_images, self.n_glimpses, self.image_height, self.image_width), dtype=np.float32))
-
-        # data['logpolar_pixels_humanlike'] = (("image", "glimpse", "row", "column"), np.empty((n_images, self.n_glimpses, self.image_height, self.image_width), dtype=np.float32))
             
         data_pd['target_coords_scaled'] = np.empty((n_images, 0)).tolist()
+        data_pd['target_coords_image'] = np.empty((n_images, 0)).tolist()
         data_pd['distract_coords_scaled'] = np.empty((n_images, 0)).tolist()
-        for i in range(n_images):
-            if not i % 10:
-                print(f'Synthesizing image {i}', end='\r')
+        data_pd['transform'] = 'none'
+
+        for i in tqdm(range(n_images)):
+            # if not i % 10:
+            #     print(f'Synthesizing image {i}', end='\r')
             row_pd = data_pd.iloc[i]
             row = data.isel(image=i)
             
@@ -757,24 +682,27 @@ class DatasetGenerator():
             data['luminances'].loc[dict(image=i)] = [fg, bg]
             noised = self.get_solarized_noise(image_wbord, fg, bg)
             # data.at[i, 'noised_image'] = noised
-            data['noised_image'].loc[dict(image=i)] = noised
+            # data['noised_image'].loc[dict(image=i)] = noised
             
             # PREPARE COORDINATES
-            # Get target and distractor coordinates in the same scaled frame of 
-            # reference as the glimpse coords. Important for analysis of 
+            # Get target and distractor coordinates in the same scaled frame of
+            # reference as the glimpse coords. Important for analysis of
             # activations and eye tracking.
             target_slots = np.where(row_pd['locations_count'])[0]
             target_coords_1x1 = self.centroid_array[target_slots]
             # target_coords_image = (target_coords_1x1 * image_size_nobord[::-1]) + half_glim
             target_coords_image = np.array([self.map_scale_pixel[tuple(xy)]for xy in target_coords_1x1]) + half_glim
 
-            half_width = (self.char_width/2) - 0.5
-            half_height = (self.char_height/2) - 0.5
+            half_width = np.floor(self.char_width/2)
+            half_height = np.floor(self.char_height/2)
 
             target_coords_image = target_coords_image + [half_width, half_height]
             target_coords_scaled = target_coords_image/imsize_wbord[::-1]
-            data_pd.at[i, 'target_coords_scaled'] = target_coords_scaled
-            
+            # test = target_coords_scaled
+            # test[:, 0] = utils.mirror(test[:, 0])
+            # test[:, 0] = utils.mirror(test[:, 0])
+            # test*imsize_wbord[::-1]
+
             distract_slots = np.where(row_pd['locations_distract'])[0]
             if len(distract_slots) > 0:
                 distract_coords_1x1 = self.centroid_array[distract_slots]
@@ -783,7 +711,7 @@ class DatasetGenerator():
                 # distract_coords_image = distract_coords_image + [(self.char_width/2) - 0.5, (self.char_height/2) - 0.5]
                 distract_coords_image = distract_coords_image + [(half_width), (half_height)]
                 distract_coords_scaled = distract_coords_image/imsize_wbord[::-1]
-                data_pd.at[i, 'distract_coords_scaled'] = distract_coords_scaled
+                # data_pd.at[i, 'distract_coords_scaled'] = distract_coords_scaled
                 
             # Convert 1x1 glimpse coordinates of glimpse and locations to pixel 
             # coordinates and scale between 0 and 1 (because of image border)
@@ -791,36 +719,61 @@ class DatasetGenerator():
             glimpse_coords_image = np.multiply(glimpse_coords_1x1, image_size_nobord[::-1]) + half_glim
             glimpse_coords_image = np.round(glimpse_coords_image).astype(int)
             # data.at[i, 'glimpse_coords'] = glimpse_coords
-            data['glimpse_coords_image'].loc[dict(image=i)] = glimpse_coords_image
-            data['glimpse_coords_scaled'].loc[dict(image=i)] = np.divide(glimpse_coords_image, imsize_wbord[::-1])
+            # data['glimpse_coords_image'].loc[dict(image=i)] = glimpse_coords_image
+            # data['glimpse_coords_scaled'].loc[dict(image=i)] = np.divide(glimpse_coords_image, imsize_wbord[::-1])
             
             # PREPARE GLIMPSE CONTENTS
-            if conf.policy == 'humanlike':
-                # **Get humanlike glimpse coordinates**
-                # Prepare the input features for the generative model
-                locations_count_T = utils.transpose(row.locations_count.values)
-                locations_distract_T = utils.transpose(row.locations_distract.values)
-                fixator_features = np.array(locations_count_T) + 0.5*np.array(locations_distract_T)
-                features = torch.from_numpy(fixator_features).float()
-        
-                # Use pretained generative model to produce humanlike fixation heatmaps
-                _, smooth_map = fixator(features.unsqueeze(0))
-                humanlike_coords = self.sample_from_smooth_map(smooth_map)
-                data['glimpse_coords_humanlike'].loc[dict(image=i)] = humanlike_coords
-                            
-                # Calculate shape proximity vector for humanlike glimpses
-                max_dist = self.max_dist
-                shape_coords = self.calculate_proximity(humanlike_coords, object_xy_coords, slots, row_pd.shape_map, max_dist)
-                data["symbolic_shape_humanlike"].loc[dict(image=i)] = shape_coords
+
+            # Warp noised image to generate log-polar glimpses
+            if conf.transform:
                 
-                # Warp noised image to generate log-polar glimpses
-                # radius defaults to include the whole image np.sqrt(w/2**2 + h/2**2)
-                lp_glimpses = [warp_polar(noised, scaling=conf.scaling, output_shape=imsize_wbord, center=(y*self.image_height, x*self.image_height), mode='edge') for x, y in humanlike_coords]
-            else:
-                # Warp noised image to generate log-polar glimpses
-                lp_glimpses = [warp_polar(noised, scaling=conf.scaling, output_shape=imsize_wbord, center=(y, x), mode='edge') for x, y in glimpse_coords_image]
+                transforms = {0:'none', 1:'transpose', 2:'mirrorx', 3:'mirrory', 4:'mirrorxandy', 5:'transpose+mirrorx', 6:'transpose+mirrory', 7:'transpose+mirrorxandy'}
+                # Testing transforms are applied correctly
+                # fig, axs = plt.subplots(8, 2, figsize=[20,20])
+                # height, width = imsize_wbord
+                # noised.shape
+                # axs[0, 0].matshow(noised)
+                # axs[0, 0].set_title('Original')
+                # axs[0, 1].matshow(data['locations'].loc[dict(image=i)].data.reshape(6,6).T,)
+                # axs[0, 0].scatter(target_coords_scaled[:, 0]*width, target_coords_scaled[:, 1]*height)
+                # for trans_no, title in transforms.items():
+                    
+                #     axs[trans_no, 0].matshow(utils.apply_image_transform(noised, trans_no))
+                #     axs[trans_no, 0].set_title(title)
+                #     axs[trans_no, 1].matshow(np.array(utils.apply_slot_transform(data['locations'].loc[dict(image=i)].data, trans_no)).reshape(6,6).T)
+                #     target_coords = utils.apply_coords_transform(target_coords_scaled, trans_no, pixels=[width, height])
+                #     axs[trans_no, 0].scatter(target_coords[:, 0]*width, target_coords[:, 1]*height)
+                # plt.tight_layout()
+                # plt.savefig('test_augmentations.png')
+                # import pdb; pdb.set_trace()
+
+
+                # choose which transform to apply 0=none, 1=transpose, 2=mirrorx, 3=mirrory, 4=mirrorxandy, 5=transpose+mirrorx, 6=transpose+mirrory, 7=transpose+mirrorxandy
+                transform = np.random.choice(8)
+                data_pd.at[i, 'transform'] = transforms[transform]
+                # lp_glimpses = [utils.apply_image_transform(glimpse, transform) for glimpse in lp_glimpses] # This was stupid, obviously wrong
+                noised = utils.apply_image_transform(noised, transform)
+                target_coords_scaled = utils.apply_coords_transform(target_coords_scaled, transform, pixels=[self.image_width, self.image_height])
+                target_coords_image = utils.apply_coords_transform(target_coords_image, transform, pixels=[self.image_width, self.image_height], length=[self.image_width, self.image_height])
+                if len(distract_slots) > 0:
+                    distract_coords_scaled = utils.apply_coords_transform(distract_coords_scaled, transform, pixels=[self.image_width, self.image_height])
+                    data_pd.at[i, 'distract_coords_scaled'] = distract_coords_scaled
+                glimpse_coords_image = utils.apply_coords_transform(glimpse_coords_image, transform, length=[self.image_width, self.image_height], pixels=[self.image_width, self.image_height])
+                # data['glimpse_coords_scaled'].loc[dict(image=i)] = utils.apply_coords_transform(data['glimpse_coords_scaled'].loc[dict(image=i)].data, transform, pixels=[self.image_width, self.image_height])
+                # data['glimpse_coords_image'].loc[dict(image=i)] = utils.apply_coords_transform(data['glimpse_coords_image'].loc[dict(image=i)].data, transform, length=[self.image_width, self.image_height], pixels=[self.image_width, self.image_height])
+
+                data['locations'].loc[dict(image=i)] = utils.apply_slot_transform(data['locations'].loc[dict(image=i)].data, transform)
+                data['locations_count'].loc[dict(image=i)] = utils.apply_slot_transform(data['locations_count'].loc[dict(image=i)].data, transform)
+                data['locations_distract'].loc[dict(image=i)] = utils.apply_slot_transform(data['locations_distract'].loc[dict(image=i)].data, transform)
+    
             # data.at[i, 'logpolar_pixels'] = lp_glimpses
+            lp_glimpses = [warp_polar(noised, scaling=conf.scaling, output_shape=imsize_wbord, center=(y, x), mode='edge') for x, y in glimpse_coords_image]
+            data['glimpse_coords_image'].loc[dict(image=i)] = glimpse_coords_image
+            data['glimpse_coords_scaled'].loc[dict(image=i)] = np.divide(glimpse_coords_image, imsize_wbord[::-1])
+            data['noised_image'].loc[dict(image=i)] = noised
             data['logpolar_pixels'].loc[dict(image=i)] = lp_glimpses
+            data_pd.at[i, 'target_coords_scaled'] = target_coords_scaled
+            data_pd.at[i, 'target_coords_image'] = target_coords_image
             
             # Fixed gaze at the centre
             centre = [size//2 for size in imsize_wbord]
@@ -875,6 +828,7 @@ def main():
     # parser.add_argument('--random', action='store_true', default=False)
     parser.add_argument('--n_glimpses', type=int, default=12, help='how many glimpses to generate per image')
     parser.add_argument('--seed', type=int, default=0)
+    parser.add_argument('--transform', action='store_true', default=False, help='Whether to rotate and flip images to diversify')
     conf = parser.parse_args()
     if conf.same: # so you can still use this input argument (but the variable is not used later on)
         conf.distinctive = 0
@@ -898,6 +852,8 @@ def main():
             transform = 'polar_'
     else:
         transform = f'gw{conf.glimpse_wid}_'
+    if conf.transform:
+        transform += '-rotated'
     shapes = ''.join(conf.shapes)
     if conf.no_glimpse:
         n_glimpses = 'nogl'
@@ -927,30 +883,28 @@ def main():
         # plt.matshow(data.iloc[idx]['noised_image'], vmin=0, vmax=1, cmap='Greys')
         plt.matshow(data['noised_image'].loc[dict(image=idx)], vmin=0, vmax=1, cmap='Greys')
         target_loc = data_pd.iloc[idx].target_coords_scaled * [generator.image_width, generator.image_height]
+        # glimpse_loc = data['glimpse_coords_image'].loc[dict(image=idx)].data
+        glimpse_loc = data['glimpse_coords_scaled'].loc[dict(image=idx)].data * [generator.image_width, generator.image_height]
+        # target_loc = data_pd.iloc[idx].target_coords_image
+        transform = data_pd.iloc[idx]['transform']
         plt.scatter(target_loc[:, 0], target_loc[:, 1], label='targets')
-        distract_loc = data_pd.iloc[idx].distract_coords_scaled 
+        plt.scatter(glimpse_loc[:, 0], glimpse_loc[:, 1], label='glimpses')
+        distract_loc = data_pd.iloc[idx].distract_coords_scaled
         # if distract_loc is not None:
         if len(distract_loc) > 0:
             distract_loc = distract_loc * [generator.image_width, generator.image_height]
             plt.scatter(distract_loc[:, 0], distract_loc[:, 1], label='distractor')
         plt.legend()
         plt.axis('off')
+        plt.title(f'transform={transform}')
         
-        plt.savefig(f'{fname_gw}/example_{idx}.png', bbox_inches='tight', dpi=300, transparent=True, pad_inches=0)
+        plt.savefig(f'{fname_gw}/example_{transform}_{idx}.png', bbox_inches='tight', dpi=300, transparent=True, pad_inches=0)
         plt.close() 
     # We want to save both netcdf (xarray) and pickle (pandas) because some variables can't be easily saved in xarray
     # but we need xarray to be able to load/process the data within the limits of our RAM
     print(f'Saving {fname_gw}.pkl')
     data_pd.to_pickle(fname_gw + '.pkl')
-        
-    # data = data.drop('shape_map')# drop before saving because netcdf can't handle dicts
-        
-    # data['noised_image'] -= data['noised_image'].min()
-    # data['noised_image'] /= data['noised_image'].max()
-    # data['logpolar_pixels'] -= data['logpolar_pixels'].min()
-    # data['logpolar_pixels'] /= data['logpolar_pixels'].max()
-    # WE WANT TO PRESERVE DIFFERENCES IN LUMINANCE BETWEEN DIFFERENT DATASETS
-        
+               
     print(f'Saving {fname_gw}.nc')
     data.to_netcdf(fname_gw + '.nc')
 

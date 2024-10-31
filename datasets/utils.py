@@ -137,24 +137,23 @@ def map_jess_to_tim_blocks(fname):
 
 
 # Augmentation functions
-def mirror(coordinates):
-    mirrored = [0.5 - (coord-0.5) for coord in coordinates]
-    return mirrored
-    
 def transpose(locations_list):
-    """Assumes list of 36 corresponds to 6x6 grid to be transposed.
+    """When grid=6, list of 36 corresponds to 6x6 grid to be transposed.
     Returns a list of length 36 after having transposed the grid."""
-    grid = np.reshape(locations_list, (6, 6))
+    grid_sz = int(np.sqrt(len(locations_list)))
+    grid = np.reshape(locations_list, (grid_sz, grid_sz))
     transposed = list(grid.T.flatten())
     return transposed
 
 def mirror_gridx(locations_list):
-    if isinstance(locations_list, list):
-        grid = np.reshape(locations_list, (6, 6))
-        mirrorx = list(grid[:, ::-1].flatten())
-    else:
-        grid = locations_list
-        mirrorx = grid[:, ::-1]
+    # if isinstance(locations_list, list):
+    grid_sz = int(np.sqrt(len(locations_list)))
+    grid = np.reshape(locations_list, (grid_sz, grid_sz))
+    # mirrorx = list(grid[:, ::-1].flatten())
+    mirrorx = list(grid[::-1, :].flatten())
+    # else:
+    #     grid = locations_list
+    #     mirrorx = grid[:, ::-1]
     return mirrorx
 
 def mirror_gridy(locations_list):
@@ -164,10 +163,91 @@ def mirror_gridy(locations_list):
     apply the same transformation to the image itself so that (augmented) 
     fixations can be overlayed on a corresponding image. 
     """
-    if isinstance(locations_list, list):
-        grid = np.reshape(locations_list, (6, 6))
-        mirrory = list(grid[::-1, :].flatten())
-    else:
-        grid = locations_list
-        mirrory = grid[::-1, :]
+    # if isinstance(locations_list, list):
+    grid_sz = int(np.sqrt(len(locations_list)))
+    grid = np.reshape(locations_list, (grid_sz, grid_sz))
+    # mirrory = list(grid[::-1, :].flatten())
+    mirrory = list(grid[:, ::-1].flatten())
+    # else:
+    #     grid = locations_list
+    #     mirrory = grid[::-1, :]
     return mirrory
+
+def mirror(coordinates, length=1, pixels=41):
+    """For scaled coordinates, length=1."""
+
+    # mirrored1 = [mid - (coord - mid) for coord in coordinates]
+    mirrored2 = [abs(coord - (length - (length/pixels))) for coord in coordinates]
+    return mirrored2
+
+
+def apply_image_transform(image, transform):
+    if transform==1: # transpose
+        image = np.transpose(image)
+    if transform==2: # mirror x
+        image = image[:, ::-1]
+    if transform==3: # mirror y
+        image = image[::-1, :]
+    if transform==4: # mirror y
+        image = image[::-1, ::-1]
+    if transform==5: # transpose + mirror x
+        image = np.transpose(image)
+        image = image[:, ::-1]
+    if transform==6: # transpose + mirror y
+        image = np.transpose(image)
+        image = image[::-1, :]
+    if transform==7: # transpose + mirror y
+        image = np.transpose(image)
+        image = image[::-1, ::-1]
+    return image
+
+def apply_coords_transform(coords, transform, length=[1,1], pixels=[41, 41]):
+    transformed = coords.copy()
+    if transform==1: # transpose
+        transformed[:, 0] = coords[:, 1].copy()
+        transformed[:, 1] = coords[:, 0].copy()
+    if transform==2: # mirror x
+        # x, y?
+        transformed[:, 0] = mirror(transformed[:, 0], length=length[0], pixels=pixels[0])
+    if transform==3: # mirror y
+        transformed[:, 1] = mirror(transformed[:, 1], length=length[1], pixels=pixels[1])
+    if transform==4: # mirror x and y
+        transformed[:, 0] = mirror(transformed[:, 0], length=length[0], pixels=pixels[0])
+        transformed[:, 1] = mirror(transformed[:, 1], length=length[1], pixels=pixels[1])
+    if transform==5: # transpose + mirror x
+        transformed[:, 0] = coords[:, 1].copy()
+        transformed[:, 1] = coords[:, 0].copy()
+        transformed[:, 0] = mirror(transformed[:, 0], length=length[0], pixels=pixels[0])
+    if transform==6: # transpose + mirror y
+        transformed[:, 0] = coords[:, 1].copy()
+        transformed[:, 1] = coords[:, 0].copy()
+        transformed[:, 1] = mirror(transformed[:, 1], length=length[1], pixels=pixels[1])
+    if transform==7: # transpose + mirror y
+        transformed[:, 0] = coords[:, 1].copy()
+        transformed[:, 1] = coords[:, 0].copy()
+        transformed[:, 0] = mirror(transformed[:, 0], length=length[0], pixels=pixels[0])
+        transformed[:, 1] = mirror(transformed[:, 1], length=length[1], pixels=pixels[1])
+    return transformed
+
+def apply_slot_transform(slot_list, transform):
+    if transform==1: # transpose
+        slot_list = transpose(slot_list)
+    if transform==2: # mirror x
+        slot_list = mirror_gridx(slot_list)
+    if transform==3: # mirror y
+        slot_list = mirror_gridy(slot_list)
+    if transform==4: # mirror y
+        slot_list = mirror_gridx(slot_list)
+        slot_list = mirror_gridy(slot_list)
+    if transform==5: # transpose + mirror x
+        slot_list = transpose(slot_list)
+        slot_list = mirror_gridx(slot_list)
+    if transform==6: # transpose + mirror y
+        slot_list = transpose(slot_list)
+        slot_list = mirror_gridy(slot_list)
+    if transform==7: # transpose + mirror y
+        slot_list = transpose(slot_list)
+        slot_list = mirror_gridx(slot_list)
+        slot_list = mirror_gridy(slot_list)
+    return slot_list
+

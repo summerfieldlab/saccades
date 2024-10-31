@@ -53,6 +53,8 @@ def get_dataset(size, shapes_set, config, lums, solarize):
         transform = 'polar_'
     else:
         transform = 'gw6_'
+    if config.transform:
+        transform += '-rotated'
     policy = config.policy
     # fname = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_{solar}{n_glimpses}{size}.pkl'
     # fname_gw = f'toysets/toy_dataset_num{min_num}-{max_num}_nl-{noise_level}_diff{min_pass_count}-{max_pass_count}_{shapes}{samee}{challenge}_grid{config.grid}_lum{lums}_gw6_{solar}{n_glimpses}{size}.pkl'
@@ -277,8 +279,7 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
         ### XY LOCATION INPUT ###
         if train_on == 'both' or train_on == 'xy':
             if config.place_code and 'human'  not in shape_format:
-                coordinates = dataset['glimpse_coords_image'].values.astype(int) # pretty sure these are x (in [0]) then y (in [1])
-                import pdb;pdb.set_trace()
+                coordinates = dataset['glimpse_coords_image'].values.astype(int) #  these are x (in [0]) then y (in [1])
                 max_pixel_idx = max(image_width, image_height)
                 coordinates[coordinates>=max_pixel_idx] = max_pixel_idx - 1 # bound
                 # Sparse Tensor to Dense Tensor
