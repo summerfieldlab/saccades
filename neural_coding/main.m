@@ -1,14 +1,15 @@
+% This script runs all the neural coding analyses.  Calculating response
+% curves, tuning curves and spatial response fields for each unit in the
+% recurrent layer of our dual-stream RNN. The relevant activations can be
+% found on the associated OSF repository: https://osf.io/h6evt/
+
 clear all
 close all
 
-% cd('/Users/christophersummerfield/data/projects/jess/two_streams/activations_2024/');
-
-
 %% load data
-folder = 'activations_for_chris/';
-% model = 'dual-stream-nopasspenult';
+folder = 'activations/';
 model = 'dual-stream';
-checkpoints = {'convergence'};
+checkpoints = {'convergence'}; % load only activations from the end of training
 % checkpoints = {'init'};
 %checkpoints = {'init','50','75','convergence'}; % OLD - 4 checkpoints
 % stim_set = 'ignore-distractors_logpolar_new';
@@ -20,8 +21,8 @@ for k = 1:length(checkpoints)
     saccades{k}.prediction = saccades{k}.predicted_num;
     saccades{k}.numerosity =saccades{k}.numerosity + 1;
     saccades{k} = rmfield(saccades{k},'predicted_num');
-    if k~=5;
-    for i = 1:5000;
+    if k~=5
+    for i = 1:5000
         saccades{k}.predicted_num(i) = find(saccades{k}.prediction(i,:)==max(saccades{k}.prediction(i,:)));
     end
     else
@@ -29,15 +30,15 @@ for k = 1:length(checkpoints)
     end
 end
 
-%% confusion
+%% calculate confusion
 
 figure('color',[1 1 1],'position',[616 638 885 379]);
 for k = 1:length(saccades)
     
     conf_matrix = NaN(5,5);
     
-    for i = 1:5;
-        for j = 1:5;
+    for i = 1:5
+        for j = 1:5
             conf_matrix(i,j) =  sum(saccades{k}.numerosity==i & saccades{k}.predicted_num==j);
         end
     end
@@ -67,19 +68,17 @@ for k = 1:length(saccades)
     
 end
 
-%% warm up: plot some tuning curves
+%% plot some tuning curves
 close all;
 
-
-for k = 1:length(saccades);
-    
+for k = 1:length(saccades)
     layer = 'hidden';
     eval(['data = saccades{k}.act_',layer,';']);
     data_mean = squeeze(mean(data,2));
     
     num_mat = unique(saccades{k}.numerosity);
     
-    for n = 1:length(num_mat);
+    for n = 1:length(num_mat)
         
         indx = (find(saccades{k}.numerosity==num_mat(n) & saccades{k}.num_distractor==0));
         
@@ -103,13 +102,11 @@ for k = 1:length(saccades);
     getcolz
     rows = 6;
     cols = 8;
-    for i = 1:rows*cols;
+    for i = 1:rows*cols
         subplot(rows,cols,i);
         hold on;
-        for s = 1:12;
-            %  plot(tuning_1(i,:,k),'color',1.05-[s/10 s/10 s/10],'linewidth',3);
+        for s = 1:12
             plot(tuning_1{k}(i,:,s),'color',1-[s/12 s/12 s/12],'linewidth',3);
-            % plot(tuning_2(i,:,k),'color',1.05-[1 1 s/10],'linewidth',3);
             set(gca,'xtick',1:5,'yticklabel',{''});
             %ylim([-0.5 0.5]);
             set(gca,'FontSize',16);
@@ -128,15 +125,14 @@ figure('color',[1 1 1]);
 mat_colz = {'b','c','g',[1 0.64 0],'r'};
 
 for k = 1:length(saccades)
-    
-    for i = 1:size(tuning_1{k},1);
+    for i = 1:size(tuning_1{k},1)
         mtune = mean(tuning_1{k}(i,:,1:12),3);
         max_tune(i) = find(mtune==max(mtune));
         num_tune(i) = (max(mtune)-min(mtune))./(max(mtune)+min(mtune));
     end
     
-    for n = 1:length(num_mat);
-        
+    for n = 1:length(num_mat)
+       
         indx = find(max_tune==n);
         tune_plot(n,:) = squeeze(mean(mean(tuning_2{k}(indx,:,1:12),3)));
         tune_plot(n,:) = scaler(tune_plot(n,:)).*100;
@@ -168,7 +164,7 @@ end
 
 %% Compare linear vs log normal tuning
 % Fit Gaussian tuning curves in space of linear n
-ssq0 = 0
+ssq0 = 0;
 
 subplot(2,1,1)
 hold on
@@ -184,6 +180,7 @@ end
 hold off
 set(gca,'FontSize',32);
 ylabel([{'Normalised'}, {'response (%)'}])
+
 % Fit Gaussian tuning curves in space of log n
 ssq1 = 0;
 % legend({'1 neurons', 'Gaussian fit','2 neurons', 'Gaussian fit','3 neurons',...
@@ -202,12 +199,16 @@ for n = 1:length(num_mat)
 end
 hold off
 ylabel([{'Normalised'}, {'response (%)'}])
-set(gca,'FontSize',32);
+set(gca,'FontSize', 32);
+
+% Calculate F-ratio test according to https://sites.duke.edu/bossbackup/files/2013/02/FTestTutorial.pdf
 n_datapoints = 25;
-n_params = 5*3;
-df = n_datapoints-n_params
-f_ratio=(ssq0-ssq1)/(ssq1/df)
-p= 1-fcdf(f_ratio,1,df)
+n_params = 5*2;  % 5 gaussians each with two params
+df = n_datapoints-n_params % same df for both models
+f_ratio = ssq0/ssq1
+p = 1 - fcdf(f_ratio,df,df)
+% 
+
 %% Plot tuning as a function of numerical distance from preferred numerosity (all units pooled)
 
 diffmat = -4:4;
@@ -263,6 +264,7 @@ return
 %% spatial position
 
 fspace = linspace(0.05,0.95,21);
+% fspace = linspace(-0.05,1.05,21); % Quite a lot of random high mean activation at the very extremes so perhaps best to exclude
 k = 1;
 
 activations = NaN(length(fspace)-1,length(fspace)-1,1024);
@@ -286,47 +288,52 @@ end
 %% Plot sample of units
 figure('color',[1 1 1]);
 [nex, ngl, nunits] = size(activations)
-% units = [2, 7, 11, 14, 26, 29, ...
-%          30, 31, 32, 37, 38, 39,...
-%          40, 41, 42, 43, 45, 46, ...
-%          53, 54, 55, 56, 57, 58,...
-%          59, 60, 61, 62, 63, 64,...
-%          50, 65, 66, 67, 69, 70];
-units = randsample(nunits, 36, false)
-for n = 1:36;subplot(6,6,n);
+units = [2, 7, 11, 14, 26, 29, ...
+         30, 31, 32, 37, 38, 39,...
+         40, 41, 42, 43, 45, ...
+         55, 56, 57, 58,...
+         59, 61, 62, 63, 64,...
+         50, 65, 66, 67, 69, 70];
+% units = randsample(nunits, 36, false)
+% for n = 1:36;subplot(6,6,n);
+for n = 1:25;subplot(5,5,n);
     imagesc(activations(:,:,units(n)));
     set(gca,'clim',[0 1.25]);
     set(gca,'xticklabel',{''},'yticklabel',{''});
 end
-colormap jet;
+% colorbar()
+% colormap jet;
 
 
 %% fit Gaussian tuning model to spatial RFs
-
+% The set of centroids to test
 [x_vals,y_vals] = ndgrid(medi(fspace),medi(fspace));
 xy_vals = [x_vals(:) y_vals(:)];
 
-sigma_mat = exp(linspace(log(0.001),log(1),40));
+% The set of dispersions to test
+sigma_mat = exp(linspace(log(0.001),log(0.5),40));
 
-for n = 1:1024;
+% For each neuron, fit Gaussians at each candiate centroid with each
+% candidate dispersion
+for n = 1:1024
     disp(['neuron...',num2str(n)]);
     scale_act = scaler(activations(:,:,n));
     clear dev;
-    for xy = 1:size(xy_vals,1);
-        for s = 1:length(sigma_mat);
+    for xy = 1:size(xy_vals,1)
+        for s = 1:length(sigma_mat)
             fit = mvnpdf(xy_vals,xy_vals(xy,:),[sqrt(sigma_mat(s)) 0;0 sqrt(sigma_mat(s))]);
             fit = scaler(fit);
             dev(xy,s) = sum((fit-scale_act(:)).^2);
         end
     end
-    
+    % Save indices and params of best fit for each neuron
     ii = find4(dev==min(dev(:)));
     neuron_min(n) = min(dev(:));
     neuron_param(n,:) = ii;
     
 end
 
-%% Plot
+%% Plot Gaussian fit for neurons with best fit
 [~,sort_ii] = sort(neuron_min,'ascend');
 %sort_ii = 1:36;
 
@@ -349,22 +356,38 @@ end
 
 
 %% Assess relationship between eccentricty and width of spatial response fields
-% ecc = pdist2(xy_vals(neuron_param(sort_ii,1),:),[0.6 0.6]); # An earlier
-% version of these data were not normalised such that the centre of the
-% image was 0.5, but now this is true
+[~,sort_ii] = sort(neuron_min,'ascend');
 ecc = pdist2(xy_vals(neuron_param(sort_ii,1),:),[0.5 0.5]);
 sig = sigma_mat(neuron_param(sort_ii,2));
-
+% ecc = pdist2(xy_vals(neuron_param(sort_ii(1:512),1),:),[0.5 0.5]); % look
+% only at neurons with strongest gaussian fit
+% sig = sigma_mat(neuron_param(sort_ii(1:512),2)); 
+% ind  = ecc<0.6; % analyse only those with eccentricity less than 0.6
+% ecc = ecc(ind);
+% sig = sig(ind);
 figure;
-plot(ecc,sig,'ko');ylim([0 1]);
+% plot(ecc,sig,'ko');
+% h = histogram2(ecc(:),sig(:),20,'DisplayStyle','tile','ShowEmptyBins','on')
+Xedges = linspace(0, 0.62, 40);
+Yedges = sigma_mat;
+h = histogram2(ecc(:),sig(:),Xedges,Yedges,'DisplayStyle','tile','ShowEmptyBins','on')
+% h = histogram2(ecc(sort_ii(1:512)),sig(sort_ii(1:512))',Xedges,Yedges,'DisplayStyle','tile','ShowEmptyBins','on')
+set(gca, "YScale", "log")
+% ylim([0 1]);
 xlabel('RF eccentricity')
 ylabel('RF width');
+set(gca,'ColorScale','log')
+cb= colorbar();
+ylabel(cb,'Number of units','FontSize',24,'Rotation',270)
 [y,newecc] = fitxy(ecc,sig',1);
 hold on;
 plot(newecc,y,'r-', 'LineWidth',2);
-ylim([0, 0.4])
+% ylim([0, 0.4])
 set(gca,'FontSize',32);
+
 [r,p] = corrcoef(ecc,sig)
+% [r,p] = corrcoef(ecc(sort_ii(1:512)),sig(sort_ii(1:512) ))
+text(0.16,0.1,'r=0.23, p<0.001','Color','white','FontSize',20)
 
 % %% relationship between numerical tuning and spatial tuning
 % 
@@ -479,7 +502,7 @@ zlabel('Dimension 3')
 %     end
 % end
 
-%% Split trials into two halves, attempt to reconstruct on half from dim reduced version of the other
+%% Split trials into two halves, attempt to reconstruct one half from dim reduced version of the other
 % Split into two halves, 2500 observations each
 parpool(4)
 for rep=1:1000
