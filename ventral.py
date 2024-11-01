@@ -59,146 +59,21 @@ criterion_mse_noreduce = nn.MSELoss(reduction='none')
 criterion_bce = nn.BCEWithLogitsLoss()
 
 
-def train_ventral(config, cla, n_epochs):
-    """For Raytune."""
-    # net = Net(config["l1"], config["l2"])
-
-    device = "cpu"
-    if torch.cuda.is_available():
-        device = "cuda:0"
-        if torch.cuda.device_count() > 1:
-            net = nn.DataParallel(net)
-    net = get_model(config, device)
-    net.to(device)
-
-    optimizer = optim.SGD(net.parameters(), lr=config["lr"], momentum=0.9)
-
-    trainset, testset = load_data(cla)
-
-    test_abs = int(len(trainset) * 0.8)
-    train_subset, val_subset = random_split(
-        trainset, [test_abs, len(trainset) - test_abs])
-
-    trainloader = torch.utils.data.DataLoader(
-        train_subset,
-        batch_size=int(config["batch_size"]),
-        shuffle=True,
-        num_workers=0)
-    valloader = torch.utils.data.DataLoader(
-        val_subset,
-        batch_size=int(config["batch_size"]),
-        shuffle=True,
-        num_workers=0)
-
-    for epoch in range(n_epochs):  # loop over the dataset multiple times
-        running_loss_ce = 0.
-        running_loss_mse = 0.0
-        epoch_steps = 0
-        correct = 0
-        total = 0
-        for i, data in enumerate(trainloader, 0):
-            # get the inputs; data is a list of [inputs, labels]
-            inputs, labels = data
-            inputs, labels = inputs.to(device), labels.to(device)
-
-            # zero the parameter gradients
-            optimizer.zero_grad()
-
-            # forward + backward + optimize
-            outputs = net(inputs)
-            loss_mse = criterion_mse(outputs, labels)
-            loss_ce = criterion(outputs, labels)
-            loss = 100*loss_mse + loss_ce
-            loss.backward()
-            optimizer.step()
-
-            _, predicted = torch.max(outputs.data, 1)
-            argmax_labels = torch.argmax(labels, 1)
-            total += labels.size(0)
-            correct += (predicted == argmax_labels).sum().item()
-
-            # print statistics
-            running_loss_ce += loss_ce.item()
-            running_loss_mse += loss_mse.item()
-            epoch_steps += 1
-            if i % 2000 == 1999:  # print every 2000 mini-batches
-                tr_loss_ce = running_loss_ce / epoch_steps
-                tr_loss_mse = running_loss_mse / epoch_steps
-                print("[%d, %5d] CEloss: %.3f MSEloss*100: %.3f" % (epoch + 1, i + 1,
-                                                                tr_loss_ce,
-                                                                tr_loss_mse*100))
-                running_loss_ce = 0.0
-                running_loss_mse = 0.0
-                epoch_steps = 0
-        tr_accuracy = correct / total
-
-        # Validation loss
-        val_loss_mse = 0.0
-        val_loss_ce = 0.0
-        val_steps = 0
-        total = 0
-        correct = 0
-        for i, data in enumerate(valloader, 0):
-            with torch.no_grad():
-                inputs, labels = data
-                inputs, labels = inputs.to(device), labels.to(device)
-
-                outputs = net(inputs)
-                _, predicted = torch.max(outputs.data, 1)
-                argmax_labels = torch.argmax(labels, 1)
-                total += labels.size(0)
-                correct += (predicted == argmax_labels).sum().item()
-
-                loss_mse = criterion_mse(outputs, labels)
-                loss_ce = criterion(outputs, labels)
-                val_loss_mse += loss_mse.cpu().numpy()
-                val_loss_ce += loss_ce.cpu().numpy()
-                val_steps += 1
-        if np.isnan(val_loss_mse):
-            val_loss_mse = 100
-        tune.report(val_loss_ce=(val_loss_ce / val_steps),
-                    val_loss_mse=(val_loss_mse / val_steps),
-                    val_accuracy=correct / total,
-                    tr_loss_ce=tr_loss_ce,
-                    tr_loss_mse=tr_loss_mse,
-                    tr_accuracy=tr_accuracy)
-    print("Finished Training")
-
-
 def load_data(config, device):
     # Prepare datasets and torch dataloaders
     train_size = config.train_size
     test_size = config.test_size
     # lums = [0.1, 0.2, 0.4, 0.5, 0.6, 0.8, 0.9]
     lums = config.lums
-    trainframe = get_dataframe(train_size, config.shapestr, config, lums, solarize=True)
-    # trainset = get_dataset_pd(trainframe, config, device)
-    trainset = get_dataset_xr(trainframe, config, device)
-    testframe = get_dataframe(test_size, config.testshapestr[0], config, lums, solarize=True)
-    # testset = get_dataset_pd(testframe, config, device)
-    testset = get_dataset_xr(testframe, config, device)
+    trainframe = get_dataframe(train_size, config.shapestr, config, lums)
+    # trainset = get_dataset_pd(trainframe, config)
+    trainset = get_dataset_xr(trainframe, config)
+    testframe = get_dataframe(test_size, config.testshapestr[0], config, lums)
+    # testset = get_dataset_pd(testframe, config)
+    testset = get_dataset_xr(testframe, config)
 
     return trainset, testset
 
-def te_accuracy(net, cla, device="cpu"):
-    """For Raytune."""
-    trainset, testset = load_data(cla)
-
-    testloader = torch.utils.data.DataLoader(
-        testset, batch_size=4, shuffle=False, num_workers=0)
-
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for data in testloader:
-            images, labels = data
-            images, labels = images.to(device), labels.to(device)
-            outputs = net(images)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-    return correct / total
 
 def train_model(model, optimizer, scheduler, loaders, config, device):
     if 'distract' in config.challenge:
@@ -540,7 +415,7 @@ def plot_performance(tr_loss_mse, tr_acc, te_loss_mse, te_acc, base_name, ep):
     plt.savefig(fig_dir + base_name + '.png', dpi=300, bbox_inches='tight')
     plt.close()
 
-def get_dataframe(size, shapes_set, config, lums, solarize):
+def get_dataframe(size, shapes_set, config, lums):
     """ Load specified dataset
 
     Args:
@@ -615,7 +490,7 @@ def get_dataframe(size, shapes_set, config, lums, solarize):
 
     return data
 
-def get_dataset_pd(dataframe, config, device):
+def get_dataset_pd(dataframe, config):
     """_summary_
 
     Args:
@@ -704,7 +579,7 @@ def get_dataset_pd(dataframe, config, device):
     
     return dset
 
-def get_dataset_xr(dataframe, config, device):
+def get_dataset_xr(dataframe, config):
     """_summary_
 
     Args:
@@ -893,142 +768,6 @@ def get_config():
     print(config)
     return config
 
-
-def raymain(num_samples=10, max_num_epochs=10, gpus_per_trial=0.5):
-    """For Raytune."""
-    # Process input arguments
-    config = get_config()
-    # model_type = config.model_type
-    # target_type = config.target_type
-    # noise_level = config.noise_level
-    # train_size = config.train_size
-    # test_size = config.test_size
-    # n_iters = config.n_iters
-    # n_epochs = config.n_epochs
-    # min_pass = config.min_pass
-    # max_pass = config.max_pass
-    # pass_range = (min_pass, max_pass)
-    # min_num = config.min_num
-    # max_num = config.max_num
-    # num_range = (min_num, max_num)
-    # use_loss = config.use_loss
-    # drop = config.dropout
-
-    # # Prepare base file name for results files
-    # act = '-' + config.act if config.act is not None else ''
-    # alt_rnn = '2'
-    # detach = '-detach' if config.detach else ''
-    # model_desc = f'ventral_{model_type}{alt_rnn}{detach}{act}_hsize-{config.h_size}_{config.shape_input}'
-    # same = 'same' if config.same else ''
-    # if config.distract:
-    #     challenge = '_distract'
-    # elif config.distract_corner:
-    #     challenge = '_distract_corner'
-    # elif config.random:
-    #     challenge = '_random'
-    # else:
-    #     challenge = ''
-    # solar = 'solarized_' if config.solarize else ''
-    # shapes = ''.join([str(i) for i in config.shapestr])
-    # data_desc = f'num{min_num}-{max_num}_nl-{noise_level}_diff-{min_pass}-{max_pass}_grid{config.grid}_trainshapes-{shapes}{same}{challenge}_gw6_{solar}{train_size}'
-    # withshape = '+shape' if config.learn_shape else ''
-    # train_desc = f'loss-{use_loss}{withshape}_drop{drop}_count-{target_type}_{n_epochs}eps_rep{config.rep}'
-    # base_name = f'{model_desc}_{data_desc}_{train_desc}'
-    # if config.small_weights:
-    #     base_name += '_small'
-    # config.base_name = base_name
-
-    # # make sure all results directories exist
-    # model_dir = 'models/toy/letters/ventral'
-    # results_dir = 'results/toy/letters/ventral'
-    # fig_dir = 'figures/toy/letters/ventral'
-    # dir_list = [model_dir, results_dir, fig_dir]
-    # for directory in dir_list:
-    #     if not os.path.exists(directory):
-    #         os.makedirs(directory)
-
-    # # Prepare datasets and torch dataloaders
-    # try:
-    #     config.lum_sets = [[0.1, 0.5, 0.9], [0.2, 0.4, 0.6, 0.8]]
-    #     trainset = get_dataset(train_size, config.shapestr, config, [0.1, 0.5, 0.9], solarize=config.solarize)
-    #     testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
-    # except:
-    #     config.lum_sets = [[0.0, 0.5, 1.0], [0.1, 0.3, 0.7, 0.9]]
-    #     trainset = get_dataset(train_size, config.shapestr, config, [0.0, 0.5, 1.0], solarize=config.solarize)
-    #     testsets = [get_dataset(test_size, test_shapes, config, lums, solarize=config.solarize) for test_shapes, lums in product(config.testshapestr, config.lum_sets)]
-    # train_loader = get_loader(trainset, config.shape_input, model_type, target_type)
-    # test_loaders = [get_loader(testset, config.shape_input, model_type, target_type) for testset in testsets]
-    # loaders = [train_loader, test_loaders]
-    # if config.distract and target_type == 'all':
-    #     max_num += 2
-    #     config.max_num += 2
-
-    # # Prepare model and optimizer
-    # n_classes = max_num
-    # n_shapes = 25 # 20 or 25
-    # mod_args = {'h_size': config.h_size, 'act': config.act,
-    #             'small_weights': config.small_weights, 'outer':config.outer,
-    #             'detach': config.detach, 'format':config.shape_input,
-    #             'n_classes':n_classes, 'dropout': drop, 'grid': config.grid,
-    #             'n_shapes':n_shapes}
-    # model = get_model(model_type, **mod_args)
-    # opt = SGD(model.parameters(), lr=start_lr, momentum=mom, weight_decay=wd)
-    # # scheduler = StepLR(opt, step_size=n_epochs/10, gamma=0.7)
-    # scheduler = StepLR(opt, step_size=n_epochs/20, gamma=0.7)
-
-
-    # # Train model and save trained model
-    # model, results = train_model(model, opt, scheduler, loaders, config)
-    # print('Saving trained model and results files...')
-    # torch.save(model.state_dict(), f'{model_dir}/toy_model_{base_name}_ep-{n_epochs}.pt')
-
-    ray_config = {
-        "n_layers": tune.choice([0, 1, 2, 3]),
-        "layer_width": tune.sample_from(lambda _: 2 ** np.random.randint(5, 11)),
-        "lr": tune.loguniform(1e-4, 1e-1),
-        "batch_size": tune.choice([16, 32, 64, 128, 256])
-    }
-    # config = Namespace(**vars(config), **ray_config)
-    scheduler = ASHAScheduler(
-        metric="val_loss_mse",
-        mode="min",
-        max_t=max_num_epochs,
-        grace_period=5,
-        reduction_factor=2)
-    reporter = CLIReporter(
-        # parameter_columns=["l1", "l2", "lr", "batch_size"],
-        metric_columns=["tr_loss_ce", "tr_loss_mse", "val_loss_ce", "val_loss_mse", "tr_accuracy", "val_accuracy", "training_iteration"])
-    result = tune.run(
-        partial(train_ventral, cla=config, n_epochs=max_num_epochs),
-        resources_per_trial={"cpu": 2, "gpu": gpus_per_trial},
-        config=ray_config,
-        num_samples=num_samples,
-        scheduler=scheduler,
-        progress_reporter=reporter)
-
-    best_trial = result.get_best_trial("loss", "min", "last")
-    print("Best trial config: {}".format(best_trial.config))
-    print("Best trial final validation loss: {}".format(
-        best_trial.last_result["loss"]))
-    print("Best trial final validation accuracy: {}".format(
-        best_trial.last_result["accuracy"]))
-
-    # best_trained_model = Net(best_trial.config["l1"], best_trial.config["l2"])
-    # best_trained_model = get_model(best_trial.config)
-    # device = "cpu"
-    # if torch.cuda.is_available():
-    #     device = "cuda:0"
-    #     if gpus_per_trial > 1:
-    #         best_trained_model = nn.DataParallel(best_trained_model)
-    # best_trained_model.to(device)
-
-    # best_checkpoint_dir = best_trial.checkpoint.value
-    # model_state, optimizer_state = torch.load(os.path.join(
-    #     best_checkpoint_dir, "checkpoint"))
-    # best_trained_model.load_state_dict(model_state)
-
-    # te_acc = te_accuracy(best_trained_model, cla, device)
-    # print("Best trial test set accuracy: {}".format(te_acc))
 
 def main():
     config = get_config()

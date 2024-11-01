@@ -11,6 +11,10 @@ do
     wait $pid
 done
 
+# Train ventral stream for human task
+python3 ventral.py --model_type=cnn --policy=cheat+jitter --logpolar --sort --loss=mse --solarize --same --challenge=distract123 --shape_input=logpolar --min_num=3 --max_num=6 --train_shapes=ESUZFCKJ --test_shapes ESUZFCKJ --lums 0.3 0.6 0.9 --noise_level=0.74 --train_size=20000 --test_size=2000 --act=lrelu --dropout=0.4 --rep=10 --grid=6 --n_epochs=200 --opt=Adam --n_glimpses=15
+
+
 # pretrained ventral Ignore Distractors
 
 for i in $(seq 0 19);

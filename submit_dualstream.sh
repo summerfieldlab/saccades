@@ -15,6 +15,10 @@ do
     wait $pid
 done
 
+# Train ventral stream for ignore distractors task
+python3 ventral.py --model_type=cnn --policy=cheat+jitter --logpolar --sort --loss=mse --solarize --same --challenge=distract012 --shape_input=logpolar --min_num=1 --max_num=5 --train_shapes=BCDEFGHJ --test_shapes BCDEFGHJ --lums 0.1 0.4 0.7 0.3 0.6 0.9 --noise_level=0.74 --train_size=40000 --test_size=4000 --act=lrelu --dropout=0.4 --rep=0 --grid=6 --n_epochs=200 --opt=Adam
+
+
 # # * Ignore Distractors *
 for i in $(seq 0 19);
 do
