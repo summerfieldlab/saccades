@@ -3,6 +3,7 @@
 This repository is associated with the following publication: 
 
 Thompson, J.A., Sheahan, H., Dumbalska, T., Sandbrink, J.D., Piazza, M., and Summerfield, C., Zero-shot counting with a dual-stream neural network model. _Neuron_. 2024.
+https://www.sciencedirect.com/science/article/pii/S0896627324007293
 
 Relevant human and neural network data can be accessed on OSF: https://osf.io/h6evt/
 
@@ -53,7 +54,7 @@ done with `ventral.py`. This trains a feedforward network (with or without
 convolutions) to categorize individual glimpses. This saves a pretrained ventral 
 stream module can then be loaded into a recurrent dual-stream model.
 
-All code written by Jessica Thompson unless otherwise indicated. An earlier 
+All modeling code written by Jessica Thompson unless otherwise indicated. An earlier 
 version of this project was started by Hannah Sheahan. This code does not build 
 directly on hers, but I certainly took inspiration on how to structure the code.
 
