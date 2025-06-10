@@ -34,7 +34,7 @@ class DatasetGenerator:
         self.n_glimpses = conf.n_glimpses
         self.conf = conf
         self.eps = 1e-7
-        self.char_width = 5#4
+        self.char_width = 5 if conf.transform else 4
         self.char_height = 5
         self.border = 6
         self.shape_holder = np.zeros((self.char_height, self.char_width))
@@ -55,8 +55,6 @@ class DatasetGenerator:
         if conf.transform:
             self.pixel_height = ((self.char_height + 1) * self.ncols) - 1 # Need to make images symmetrical for the transformations to work properly
             self.pixel_width = ((self.char_width + 1) * self.ncols) - 1
-            self.image_height = self.pixel_height + self.border
-            self.image_width = self.pixel_width + self.border
             self.pixel_X = [col*(self.char_width + 1) for col in range(self.ncols)]   #[1, 6, 11] # col *5 + 1
             self.pixel_Y = [row*(self.char_height + 1) for row in range(self.ncols)]
         else:
@@ -64,6 +62,8 @@ class DatasetGenerator:
             self.pixel_width = (self.char_width + 2) * self.ncols
             self.pixel_X = [col*(self.char_width + 2) + 1 for col in range(self.ncols)]   #[1, 6, 11] # col *5 + 1
             self.pixel_Y = [row*(self.char_height + 2) + 1 for row in range(self.ncols)]
+        self.image_height = self.pixel_height + self.border
+        self.image_width = self.pixel_width + self.border
         self.pixel_topleft = [(x, y) for (x, y) in product(self.pixel_X, self.pixel_Y)]
         self.possible_centroids = [(x, y) for (x, y) in product(self.grid, self.grid)]
         self.centroid_array = np.array(self.possible_centroids)
