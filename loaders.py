@@ -102,8 +102,9 @@ def get_loader(dataset, config, batch_size=None, gaze=None):
     convolutional = True if config.model_type in ['cnn', 'bigcnn'] else False
     misalign = config.misalign
     nex = len(dataset.image)
-    image_width = dataset.image_width
-    image_height = dataset.image_height
+    image_height, image_width= dataset['noised_image'].values[0].shape
+    # image_width = dataset.image_width
+    # image_height = dataset.image_height
     half_idx = list(range(nex))  # for mixed datasets with half free half fixed
     random.shuffle(half_idx)
     ### NUMBER LABEL ###
